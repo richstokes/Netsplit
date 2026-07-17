@@ -66,6 +66,7 @@ final class IRCAppState: ObservableObject {
     private var channelListCompletionDates: [UUID: Date] = [:]
     private var reconnectAttempts: [UUID: Int] = [:]
     private var scheduledReconnects: [UUID: UUID] = [:]
+    private var registrationNicknameSuffixes: [UUID: Set<Int>] = [:]
     private var caseMappings: [UUID: IRCCaseMapping] = [:]
     private var sessionIDs: [UUID: UUID] = [:]
     private let channelListCacheLifetime: TimeInterval = 120
@@ -290,10 +291,11 @@ final class IRCAppState: ObservableObject {
         if !isAutomaticRetry { cancelScheduledReconnect(for: profile.id, resetAttempts: true) }
         caseMappings[profile.id] = .rfc1459
         sessionIDs[profile.id] = UUID()
-        resetChannelSession(for: profile.id)
+        prepareChannelsForDisconnectedSession(for: profile.id)
         resetChannelListingRequest(for: profile.id)
         terminalServerErrors.removeValue(forKey: profile.id)
         registeredServerIDs.remove(profile.id)
+        registrationNicknameSuffixes.removeValue(forKey: profile.id)
         activeNicknames[profile.id] = configuredNickname(for: profile)
         let transport = IRCConnection()
         connections[profile.id] = transport
@@ -303,14 +305,16 @@ final class IRCAppState: ObservableObject {
             self?.handle(event, from: profile, transport: transport)
         }
         appendSystem("Connecting to \(profile.hostname)\(profile.useTLS ? " securely" : "")…", for: .server(profile.id))
-        if selectConversation { selection = .server(profile.id) }
+        if selectConversation, selection.flatMap({ self.profile(for: $0)?.id }) != profile.id {
+            selection = .server(profile.id)
+        }
         transport.connect(profile: profile, nickname: nickname(for: profile), realName: resolvedRealName(), serverPassword: serverPassword(for: profile), saslUsername: profile.saslUsername, saslPassword: saslPassword(for: profile))
     }
 
     func disconnect(_ profile: ServerProfile, reason: String? = nil) {
         cancelScheduledReconnect(for: profile.id, resetAttempts: true)
         resetChannelListingRequest(for: profile.id)
-        resetChannelSession(for: profile.id)
+        prepareChannelsForDisconnectedSession(for: profile.id)
         let transport = connections[profile.id]
         connections.removeValue(forKey: profile.id)
         sessionIDs.removeValue(forKey: profile.id)
@@ -318,9 +322,7 @@ final class IRCAppState: ObservableObject {
         registeredServerIDs.remove(profile.id)
         connectionStatuses.removeValue(forKey: profile.id)
         terminalServerErrors.removeValue(forKey: profile.id)
-        if let selection, self.profile(for: selection)?.id == profile.id {
-            self.selection = .connectionCenter
-        }
+        registrationNicknameSuffixes.removeValue(forKey: profile.id)
         transport?.quit(reason: reason ?? resolvedQuitMessage())
     }
 
@@ -375,6 +377,7 @@ final class IRCAppState: ObservableObject {
     func delete(_ profile: ServerProfile) {
         guard !profile.isBuiltIn else { return }
         disconnect(profile)
+        removeConversations(for: profile.id)
         KeychainStore.remove(account: credentialAccount(profile: profile, kind: "server-password"))
         KeychainStore.remove(account: credentialAccount(profile: profile, kind: "sasl-password"))
         profiles.removeAll { $0.id == profile.id }
@@ -483,15 +486,16 @@ final class IRCAppState: ObservableObject {
         join(listing, on: profile, selectConversation: true, destination: selection ?? .server(profile.id))
     }
 
-    private func joinFavoriteChannels(for profile: ServerProfile) {
+    private func joinChannelsAfterRegistration(for profile: ServerProfile) {
         guard let sessionID = sessionIDs[profile.id] else { return }
         var seenChannelNames = Set<String>()
-        let favoriteChannelNames = (profile.favoriteChannels ?? []).filter { channelName in
+        let retainedChannelNames = channels(for: profile).map(\.name)
+        let channelNames = (retainedChannelNames + (profile.favoriteChannels ?? [])).filter { channelName in
             let trimmed = channelName.trimmingCharacters(in: .whitespacesAndNewlines)
             return !trimmed.isEmpty && seenChannelNames.insert(normalizedIdentifier(trimmed, serverID: profile.id)).inserted
         }
 
-        for (index, channelName) in favoriteChannelNames.enumerated() {
+        for (index, channelName) in channelNames.enumerated() {
             let delay = 0.25 + (Double(index) * favoriteJoinInterval)
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self,
@@ -499,9 +503,33 @@ final class IRCAppState: ObservableObject {
                       self.registeredServerIDs.contains(profile.id),
                       self.connections[profile.id] != nil,
                       let activeProfile = self.profiles.first(where: { $0.id == profile.id }) else { return }
-                self.join(ChannelListing(name: channelName, userCount: 0, topic: ""), on: activeProfile, selectConversation: false, destination: .server(profile.id))
+                if let retainedChannel = self.existingChannel(named: channelName, serverID: profile.id) {
+                    self.rejoin(retainedChannel, on: activeProfile)
+                } else {
+                    self.join(ChannelListing(name: channelName, userCount: 0, topic: ""), on: activeProfile, selectConversation: false, destination: .server(profile.id))
+                }
             }
         }
+    }
+
+    private func rejoin(_ channel: Conversation, on profile: ServerProfile) {
+        let key = joinKey(serverID: profile.id, channel: channel.name)
+        guard pendingJoins[key] == nil else { return }
+        channelMembers[channel.id] = [ChannelMember(nickname: nickname(for: profile), prefix: nil)]
+        let statusMessage = IRCMessage(sender: "System", text: "Rejoining \(channel.name)…", isSystem: true)
+        conversations[channel.id, default: []].append(statusMessage)
+        pendingJoins[key] = PendingJoin(
+            serverID: profile.id,
+            channel: channel.name,
+            channelID: channel.id,
+            destination: .channel(channel.id),
+            statusMessageID: statusMessage.id,
+            topic: "",
+            preservesConversationOnFailure: true
+        )
+        connections[profile.id]?.send(command: "JOIN \(channel.name)")
+        messageRevision += 1
+        memberRevision += 1
     }
 
     private func join(_ listing: ChannelListing, on profile: ServerProfile, selectConversation: Bool, destination: SidebarItem) {
@@ -875,12 +903,12 @@ final class IRCAppState: ObservableObject {
             } else {
                 if case .offline = status {
                     registeredServerIDs.remove(profile.id)
-                    resetChannelSession(for: profile.id)
+                    prepareChannelsForDisconnectedSession(for: profile.id)
                     resetChannelListingRequest(for: profile.id)
                 }
                 if case .failed = status {
                     registeredServerIDs.remove(profile.id)
-                    resetChannelSession(for: profile.id)
+                    prepareChannelsForDisconnectedSession(for: profile.id)
                     resetChannelListingRequest(for: profile.id)
                 }
                 connectionStatuses[profile.id] = status
@@ -908,10 +936,11 @@ final class IRCAppState: ObservableObject {
                 activeNicknames[profile.id] = registeredNickname
             }
             registeredServerIDs.insert(profile.id)
+            registrationNicknameSuffixes.removeValue(forKey: profile.id)
             connectionStatuses[profile.id] = .online
             cancelScheduledReconnect(for: profile.id, resetAttempts: true)
             appendSystem(wire.trailing ?? "Connected.", for: .server(profile.id))
-            joinFavoriteChannels(for: profile)
+            joinChannelsAfterRegistration(for: profile)
         case "005":
             updateCaseMapping(from: wire, serverID: profile.id)
         case "NOTICE":
@@ -1078,7 +1107,7 @@ final class IRCAppState: ObservableObject {
             terminalServerErrors[profile.id] = error
             connectionStatuses[profile.id] = .failed(error)
             registeredServerIDs.remove(profile.id)
-            resetChannelSession(for: profile.id)
+            prepareChannelsForDisconnectedSession(for: profile.id)
             resetChannelListingRequest(for: profile.id)
             scheduleReconnect(for: profile)
         case "322":
@@ -1110,10 +1139,15 @@ final class IRCAppState: ObservableObject {
             handleModerationError(wire, serverID: profile.id)
         case "437":
             if !handleJoinError(wire, serverID: profile.id) {
+                if retryRegistrationWithFallbackNickname(after: wire, profile: profile) { return }
                 let destination = pendingNickDestinations.removeValue(forKey: profile.id) ?? .server(profile.id)
                 appendSystem("Nickname change failed: \(wire.trailing ?? "The server rejected that nickname.")", for: destination)
             }
-        case "431", "432", "433", "436":
+        case "433", "436":
+            if retryRegistrationWithFallbackNickname(after: wire, profile: profile) { return }
+            let destination = pendingNickDestinations.removeValue(forKey: profile.id) ?? .server(profile.id)
+            appendSystem("Nickname change failed: \(wire.trailing ?? "The server rejected that nickname.")", for: destination)
+        case "431", "432":
             let destination = pendingNickDestinations.removeValue(forKey: profile.id) ?? .server(profile.id)
             appendSystem("Nickname change failed: \(wire.trailing ?? "The server rejected that nickname.")", for: destination)
         case "421", "461":
@@ -1135,12 +1169,35 @@ final class IRCAppState: ObservableObject {
 
         pendingJoins.removeValue(forKey: key)
         if let channel = channels.first(where: { $0.id == pendingJoin.channelID }) {
-            removeChannelConversation(channel)
+            if pendingJoin.preservesConversationOnFailure {
+                conversations[channel.id]?.removeAll { $0.id == pendingJoin.statusMessageID }
+                appendChannelEvent("Could not rejoin \(pendingJoin.channel): \(wire.trailing ?? "The server rejected the join request.")", channelID: channel.id)
+                return true
+            } else {
+                removeChannelConversation(channel)
+            }
         }
         let destination: SidebarItem = pendingJoin.destination == .channel(pendingJoin.channelID)
             ? .server(serverID)
             : pendingJoin.destination
         appendSystem("Could not join \(pendingJoin.channel): \(wire.trailing ?? "The server rejected the join request.")", for: destination)
+        return true
+    }
+
+    private func retryRegistrationWithFallbackNickname(after wire: IRCWireMessage, profile: ServerProfile) -> Bool {
+        guard !registeredServerIDs.contains(profile.id),
+              pendingNickDestinations[profile.id] == nil,
+              connections[profile.id] != nil else { return false }
+
+        let attemptedSuffixes = registrationNicknameSuffixes[profile.id, default: []]
+        let availableSuffixes = Array(0...99).filter { !attemptedSuffixes.contains($0) }
+        guard let suffix = availableSuffixes.randomElement() else { return false }
+
+        registrationNicknameSuffixes[profile.id, default: []].insert(suffix)
+        let fallbackNickname = configuredNickname(for: profile) + String(format: "%02d", suffix)
+        activeNicknames[profile.id] = fallbackNickname
+        appendSystem("\(wire.trailing ?? "Nickname is unavailable.") Retrying as \(fallbackNickname)…", for: .server(profile.id))
+        connections[profile.id]?.send(command: "NICK \(fallbackNickname)")
         return true
     }
 
@@ -1454,20 +1511,34 @@ final class IRCAppState: ObservableObject {
         memberRevision += 1
     }
 
-    private func resetChannelSession(for serverID: UUID) {
+    private func prepareChannelsForDisconnectedSession(for serverID: UUID) {
         resetPendingRequests(for: serverID)
-        let staleChannels = channels.filter { $0.serverID == serverID }
-        guard !staleChannels.isEmpty || pendingJoins.values.contains(where: { $0.serverID == serverID }) else { return }
-        let staleChannelIDs = Set(staleChannels.map(\.id))
-        channels.removeAll { $0.serverID == serverID }
-        for channelID in staleChannelIDs {
-            conversations.removeValue(forKey: channelID)
-            channelMembers.removeValue(forKey: channelID)
-            pendingChannelMembers.removeValue(forKey: channelID)
+        let retainedChannels = channels.filter { $0.serverID == serverID }
+        guard !retainedChannels.isEmpty || pendingJoins.values.contains(where: { $0.serverID == serverID }) else { return }
+        for channel in retainedChannels {
+            channelMembers[channel.id] = []
+            pendingChannelMembers.removeValue(forKey: channel.id)
         }
         pendingJoins = pendingJoins.filter { $0.value.serverID != serverID }
-        if case .channel(let selectedChannelID) = selection, staleChannelIDs.contains(selectedChannelID) {
-            selection = .server(serverID)
+        memberRevision += 1
+    }
+
+    private func removeConversations(for serverID: UUID) {
+        let wasShowingRemovedServer = selection.flatMap { profile(for: $0)?.id } == serverID
+        let removedChannels = channels.filter { $0.serverID == serverID }
+        let removedDirectMessages = directMessages.filter { $0.serverID == serverID }
+        let removedChannelIDs = Set(removedChannels.map(\.id))
+        let removedConversationIDs = removedChannelIDs.union(removedDirectMessages.map(\.id))
+        channels.removeAll { $0.serverID == serverID }
+        directMessages.removeAll { $0.serverID == serverID }
+        for conversationID in removedConversationIDs {
+            conversations.removeValue(forKey: conversationID)
+            channelMembers.removeValue(forKey: conversationID)
+            pendingChannelMembers.removeValue(forKey: conversationID)
+        }
+        pendingJoins = pendingJoins.filter { $0.value.serverID != serverID }
+        if wasShowingRemovedServer {
+            selection = .connectionCenter
         }
         messageRevision += 1
         memberRevision += 1
@@ -2013,6 +2084,7 @@ private struct PendingJoin {
     var destination: SidebarItem
     var statusMessageID: UUID
     var topic: String
+    var preservesConversationOnFailure = false
 }
 
 private struct PendingInvite {
