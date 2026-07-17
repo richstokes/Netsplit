@@ -516,13 +516,15 @@ final class IRCAppState: ObservableObject {
         let channel = Conversation(name: listing.name, serverID: profile.id)
         channels.append(channel)
         channelMembers[channel.id] = [ChannelMember(nickname: nickname(for: profile), prefix: nil)]
-        let topic = listing.topic.isEmpty ? "" : " \(listing.topic)"
-        conversations[channel.id] = [IRCMessage(sender: "System", text: "Joining \(listing.name)…\(topic)", isSystem: true)]
+        let joiningMessage = IRCMessage(sender: "System", text: "Joining \(listing.name)…", isSystem: true)
+        conversations[channel.id] = [joiningMessage]
         pendingJoins[joinKey(serverID: profile.id, channel: listing.name)] = PendingJoin(
             serverID: profile.id,
             channel: listing.name,
             channelID: channel.id,
-            destination: destination
+            destination: destination,
+            statusMessageID: joiningMessage.id,
+            topic: listing.topic
         )
         connections[profile.id]?.send(command: "JOIN \(listing.name)")
         if selectConversation { selection = .channel(channel.id) }
@@ -954,8 +956,13 @@ final class IRCAppState: ObservableObject {
                 let channel = channel(named: channelName, serverID: profile.id)
                 addMember(ChannelMember(nickname: sender, prefix: nil), to: channel.id)
                 if identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
-                    pendingJoins.removeValue(forKey: joinKey(serverID: profile.id, channel: channelName))
-                    appendChannelEvent("Joined \(channelName).", channelID: channel.id)
+                    let pendingJoin = pendingJoins.removeValue(forKey: joinKey(serverID: profile.id, channel: channelName))
+                    if let pendingJoin {
+                        conversations[channel.id]?.removeAll { $0.id == pendingJoin.statusMessageID }
+                    }
+                    let topic = pendingJoin?.topic.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let topicSuffix = topic.isEmpty ? "" : " Topic: \(topic)"
+                    appendChannelEvent("Joined \(channelName).\(topicSuffix)", channelID: channel.id)
                 } else {
                     appendChannelEvent("\(sender) joined \(channelName).", channelID: channel.id)
                 }
@@ -2004,6 +2011,8 @@ private struct PendingJoin {
     var channel: String
     var channelID: UUID
     var destination: SidebarItem
+    var statusMessageID: UUID
+    var topic: String
 }
 
 private struct PendingInvite {
