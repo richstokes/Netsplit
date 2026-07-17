@@ -242,6 +242,11 @@ final class IRCAppState: ObservableObject {
         messageRevision += 1
     }
 
+    func muteAndClose(_ directMessage: Conversation) {
+        mute(directMessage.name, from: .directMessage(directMessage.id))
+        close(directMessage)
+    }
+
     func connectSelectedProfile() {
         guard let profile = selectedProfile, connections[profile.id] == nil else { return }
         connect(profile)

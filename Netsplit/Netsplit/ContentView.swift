@@ -103,6 +103,10 @@ private struct SidebarView: View {
                             .font(message.hasUnread ? .body.weight(.semibold) : .body)
                             .tag(SidebarItem.directMessage(message.id))
                             .contextMenu {
+                                Button("Mute and Close", systemImage: "speaker.slash") {
+                                    state.muteAndClose(message)
+                                }
+                                Divider()
                                 Button("Close Conversation", systemImage: "xmark") {
                                     state.close(message)
                                 }
