@@ -8,8 +8,10 @@ import Network
 
 enum IRCTransportEvent {
     case status(ConnectionStatus)
+    case terminalFailure(String)
     case received(IRCWireMessage)
     case notice(String)
+    case sshHostKeyLearned(String)
 }
 
 struct IRCWireMessage {
@@ -90,6 +92,7 @@ final class IRCConnection {
     private static let heartbeatInterval: TimeInterval = 30
     private static let heartbeatTimeout: TimeInterval = 15
     private var connection: NWConnection?
+    private var sshTunnel: SSHTunnelConnection?
     private var receiveBuffer = Data()
     private var heartbeatGeneration: UUID?
     private var pendingHeartbeatToken: String?
@@ -103,7 +106,7 @@ final class IRCConnection {
     private var isWaitingForSASLResponse = false
     var eventHandler: (@MainActor (IRCTransportEvent) -> Void)?
 
-    func connect(profile: ServerProfile, nickname: String, realName: String, serverPassword: String, saslUsername: String?, saslPassword: String) {
+    func connect(profile: ServerProfile, nickname: String, realName: String, serverPassword: String, saslUsername: String?, saslPassword: String, sshPassword: String, sshPrivateKey: String) {
         disconnect()
         self.nickname = nickname
         advertisedCapabilities.removeAll()
@@ -117,6 +120,66 @@ final class IRCConnection {
         } else {
             self.saslCredentials = nil
         }
+
+        if profile.useSSHTunnel == true {
+            guard let sshHostname = profile.sshHostname?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sshHostname.isEmpty,
+                  let sshUsername = profile.sshUsername?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sshUsername.isEmpty else {
+                eventHandler?(.terminalFailure("The SSH hostname and username are required."))
+                return
+            }
+            let tunnel = SSHTunnelConnection()
+            sshTunnel = tunnel
+            eventHandler?(.status(.connecting))
+            tunnel.connect(
+                configuration: SSHTunnelConfiguration(
+                    sshHostname: sshHostname,
+                    sshPort: Int(profile.sshPort ?? 22),
+                    sshUsername: sshUsername,
+                    sshPassword: sshPassword,
+                    sshPrivateKey: sshPrivateKey,
+                    trustedHostKey: profile.sshTrustedHostKey,
+                    targetHostname: profile.hostname,
+                    targetPort: Int(profile.port),
+                    useTLS: profile.useTLS
+                ),
+                onReady: { [weak self, weak tunnel] in
+                    guard let self, let tunnel, self.sshTunnel === tunnel else { return }
+                    self.hasReachedReadyState = true
+                    self.eventHandler?(.status(.online))
+                    self.register(nickname: nickname, realName: realName)
+                    self.startHeartbeat()
+                },
+                onData: { [weak self, weak tunnel] data in
+                    guard let self, let tunnel, self.sshTunnel === tunnel else { return }
+                    _ = self.process(data)
+                },
+                onClose: { [weak self, weak tunnel] error in
+                    guard let self, let tunnel, self.sshTunnel === tunnel else { return }
+                    // The tunnel wrapper begins closing both the forwarded
+                    // channel and its parent SSH session before this callback.
+                    self.sshTunnel = nil
+                    self.stopHeartbeat()
+                    if let error {
+                        let preventsReconnect = (error as? SSHTunnelError)?.preventsAutomaticReconnect == true
+                        self.reportFailure(
+                            "SSH tunnel failed: \(error.localizedDescription)",
+                            cancelling: false,
+                            automaticallyReconnect: !preventsReconnect
+                        )
+                    } else if !self.hasReportedFailure {
+                        self.eventHandler?(.status(.offline))
+                    }
+                },
+                onHostKeyLearned: { [weak self, weak tunnel] key in
+                    guard let self, let tunnel, self.sshTunnel === tunnel else { return }
+                    self.eventHandler?(.sshHostKeyLearned(key))
+                }
+            )
+            return
+        }
+
         let tcp = NWProtocolTCP.Options()
         tcp.enableKeepalive = true
         tcp.keepaliveIdle = 30
@@ -174,6 +237,8 @@ final class IRCConnection {
         stopHeartbeat()
         connection?.cancel()
         connection = nil
+        sshTunnel?.close()
+        sshTunnel = nil
         receiveBuffer.removeAll()
     }
 
@@ -181,6 +246,24 @@ final class IRCConnection {
     /// accepted the line. This gives the server a chance to remove the client
     /// cleanly instead of treating a user-initiated disconnect as a dropped link.
     func quit(reason: String, completion: @MainActor @escaping () -> Void = {}) {
+        if let sshTunnel {
+            let safeReason = reason
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: "\n", with: "")
+            let boundedCommand = Self.prefix("QUIT :\(safeReason)", fittingUTF8ByteCount: Self.maximumOutboundLineBytes)
+            sshTunnel.send(Data("\(boundedCommand)\r\n".utf8)) { [weak self, weak sshTunnel] _, _ in
+                guard let self, self.sshTunnel === sshTunnel else {
+                    completion()
+                    return
+                }
+                sshTunnel?.close()
+                self.stopHeartbeat()
+                self.sshTunnel = nil
+                self.receiveBuffer.removeAll()
+                completion()
+            }
+            return
+        }
         guard let connection else {
             completion()
             return
@@ -207,7 +290,7 @@ final class IRCConnection {
     }
 
     func send(command: String, completion: (@MainActor (Bool) -> Void)? = nil) {
-        guard let connection else {
+        guard connection != nil || sshTunnel != nil else {
             completion?(false)
             return
         }
@@ -219,6 +302,25 @@ final class IRCConnection {
             eventHandler?(.notice("An outgoing IRC command exceeded the server line limit and was truncated."))
         }
         let line = boundedCommand + "\r\n"
+        if let sshTunnel {
+            sshTunnel.send(Data(line.utf8)) { [weak self, weak sshTunnel] sent, error in
+                guard let self, self.sshTunnel === sshTunnel else {
+                    completion?(false)
+                    return
+                }
+                if let error {
+                    self.reportFailure("Send failed: \(error.localizedDescription)")
+                    completion?(false)
+                } else {
+                    completion?(sent)
+                }
+            }
+            return
+        }
+        guard let connection else {
+            completion?(false)
+            return
+        }
         connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] error in
             Task { @MainActor [weak self, weak connection] in
                 guard let self, let connection, self.connection === connection else {
@@ -317,7 +419,7 @@ final class IRCConnection {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.heartbeatInterval) { [weak self] in
             guard let self,
                   self.heartbeatGeneration == generation,
-                  self.connection != nil,
+                  self.connection != nil || self.sshTunnel != nil,
                   !self.hasReportedFailure else { return }
 
             let token = "netsplit-\(UUID().uuidString)"
@@ -349,12 +451,24 @@ final class IRCConnection {
         pendingHeartbeatToken = nil
     }
 
-    private func reportFailure(_ message: String, cancelling: Bool = true) {
+    private func reportFailure(
+        _ message: String,
+        cancelling: Bool = true,
+        automaticallyReconnect: Bool = true
+    ) {
         guard !hasReportedFailure else { return }
         hasReportedFailure = true
         stopHeartbeat()
-        eventHandler?(.status(.failed(message)))
-        if cancelling { connection?.cancel() }
+        if automaticallyReconnect {
+            eventHandler?(.status(.failed(message)))
+        } else {
+            eventHandler?(.terminalFailure(message))
+        }
+        if cancelling {
+            connection?.cancel()
+            sshTunnel?.close()
+            sshTunnel = nil
+        }
     }
 
     private static func prefix(_ value: String, fittingUTF8ByteCount limit: Int) -> String {

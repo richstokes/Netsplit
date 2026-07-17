@@ -3,6 +3,7 @@
 //  Netsplit
 //
 
+import AppKit
 import SwiftUI
 
 struct ServerProfileEditor: View {
@@ -19,6 +20,15 @@ struct ServerProfileEditor: View {
     @State private var useSASL: Bool
     @State private var saslUsername: String
     @State private var saslPassword: String
+    @State private var useSSHTunnel: Bool
+    @State private var sshHostname: String
+    @State private var sshPort: String
+    @State private var sshUsername: String
+    @State private var sshPassword: String
+    @State private var sshPrivateKey: String
+    @State private var sshKeyFilename: String?
+    @State private var sshKeyError: String?
+    @State private var resetSSHHostKey = false
 
     init(state: IRCAppState, profileToEdit: ServerProfile? = nil) {
         self.state = state
@@ -33,37 +43,53 @@ struct ServerProfileEditor: View {
         _useSASL = State(initialValue: profileToEdit?.useSASL ?? false)
         _saslUsername = State(initialValue: profileToEdit?.saslUsername ?? "")
         _saslPassword = State(initialValue: profileToEdit.map { state.saslPassword(for: $0) } ?? "")
+        _useSSHTunnel = State(initialValue: profileToEdit?.useSSHTunnel ?? false)
+        _sshHostname = State(initialValue: profileToEdit?.sshHostname ?? "")
+        _sshPort = State(initialValue: String(profileToEdit?.sshPort ?? 22))
+        _sshUsername = State(initialValue: profileToEdit?.sshUsername ?? "")
+        _sshPassword = State(initialValue: profileToEdit.map { state.sshPassword(for: $0) } ?? "")
+        _sshPrivateKey = State(initialValue: profileToEdit.map { state.sshPrivateKey(for: $0) } ?? "")
+        _sshKeyFilename = State(initialValue: profileToEdit?.sshKeyFilename)
     }
 
     private var isEditing: Bool { profileToEdit != nil }
+    private var hasSSHAuthentication: Bool {
+        !sshPassword.isEmpty || !sshPrivateKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var canSave: Bool {
+        guard !hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard useSSHTunnel else { return true }
+        return !sshHostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !sshUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && hasSSHAuthentication
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text(isEditing ? "Edit Server Profile" : "Add a Server").font(.title2.weight(.semibold))
-            Text(isEditing ? "Profile changes apply the next time you connect." : "Create a connection profile for any IRC network.")
-                .foregroundStyle(.secondary)
-            Form {
-                TextField("Name", text: $name, prompt: Text("My IRC Network"))
-                TextField("Server address", text: $hostname, prompt: Text("irc.example.org"))
-                TextField("Port", text: $port)
-                Toggle("Use encrypted connection (TLS)", isOn: $useTLS)
-                Toggle("Connect automatically at launch", isOn: $autoConnect)
-                Divider()
-                TextField("Nickname for this server", text: $nicknameOverride, prompt: Text("Use global nickname"))
-                Text("Leave blank to use the nickname in Settings. This is useful when different networks require different identities.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Divider()
-                SecureField("Server password (optional)", text: $serverPassword)
-                Toggle("Authenticate with SASL", isOn: $useSASL)
-                if useSASL {
-                    TextField("SASL username", text: $saslUsername, prompt: Text("Use server nickname"))
-                    SecureField("SASL password", text: $saslPassword)
-                }
-                Text("Passwords are stored in your macOS Keychain. SASL PLAIN is requested only when the server advertises SASL.")
-                    .font(.caption)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(isEditing ? "Edit Server Profile" : "Add a Server")
+                    .font(.title2.weight(.semibold))
+                Text(isEditing ? "Profile changes apply the next time you connect." : "Create a connection profile for any IRC network.")
                     .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 22)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 18) {
+                    connectionSection
+                    identitySection
+                    authenticationSection
+                    sshSection
+                }
+                .padding(24)
+            }
+
+            Divider()
+
             HStack {
                 if let profileToEdit, profileToEdit.isBuiltIn, profileToEdit.isPresetModified == true {
                     Button("Restore Default") {
@@ -73,22 +99,280 @@ struct ServerProfileEditor: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button(isEditing ? "Save Changes" : "Add Server") {
-                    let cleanHost = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if let profileToEdit {
-                        state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: UInt16(port) ?? (useTLS ? 6697 : 6667), useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword)
-                    } else {
-                        state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: UInt16(port) ?? (useTLS ? 6697 : 6667), useTLS: useTLS, autoConnect: autoConnect, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword)
-                    }
-                    dismiss()
-                }
+                Button(isEditing ? "Save Changes" : "Add Server", action: saveProfile)
                 .buttonStyle(.borderedProminent)
-                .disabled(hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!canSave)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+        }
+        .frame(width: 680, height: 720)
+        .alert("Could Not Import SSH Key", isPresented: Binding(
+            get: { sshKeyError != nil },
+            set: { if !$0 { sshKeyError = nil } }
+        )) {
+            Button("OK", role: .cancel) { sshKeyError = nil }
+        } message: {
+            Text(sshKeyError ?? "")
+        }
+    }
+
+    private var connectionSection: some View {
+        ServerEditorSection(title: "Connection", systemImage: "network") {
+            ServerEditorFieldRow("Name") {
+                TextField("My IRC Network", text: $name, prompt: Text("My IRC Network"))
+            }
+            ServerEditorFieldRow("Server address") {
+                TextField("irc.example.org", text: $hostname, prompt: Text("irc.example.org"))
+            }
+            ServerEditorFieldRow("Port") {
+                TextField("6697", text: $port)
+            }
+            ServerEditorToggleRow("Use encrypted connection (TLS)", isOn: $useTLS)
+            ServerEditorToggleRow("Connect automatically at launch", isOn: $autoConnect)
+        }
+    }
+
+    private var identitySection: some View {
+        ServerEditorSection(title: "Identity", systemImage: "person.crop.circle") {
+            ServerEditorFieldRow("Nickname") {
+                TextField("Use global nickname", text: $nicknameOverride, prompt: Text("Use global nickname"))
+            }
+            ServerEditorHelpText("Leave blank to use the global nickname from Settings. Set a value here when this network requires a different identity.")
+        }
+    }
+
+    private var authenticationSection: some View {
+        ServerEditorSection(title: "Server Authentication", systemImage: "key") {
+            ServerEditorFieldRow("Server password") {
+                SecureField("Optional", text: $serverPassword)
+            }
+            ServerEditorToggleRow("Authenticate with SASL", isOn: $useSASL)
+            if useSASL {
+                ServerEditorFieldRow("SASL username") {
+                    TextField("Use server nickname", text: $saslUsername, prompt: Text("Use server nickname"))
+                }
+                ServerEditorFieldRow("SASL password") {
+                    SecureField("Required for SASL", text: $saslPassword)
+                }
+            }
+            ServerEditorHelpText("Passwords are stored in your macOS Keychain. SASL PLAIN is requested only when the IRC server advertises SASL support.")
+        }
+    }
+
+    private var sshSection: some View {
+        ServerEditorSection(title: "SSH Tunnel", systemImage: "point.3.connected.trianglepath.dotted") {
+            ServerEditorToggleRow("Connect through an SSH tunnel", isOn: $useSSHTunnel)
+            if useSSHTunnel {
+                ServerEditorFieldRow("SSH hostname") {
+                    TextField("ssh.example.org", text: $sshHostname, prompt: Text("ssh.example.org"))
+                }
+                ServerEditorFieldRow("SSH port") {
+                    TextField("22", text: $sshPort)
+                }
+                ServerEditorFieldRow("SSH username") {
+                    TextField("Username", text: $sshUsername)
+                }
+                ServerEditorFieldRow("SSH password") {
+                    SecureField("Optional when using a key", text: $sshPassword)
+                }
+                ServerEditorFieldRow("Private key") {
+                    HStack(spacing: 10) {
+                        Button(sshKeyFilename == nil ? "Choose Key…" : "Replace Key…") {
+                            chooseSSHKey()
+                        }
+                        if let sshKeyFilename {
+                            Text(sshKeyFilename)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 4)
+                            Button("Remove") {
+                                self.sshKeyFilename = nil
+                                sshPrivateKey = ""
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                if !hasSSHAuthentication {
+                    ServerEditorHelpText("Add an SSH password or private key to connect.", tint: .red)
+                }
+                ServerEditorHelpText("SSH credentials are stored in Keychain. Unencrypted OpenSSH Ed25519 keys are recommended; many modern servers reject the legacy signature used by this transport for RSA keys.")
+                ServerEditorHelpText("The SSH host identity is learned on first connection and pinned to this server profile.")
+                if profileToEdit?.sshTrustedHostKey != nil {
+                    ServerEditorFieldRow("Host identity") {
+                        Button(resetSSHHostKey ? "Will Be Forgotten When Saved" : "Forget Saved Identity") {
+                            resetSSHHostKey = true
+                        }
+                        .disabled(resetSSHHostKey)
+                    }
+                }
+            } else {
+                ServerEditorHelpText("IRC connects directly to the server when this option is off.")
             }
         }
-        .padding(24)
-        .frame(width: 440)
+    }
+
+    private func saveProfile() {
+        let cleanHost = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let profileToEdit {
+            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: UInt16(port) ?? (useTLS ? 6697 : 6667), useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: UInt16(sshPort) ?? 22, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
+        } else {
+            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: UInt16(port) ?? (useTLS ? 6697 : 6667), useTLS: useTLS, autoConnect: autoConnect, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: UInt16(sshPort) ?? 22, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
+        }
+        dismiss()
+    }
+
+    private func chooseSSHKey() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose an SSH Private Key"
+        panel.message = "Select the private key, such as id_ed25519 or id_rsa — not the matching .pub file."
+        panel.prompt = "Choose Private Key"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        // Give this picker its own state instead of inheriting the last folder
+        // used by an unrelated NSOpenPanel elsewhere in the app.
+        panel.identifier = NSUserInterfaceItemIdentifier("Netsplit.SSHPrivateKeyPicker")
+
+        let defaultSSHDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh", isDirectory: true)
+        if FileManager.default.fileExists(atPath: defaultSSHDirectory.path) {
+            panel.directoryURL = defaultSSHDirectory
+            let preferredKeyNames = ["id_ed25519", "id_rsa"]
+            if let preferredKeyName = preferredKeyNames.first(where: {
+                FileManager.default.fileExists(
+                    atPath: defaultSSHDirectory.appendingPathComponent($0).path
+                )
+            }) {
+                panel.nameFieldStringValue = preferredKeyName
+            }
+        }
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            importSSHPrivateKey(from: url)
+        }
+    }
+
+    private func importSSHPrivateKey(from url: URL) {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+        do {
+            let data = try Data(contentsOf: url)
+            guard data.count <= 256 * 1024, let key = String(data: data, encoding: .utf8) else {
+                sshKeyError = "The selected file could not be read as a text SSH private key."
+                return
+            }
+            let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            if url.pathExtension.lowercased() == "pub"
+                || trimmedKey.hasPrefix("ssh-rsa ")
+                || trimmedKey.hasPrefix("ssh-ed25519 ")
+                || trimmedKey.hasPrefix("ecdsa-sha2-") {
+                sshKeyError = "That is an SSH public key. Select the matching private key instead — usually the file with the same name but without the .pub extension."
+                return
+            }
+            guard trimmedKey.hasPrefix("-----BEGIN OPENSSH PRIVATE KEY-----") else {
+                sshKeyError = "Netsplit currently supports unencrypted OpenSSH private keys. Select id_ed25519 (recommended) or id_rsa, not a .pub file."
+                return
+            }
+            sshPrivateKey = key
+            sshKeyFilename = url.lastPathComponent
+        } catch {
+            sshKeyError = "The selected file could not be read as an SSH private key."
+        }
+    }
+}
+
+private struct ServerEditorSection<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    init(title: String, systemImage: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.systemImage = systemImage
+        self.content = content()
+    }
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                content
+            }
+            .padding(.vertical, 4)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+        }
+    }
+}
+
+private struct ServerEditorFieldRow<Content: View>: View {
+    let label: String
+    @ViewBuilder let content: Content
+
+    init(_ label: String, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            Text(label)
+                .frame(width: 140, alignment: .trailing)
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct ServerEditorToggleRow: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    init(_ title: String, isOn: Binding<Bool>) {
+        self.title = title
+        _isOn = isOn
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Color.clear.frame(width: 140, height: 1)
+            Toggle(title, isOn: $isOn)
+                .toggleStyle(.checkbox)
+            Spacer()
+        }
+    }
+}
+
+private struct ServerEditorHelpText: View {
+    let text: String
+    let tint: Color
+
+    init(_ text: String, tint: Color = .secondary) {
+        self.text = text
+        self.tint = tint
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Color.clear.frame(width: 140, height: 1)
+            HStack(alignment: .top, spacing: 7) {
+                Image(systemName: "info.circle")
+                    .padding(.top, 1)
+                Text(text)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
+            .foregroundStyle(tint)
+            .help(text)
+            Spacer(minLength: 0)
+        }
     }
 }
 

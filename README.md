@@ -10,6 +10,20 @@ It's 100% free and open source. Contributions welcome, throw me a PR. If changin
 
 Open an issue here for bug reports/feature requests.
 
+## SSH tunneling
+
+Each server profile can route its IRC connection through an SSH server. Enable
+**Connect through an SSH tunnel** while adding or editing a profile, then enter
+the SSH host, port, and username. Password authentication and unencrypted
+OpenSSH private keys are supported; secrets are stored in the macOS Keychain.
+Ed25519 keys are recommended. RSA keys currently work only with SSH servers
+that still permit legacy `ssh-rsa` signatures; many modern servers require
+RSA-SHA2, so use Ed25519 or password authentication with those servers.
+
+Netsplit learns the SSH host key on the first connection and pins it to that
+server profile. A changed key is rejected until you explicitly forget the saved
+host identity. IRC TLS, when enabled, remains end-to-end inside the SSH tunnel.
+
 ## Supported commands
 
 Commands are entered in the message field with a leading `/`. Netsplit sends

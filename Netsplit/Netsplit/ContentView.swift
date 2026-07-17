@@ -67,9 +67,14 @@ private struct SidebarView: View {
                             Button("Edit Profile…") { editingProfile = profile }
                             Divider()
                             if case .failed = state.status(for: profile) {
-                                Button("Reconnect") { state.toggleConnection(for: profile) }
-                            } else {
-                                Button("Disconnect") { state.disconnect(profile) }
+                                Button("Retry Now") { state.toggleConnection(for: profile) }
+                            }
+                            Button(state.isWaitingToReconnect(profile) ? "Stop Reconnecting" : "Disconnect") {
+                                state.disconnect(profile)
+                            }
+                            if !profile.isBuiltIn {
+                                Divider()
+                                Button("Delete Server Profile", role: .destructive) { state.delete(profile) }
                             }
                     }
 
@@ -236,22 +241,36 @@ private struct ServerProfileCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if profile.useSSHTunnel == true, let sshHostname = profile.sshHostname {
+                Label("SSH via \(sshHostname):\(profile.sshPort ?? 22)", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
             HStack {
-                Text(state.isActive(profile) ? state.status(for: profile).label : "Ready to connect")
+                Text(
+                    state.isWaitingToReconnect(profile)
+                        ? "Waiting to reconnect"
+                        : (state.isActive(profile) ? state.status(for: profile).label : "Ready to connect")
+                )
                     .font(.caption.weight(.medium))
                     .foregroundStyle(state.isActive(profile) ? state.status(for: profile).tint : .secondary)
                 Spacer()
-                Button("Edit") { editingProfile = profile }
-                    .buttonStyle(.borderless)
                 if state.isActive(profile) {
                     if case .failed = state.status(for: profile) {
-                        Button("Reconnect") { state.toggleConnection(for: profile) }
+                        Button("Retry") { state.toggleConnection(for: profile) }
                             .buttonStyle(.borderedProminent)
+                        Button("Disconnect") { state.disconnect(profile) }
+                            .buttonStyle(.bordered)
                     } else {
+                        Button("Edit") { editingProfile = profile }
+                            .buttonStyle(.borderless)
                         Button("Disconnect") { state.toggleConnection(for: profile) }
                             .buttonStyle(.bordered)
                     }
                 } else {
+                    Button("Edit") { editingProfile = profile }
+                        .buttonStyle(.borderless)
                     Button("Connect") { state.toggleConnection(for: profile) }
                         .buttonStyle(.borderedProminent)
                 }

@@ -131,6 +131,10 @@ final class IRCAppState: ObservableObject {
         connectionStatuses[profile.id] ?? .offline
     }
 
+    func isWaitingToReconnect(_ profile: ServerProfile) -> Bool {
+        scheduledReconnects[profile.id] != nil
+    }
+
     func isActive(_ profile: ServerProfile) -> Bool {
         connections[profile.id] != nil
     }
@@ -151,6 +155,14 @@ final class IRCAppState: ObservableObject {
 
     func saslPassword(for profile: ServerProfile) -> String {
         KeychainStore.value(for: credentialAccount(profile: profile, kind: "sasl-password"))
+    }
+
+    func sshPassword(for profile: ServerProfile) -> String {
+        KeychainStore.value(for: credentialAccount(profile: profile, kind: "ssh-password"))
+    }
+
+    func sshPrivateKey(for profile: ServerProfile) -> String {
+        KeychainStore.value(for: credentialAccount(profile: profile, kind: "ssh-private-key"))
     }
 
     func isFavorite(_ channel: Conversation) -> Bool {
@@ -309,11 +321,21 @@ final class IRCAppState: ObservableObject {
             guard let transport else { return }
             self?.handle(event, from: profile, transport: transport)
         }
-        appendSystem("Connecting to \(profile.hostname)\(profile.useTLS ? " securely" : "")…", for: .server(profile.id))
+        let route = profile.useSSHTunnel == true ? " through \(profile.sshHostname ?? "the SSH tunnel")" : ""
+        appendSystem("Connecting to \(profile.hostname)\(profile.useTLS ? " securely" : "")\(route)…", for: .server(profile.id))
         if selectConversation, selection.flatMap({ self.profile(for: $0)?.id }) != profile.id {
             selection = .server(profile.id)
         }
-        transport.connect(profile: profile, nickname: nickname(for: profile), realName: resolvedRealName(), serverPassword: serverPassword(for: profile), saslUsername: profile.saslUsername, saslPassword: saslPassword(for: profile))
+        transport.connect(
+            profile: profile,
+            nickname: nickname(for: profile),
+            realName: resolvedRealName(),
+            serverPassword: serverPassword(for: profile),
+            saslUsername: profile.saslUsername,
+            saslPassword: saslPassword(for: profile),
+            sshPassword: sshPassword(for: profile),
+            sshPrivateKey: sshPrivateKey(for: profile)
+        )
     }
 
     func disconnect(_ profile: ServerProfile, reason: String? = nil) {
@@ -369,12 +391,13 @@ final class IRCAppState: ObservableObject {
         selection = .connectionCenter
     }
 
-    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String) {
+    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
         var profile = ServerProfile(name: name, hostname: hostname, port: port, useTLS: useTLS, autoConnect: autoConnect)
         profile.useSASL = useSASL
         profile.saslUsername = saslUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : saslUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        applySSHSettings(to: &profile, enabled: useSSHTunnel, hostname: sshHostname, port: sshPort, username: sshUsername, keyFilename: sshKeyFilename)
         profiles.append(profile)
-        saveCredentials(for: profile, serverPassword: serverPassword, saslPassword: saslPassword)
+        saveCredentials(for: profile, serverPassword: serverPassword, saslPassword: saslPassword, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
         saveProfiles()
         selection = .connectionCenter
     }
@@ -385,11 +408,13 @@ final class IRCAppState: ObservableObject {
         removeConversations(for: profile.id)
         KeychainStore.remove(account: credentialAccount(profile: profile, kind: "server-password"))
         KeychainStore.remove(account: credentialAccount(profile: profile, kind: "sasl-password"))
+        KeychainStore.remove(account: credentialAccount(profile: profile, kind: "ssh-password"))
+        KeychainStore.remove(account: credentialAccount(profile: profile, kind: "ssh-private-key"))
         profiles.removeAll { $0.id == profile.id }
         saveProfiles()
     }
 
-    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String) {
+    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         var updated = profile
         updated.name = name
@@ -402,9 +427,13 @@ final class IRCAppState: ObservableObject {
         updated.useSASL = useSASL
         let cleanSASLUsername = saslUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.saslUsername = cleanSASLUsername.isEmpty ? nil : cleanSASLUsername
+        let oldSSHIdentity = "\(profile.sshHostname ?? ""):\(profile.sshPort ?? 22)"
+        applySSHSettings(to: &updated, enabled: useSSHTunnel, hostname: sshHostname, port: sshPort, username: sshUsername, keyFilename: sshKeyFilename)
+        let newSSHIdentity = "\(updated.sshHostname ?? ""):\(updated.sshPort ?? 22)"
+        if oldSSHIdentity != newSSHIdentity || resetSSHHostKey { updated.sshTrustedHostKey = nil }
         if updated.isBuiltIn { updated.isPresetModified = true }
         profiles[index] = updated
-        saveCredentials(for: updated, serverPassword: serverPassword, saslPassword: saslPassword)
+        saveCredentials(for: updated, serverPassword: serverPassword, saslPassword: saslPassword, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
         saveProfiles()
     }
 
@@ -418,6 +447,12 @@ final class IRCAppState: ObservableObject {
         preset.mutedNicknames = profile.mutedNicknames
         preset.useSASL = profile.useSASL
         preset.saslUsername = profile.saslUsername
+        preset.useSSHTunnel = profile.useSSHTunnel
+        preset.sshHostname = profile.sshHostname
+        preset.sshPort = profile.sshPort
+        preset.sshUsername = profile.sshUsername
+        preset.sshKeyFilename = profile.sshKeyFilename
+        preset.sshTrustedHostKey = profile.sshTrustedHostKey
         preset.isPresetModified = false
         profiles[index] = preset
         saveProfiles()
@@ -929,6 +964,17 @@ final class IRCAppState: ObservableObject {
                 break
             }
         case .notice(let text): appendSystem(text, for: .server(profile.id))
+        case .terminalFailure(let message):
+            registeredServerIDs.remove(profile.id)
+            prepareChannelsForDisconnectedSession(for: profile.id)
+            resetChannelListingRequest(for: profile.id)
+            connectionStatuses[profile.id] = .failed(message)
+            appendSystem(message, for: .server(profile.id))
+        case .sshHostKeyLearned(let hostKey):
+            guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+            profiles[index].sshTrustedHostKey = hostKey
+            saveProfiles()
+            appendSystem("Saved the SSH host identity for future connections.", for: .server(profile.id))
         case .received(let wire): handle(wire, profile: profile)
         }
     }
@@ -2036,9 +2082,21 @@ final class IRCAppState: ObservableObject {
         UserDefaults.standard.set(data, forKey: "profiles")
     }
 
-    private func saveCredentials(for profile: ServerProfile, serverPassword: String, saslPassword: String) {
+    private func saveCredentials(for profile: ServerProfile, serverPassword: String, saslPassword: String, sshPassword: String, sshPrivateKey: String) {
         KeychainStore.set(serverPassword, for: credentialAccount(profile: profile, kind: "server-password"))
         KeychainStore.set(saslPassword, for: credentialAccount(profile: profile, kind: "sasl-password"))
+        KeychainStore.set(sshPassword, for: credentialAccount(profile: profile, kind: "ssh-password"))
+        KeychainStore.set(sshPrivateKey, for: credentialAccount(profile: profile, kind: "ssh-private-key"))
+    }
+
+    private func applySSHSettings(to profile: inout ServerProfile, enabled: Bool, hostname: String, port: UInt16, username: String, keyFilename: String?) {
+        profile.useSSHTunnel = enabled
+        let cleanHostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.sshHostname = cleanHostname.isEmpty ? nil : cleanHostname
+        profile.sshPort = port
+        profile.sshUsername = cleanUsername.isEmpty ? nil : cleanUsername
+        profile.sshKeyFilename = keyFilename
     }
 
     private func credentialAccount(profile: ServerProfile, kind: String) -> String {
@@ -2060,6 +2118,12 @@ final class IRCAppState: ObservableObject {
             current.mutedNicknames = profile.mutedNicknames
             current.useSASL = profile.useSASL
             current.saslUsername = profile.saslUsername
+            current.useSSHTunnel = profile.useSSHTunnel
+            current.sshHostname = profile.sshHostname
+            current.sshPort = profile.sshPort
+            current.sshUsername = profile.sshUsername
+            current.sshKeyFilename = profile.sshKeyFilename
+            current.sshTrustedHostKey = profile.sshTrustedHostKey
             return current
         }
         let missing = ServerProfile.recommended.filter { recommended in

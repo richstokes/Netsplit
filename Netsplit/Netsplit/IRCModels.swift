@@ -20,6 +20,15 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     var mutedNicknames: [String]?
     var useSASL: Bool?
     var saslUsername: String?
+    var useSSHTunnel: Bool?
+    var sshHostname: String?
+    var sshPort: UInt16?
+    var sshUsername: String?
+    var sshKeyFilename: String?
+    /// OpenSSH-formatted public host key learned on the first successful SSH
+    /// handshake. This is not secret and is persisted with the profile so a
+    /// changed SSH host identity is rejected on later connections.
+    var sshTrustedHostKey: String?
     /// Stable identity for bundled presets. The display name is user-editable
     /// and therefore cannot safely be used to match a profile back to a preset.
     var presetID: String?
@@ -38,6 +47,12 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         mutedNicknames: [String]? = nil,
         useSASL: Bool? = nil,
         saslUsername: String? = nil,
+        useSSHTunnel: Bool? = nil,
+        sshHostname: String? = nil,
+        sshPort: UInt16? = nil,
+        sshUsername: String? = nil,
+        sshKeyFilename: String? = nil,
+        sshTrustedHostKey: String? = nil,
         presetID: String? = nil
     ) {
         self.id = id
@@ -53,12 +68,19 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         self.mutedNicknames = mutedNicknames
         self.useSASL = useSASL
         self.saslUsername = saslUsername
+        self.useSSHTunnel = useSSHTunnel
+        self.sshHostname = sshHostname
+        self.sshPort = sshPort
+        self.sshUsername = sshUsername
+        self.sshKeyFilename = sshKeyFilename
+        self.sshTrustedHostKey = sshTrustedHostKey
         self.presetID = presetID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, hostname, port, useTLS, autoConnect, isBuiltIn
-        case nicknameOverride, isPresetModified, favoriteChannels, mutedNicknames, useSASL, saslUsername, presetID
+        case nicknameOverride, isPresetModified, favoriteChannels, mutedNicknames, useSASL, saslUsername
+        case useSSHTunnel, sshHostname, sshPort, sshUsername, sshKeyFilename, sshTrustedHostKey, presetID
     }
 
     init(from decoder: Decoder) throws {
@@ -76,6 +98,12 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         mutedNicknames = try container.decodeIfPresent([String].self, forKey: .mutedNicknames)
         useSASL = try container.decodeIfPresent(Bool.self, forKey: .useSASL)
         saslUsername = try container.decodeIfPresent(String.self, forKey: .saslUsername)
+        useSSHTunnel = try container.decodeIfPresent(Bool.self, forKey: .useSSHTunnel)
+        sshHostname = try container.decodeIfPresent(String.self, forKey: .sshHostname)
+        sshPort = try container.decodeIfPresent(UInt16.self, forKey: .sshPort)
+        sshUsername = try container.decodeIfPresent(String.self, forKey: .sshUsername)
+        sshKeyFilename = try container.decodeIfPresent(String.self, forKey: .sshKeyFilename)
+        sshTrustedHostKey = try container.decodeIfPresent(String.self, forKey: .sshTrustedHostKey)
         presetID = try container.decodeIfPresent(String.self, forKey: .presetID)
     }
 
