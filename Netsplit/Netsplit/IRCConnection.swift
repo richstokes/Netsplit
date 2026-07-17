@@ -170,8 +170,11 @@ final class IRCConnection {
         })
     }
 
-    func send(command: String) {
-        guard let connection else { return }
+    func send(command: String, completion: (@MainActor (Bool) -> Void)? = nil) {
+        guard let connection else {
+            completion?(false)
+            return
+        }
         let singleLine = command
             .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
@@ -181,9 +184,13 @@ final class IRCConnection {
         }
         let line = boundedCommand + "\r\n"
         connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self] error in
-            guard let error else { return }
             Task { @MainActor [weak self] in
-                self?.eventHandler?(.notice("Send failed: \(error.localizedDescription)"))
+                if let error {
+                    self?.eventHandler?(.notice("Send failed: \(error.localizedDescription)"))
+                    completion?(false)
+                } else {
+                    completion?(true)
+                }
             }
         })
     }
@@ -226,7 +233,11 @@ final class IRCConnection {
             }
             let lineData = receiveBuffer.subdata(in: 0..<range.lowerBound)
             receiveBuffer.removeSubrange(0..<range.upperBound)
-            guard let line = String(data: lineData, encoding: .utf8), let message = IRCWireMessage(line: line) else { continue }
+            // IRC commands are ASCII, but legacy networks can include text in a
+            // different encoding. Preserve the command and replace only invalid
+            // payload bytes instead of silently discarding the entire line.
+            let line = String(decoding: lineData, as: UTF8.self)
+            guard let message = IRCWireMessage(line: line) else { continue }
             if message.command == "PING" { send(command: "PONG :\(message.trailing ?? message.parameters.first ?? "")") }
             if message.command == "CAP" {
                 handleCapabilityMessage(message)

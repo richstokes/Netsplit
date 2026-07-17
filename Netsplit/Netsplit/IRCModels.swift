@@ -20,6 +20,9 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     var mutedNicknames: [String]?
     var useSASL: Bool?
     var saslUsername: String?
+    /// Stable identity for bundled presets. The display name is user-editable
+    /// and therefore cannot safely be used to match a profile back to a preset.
+    var presetID: String?
 
     init(
         id: UUID = UUID(),
@@ -34,7 +37,8 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         favoriteChannels: [String]? = nil,
         mutedNicknames: [String]? = nil,
         useSASL: Bool? = nil,
-        saslUsername: String? = nil
+        saslUsername: String? = nil,
+        presetID: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -49,11 +53,12 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         self.mutedNicknames = mutedNicknames
         self.useSASL = useSASL
         self.saslUsername = saslUsername
+        self.presetID = presetID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, hostname, port, useTLS, autoConnect, isBuiltIn
-        case nicknameOverride, isPresetModified, favoriteChannels, mutedNicknames, useSASL, saslUsername
+        case nicknameOverride, isPresetModified, favoriteChannels, mutedNicknames, useSASL, saslUsername, presetID
     }
 
     init(from decoder: Decoder) throws {
@@ -71,19 +76,54 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         mutedNicknames = try container.decodeIfPresent([String].self, forKey: .mutedNicknames)
         useSASL = try container.decodeIfPresent(Bool.self, forKey: .useSASL)
         saslUsername = try container.decodeIfPresent(String.self, forKey: .saslUsername)
+        presetID = try container.decodeIfPresent(String.self, forKey: .presetID)
     }
 
     static let recommended: [ServerProfile] = [
-        .init(name: "Libera.Chat", hostname: "irc.libera.chat", port: 6697, useTLS: true, isBuiltIn: true),
-        .init(name: "Snoonet", hostname: "irc.snoonet.org", port: 6697, useTLS: true, isBuiltIn: true),
-        .init(name: "OFTC", hostname: "irc.oftc.net", port: 6697, useTLS: true, isBuiltIn: true),
-        .init(name: "EFnet", hostname: "irc.efnet.org", port: 6697, useTLS: true, isBuiltIn: true),
-        .init(name: "Freenode", hostname: "irc.freenode.net", port: 6697, useTLS: true, isBuiltIn: true),
-        .init(name: "Undernet", hostname: "irc.undernet.org", port: 6667, useTLS: false, isBuiltIn: true),
-        .init(name: "QuakeNet", hostname: "irc.quakenet.org", port: 6667, useTLS: false, isBuiltIn: true),
-        .init(name: "IRCNet", hostname: "irc.ircnet.com", port: 6667, useTLS: false, isBuiltIn: true),
-        .init(name: "Rizon", hostname: "irc.rizon.net", port: 6697, useTLS: true, isBuiltIn: true)
+        .init(name: "Libera.Chat", hostname: "irc.libera.chat", port: 6697, useTLS: true, isBuiltIn: true, presetID: "libera-chat"),
+        .init(name: "Snoonet", hostname: "irc.snoonet.org", port: 6697, useTLS: true, isBuiltIn: true, presetID: "snoonet"),
+        .init(name: "OFTC", hostname: "irc.oftc.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "oftc"),
+        .init(name: "EFnet", hostname: "irc.efnet.org", port: 6697, useTLS: true, isBuiltIn: true, presetID: "efnet"),
+        .init(name: "Freenode", hostname: "irc.freenode.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "freenode"),
+        .init(name: "Undernet", hostname: "irc.undernet.org", port: 6667, useTLS: false, isBuiltIn: true, presetID: "undernet"),
+        .init(name: "QuakeNet", hostname: "irc.quakenet.org", port: 6667, useTLS: false, isBuiltIn: true, presetID: "quakenet"),
+        .init(name: "IRCNet", hostname: "irc.ircnet.com", port: 6667, useTLS: false, isBuiltIn: true, presetID: "ircnet"),
+        .init(name: "Rizon", hostname: "irc.rizon.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "rizon")
     ]
+}
+
+enum IRCCaseMapping: String {
+    case ascii
+    case rfc1459
+    case strictRFC1459 = "strict-rfc1459"
+
+    func normalize(_ value: String) -> String {
+        String(value.unicodeScalars.map { scalar -> Character in
+            let byte = scalar.value
+            if byte >= 65, byte <= 90 {
+                return Character(UnicodeScalar(byte + 32)!)
+            }
+            switch self {
+            case .ascii:
+                return Character(scalar)
+            case .strictRFC1459:
+                switch scalar {
+                case "[", "{": return "{"
+                case "]", "}": return "}"
+                case "\\", "|": return "|"
+                default: return Character(scalar)
+                }
+            case .rfc1459:
+                switch scalar {
+                case "[", "{": return "{"
+                case "]", "}": return "}"
+                case "\\", "|": return "|"
+                case "^", "~": return "~"
+                default: return Character(scalar)
+                }
+            }
+        })
+    }
 }
 
 struct IRCMessage: Identifiable, Hashable {
@@ -126,7 +166,9 @@ struct ChannelMember: Identifiable, Hashable {
         }
     }
 
-    var id: String { nickname.lowercased() }
+    // Equality/deduplication is performed by IRCAppState with the server's
+    // advertised CASEMAPPING. This exact value is only SwiftUI row identity.
+    var id: String { nickname }
 
     var prefix: Character? {
         for mode in Self.rolePriority where modes.contains(mode) {
