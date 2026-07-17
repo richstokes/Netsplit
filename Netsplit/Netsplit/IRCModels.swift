@@ -85,6 +85,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         .init(name: "OFTC", hostname: "irc.oftc.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "oftc"),
         .init(name: "EFnet", hostname: "irc.efnet.org", port: 6697, useTLS: true, isBuiltIn: true, presetID: "efnet"),
         .init(name: "Freenode", hostname: "irc.freenode.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "freenode"),
+        .init(name: "DALnet", hostname: "irc.dal.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "dalnet"),
         .init(name: "Undernet", hostname: "irc.undernet.org", port: 6667, useTLS: false, isBuiltIn: true, presetID: "undernet"),
         .init(name: "QuakeNet", hostname: "irc.quakenet.org", port: 6667, useTLS: false, isBuiltIn: true, presetID: "quakenet"),
         .init(name: "IRCNet", hostname: "irc.ircnet.com", port: 6667, useTLS: false, isBuiltIn: true, presetID: "ircnet"),
