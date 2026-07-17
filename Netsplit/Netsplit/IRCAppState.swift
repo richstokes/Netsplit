@@ -14,6 +14,12 @@ final class IRCAppState: ObservableObject {
     @Published var quitMessage: String {
         didSet { UserDefaults.standard.set(quitMessage, forKey: "quitMessage") }
     }
+    @Published var reconnectAutomatically: Bool {
+        didSet {
+            UserDefaults.standard.set(reconnectAutomatically, forKey: "reconnectAutomatically")
+            if !reconnectAutomatically { cancelAllScheduledReconnects() }
+        }
+    }
     @Published var transcriptFontSize: Double
     @Published var selection: SidebarItem?
     @Published private(set) var channels: [Conversation] = []
@@ -50,8 +56,12 @@ final class IRCAppState: ObservableObject {
     private var knownChannelNamesByServer: [UUID: Set<String>] = [:]
     private var scheduledChannelListFlushes: Set<UUID> = []
     private var channelListCompletionDates: [UUID: Date] = [:]
+    private var reconnectAttempts: [UUID: Int] = [:]
+    private var scheduledReconnects: [UUID: UUID] = [:]
     private let channelListCacheLifetime: TimeInterval = 120
     private let favoriteJoinInterval: TimeInterval = 0.45
+    private let initialReconnectDelay: TimeInterval = 2
+    private let maximumReconnectDelay: TimeInterval = 60
     private static let defaultQuitMessage = "Closing macOS client"
     private var hasStartedLaunchConnections = false
 
@@ -76,6 +86,7 @@ final class IRCAppState: ObservableObject {
         }
         let savedQuitMessage = defaults.string(forKey: "quitMessage")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         quitMessage = savedQuitMessage.isEmpty ? Self.defaultQuitMessage : savedQuitMessage
+        reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
         let savedTranscriptFontSize = defaults.object(forKey: "transcriptFontSize") as? Double ?? 16
         transcriptFontSize = min(max(savedTranscriptFontSize, 12), 24)
 
@@ -267,8 +278,9 @@ final class IRCAppState: ObservableObject {
         }
     }
 
-    func connect(_ profile: ServerProfile) {
+    func connect(_ profile: ServerProfile, selectConversation: Bool = true, isAutomaticRetry: Bool = false) {
         guard connections[profile.id] == nil else { return }
+        if !isAutomaticRetry { cancelScheduledReconnect(for: profile.id, resetAttempts: true) }
         terminalServerErrors.removeValue(forKey: profile.id)
         registeredServerIDs.remove(profile.id)
         activeNicknames[profile.id] = configuredNickname(for: profile)
@@ -282,11 +294,12 @@ final class IRCAppState: ObservableObject {
             }
         }
         appendSystem("Connecting to \(profile.hostname)\(profile.useTLS ? " securely" : "")…", for: .server(profile.id))
-        selection = .server(profile.id)
+        if selectConversation { selection = .server(profile.id) }
         transport.connect(profile: profile, nickname: nickname(for: profile), realName: resolvedRealName(), serverPassword: serverPassword(for: profile), saslUsername: profile.saslUsername, saslPassword: saslPassword(for: profile))
     }
 
     func disconnect(_ profile: ServerProfile, reason: String? = nil) {
+        cancelScheduledReconnect(for: profile.id, resetAttempts: true)
         let transport = connections[profile.id]
         connections.removeValue(forKey: profile.id)
         activeNicknames.removeValue(forKey: profile.id)
@@ -309,6 +322,7 @@ final class IRCAppState: ObservableObject {
             return
         }
 
+        cancelAllScheduledReconnects()
         connections.removeAll()
         activeNicknames.removeAll()
         registeredServerIDs.removeAll()
@@ -780,7 +794,16 @@ final class IRCAppState: ObservableObject {
                 if case .failed = status { registeredServerIDs.remove(profile.id) }
                 connectionStatuses[profile.id] = status
             }
-            if case .failed(let message) = status { appendSystem(message, for: .server(profile.id)) }
+            switch status {
+            case .failed(let message):
+                appendSystem(message, for: .server(profile.id))
+                scheduleReconnect(for: profile)
+            case .offline:
+                appendSystem("Connection closed.", for: .server(profile.id))
+                scheduleReconnect(for: profile)
+            case .connecting, .online:
+                break
+            }
         case .notice(let text): appendSystem(text, for: .server(profile.id))
         case .received(let wire): handle(wire, profile: profile)
         }
@@ -792,6 +815,7 @@ final class IRCAppState: ObservableObject {
         case "001":
             registeredServerIDs.insert(profile.id)
             connectionStatuses[profile.id] = .online
+            cancelScheduledReconnect(for: profile.id, resetAttempts: true)
             appendSystem(wire.trailing ?? "Connected.", for: .server(profile.id))
             joinFavoriteChannels(for: profile)
         case "NOTICE":
@@ -944,6 +968,7 @@ final class IRCAppState: ObservableObject {
             appendSystem(error, for: .server(profile.id))
             terminalServerErrors[profile.id] = error
             connectionStatuses[profile.id] = .failed(error)
+            scheduleReconnect(for: profile)
         case "322":
             guard wire.parameters.count >= 3, let users = Int(wire.parameters[2]) else { return }
             let listing = ChannelListing(name: wire.parameters[1], userCount: users, topic: wire.trailing ?? "")
@@ -1451,6 +1476,43 @@ final class IRCAppState: ObservableObject {
     private func resolvedQuitMessage() -> String {
         let trimmedMessage = quitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedMessage.isEmpty ? Self.defaultQuitMessage : trimmedMessage
+    }
+
+    private func scheduleReconnect(for profile: ServerProfile) {
+        guard reconnectAutomatically,
+              connections[profile.id] != nil,
+              scheduledReconnects[profile.id] == nil else { return }
+
+        let attempt = reconnectAttempts[profile.id, default: 0] + 1
+        reconnectAttempts[profile.id] = attempt
+        let delay = min(initialReconnectDelay * pow(2, Double(attempt - 1)), maximumReconnectDelay)
+        let requestID = UUID()
+        scheduledReconnects[profile.id] = requestID
+        appendSystem("Connection lost. Reconnecting in \(Int(delay)) seconds (attempt \(attempt))…", for: .server(profile.id))
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self,
+                  self.reconnectAutomatically,
+                  self.scheduledReconnects[profile.id] == requestID,
+                  let activeProfile = self.profiles.first(where: { $0.id == profile.id }),
+                  let failedTransport = self.connections.removeValue(forKey: profile.id) else { return }
+            self.scheduledReconnects.removeValue(forKey: profile.id)
+            self.activeNicknames.removeValue(forKey: profile.id)
+            self.registeredServerIDs.remove(profile.id)
+            self.terminalServerErrors.removeValue(forKey: profile.id)
+            failedTransport.disconnect()
+            self.connect(activeProfile, selectConversation: false, isAutomaticRetry: true)
+        }
+    }
+
+    private func cancelScheduledReconnect(for serverID: UUID, resetAttempts: Bool) {
+        scheduledReconnects.removeValue(forKey: serverID)
+        if resetAttempts { reconnectAttempts.removeValue(forKey: serverID) }
+    }
+
+    private func cancelAllScheduledReconnects() {
+        scheduledReconnects.removeAll()
+        reconnectAttempts.removeAll()
     }
 
     private func appendSystem(_ text: String, for item: SidebarItem) {

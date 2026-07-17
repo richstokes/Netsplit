@@ -189,6 +189,8 @@ final class IRCConnection {
             if let data { self.process(data) }
             if let error {
                 self.eventHandler?(.status(.failed(error.localizedDescription)))
+            } else if isComplete {
+                self.eventHandler?(.status(.offline))
             } else if !isComplete {
                 self.receiveNext()
             }
