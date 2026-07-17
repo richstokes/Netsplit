@@ -85,6 +85,8 @@ struct IRCWireMessage {
 }
 
 final class IRCConnection {
+    private static let maximumOutboundLineBytes = 510
+    private static let maximumBufferedLineBytes = 64 * 1024
     private var connection: NWConnection?
     private var receiveBuffer = Data()
     private var nickname = "netsplit"
@@ -93,7 +95,7 @@ final class IRCConnection {
     private var serverPassword: String?
     private var saslCredentials: (username: String, password: String)?
     private var isWaitingForSASLResponse = false
-    var eventHandler: ((IRCTransportEvent) -> Void)?
+    var eventHandler: (@MainActor (IRCTransportEvent) -> Void)?
 
     func connect(profile: ServerProfile, nickname: String, realName: String, serverPassword: String, saslUsername: String?, saslPassword: String) {
         disconnect()
@@ -121,15 +123,17 @@ final class IRCConnection {
         let connection = NWConnection(host: NWEndpoint.Host(profile.hostname), port: port, using: parameters)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .setup, .preparing: self?.eventHandler?(.status(.connecting))
-            case .ready:
-                self?.eventHandler?(.status(.online))
-                self?.register(nickname: nickname, realName: realName)
-                self?.receiveNext()
-            case .failed(let error): self?.eventHandler?(.status(.failed(error.localizedDescription)))
-            case .cancelled: self?.eventHandler?(.status(.offline))
-            default: break
+            Task { @MainActor [weak self] in
+                switch state {
+                case .setup, .preparing: self?.eventHandler?(.status(.connecting))
+                case .ready:
+                    self?.eventHandler?(.status(.online))
+                    self?.register(nickname: nickname, realName: realName)
+                    self?.receiveNext()
+                case .failed(let error): self?.eventHandler?(.status(.failed(error.localizedDescription)))
+                case .cancelled: self?.eventHandler?(.status(.offline))
+                default: break
+                }
             }
         }
         eventHandler?(.status(.connecting))
@@ -145,7 +149,7 @@ final class IRCConnection {
     /// Sends IRC QUIT and only closes the transport after Network.framework has
     /// accepted the line. This gives the server a chance to remove the client
     /// cleanly instead of treating a user-initiated disconnect as a dropped link.
-    func quit(reason: String, completion: @escaping () -> Void = {}) {
+    func quit(reason: String, completion: @MainActor @escaping () -> Void = {}) {
         guard let connection else {
             completion()
             return
@@ -154,20 +158,33 @@ final class IRCConnection {
         let safeReason = reason
             .replacingOccurrences(of: "\r", with: "")
             .replacingOccurrences(of: "\n", with: "")
-        let line = "QUIT :\(safeReason)\r\n"
+        let boundedCommand = Self.prefix("QUIT :\(safeReason)", fittingUTF8ByteCount: Self.maximumOutboundLineBytes)
+        let line = "\(boundedCommand)\r\n"
         connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] _ in
-            connection?.cancel()
-            self?.connection = nil
-            self?.receiveBuffer.removeAll()
-            DispatchQueue.main.async(execute: completion)
+            Task { @MainActor [weak self, weak connection] in
+                connection?.cancel()
+                self?.connection = nil
+                self?.receiveBuffer.removeAll()
+                completion()
+            }
         })
     }
 
     func send(command: String) {
         guard let connection else { return }
-        let line = command.hasSuffix("\r\n") ? command : command + "\r\n"
+        let singleLine = command
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+        let boundedCommand = Self.prefix(singleLine, fittingUTF8ByteCount: Self.maximumOutboundLineBytes)
+        if boundedCommand != singleLine {
+            eventHandler?(.notice("An outgoing IRC command exceeded the server line limit and was truncated."))
+        }
+        let line = boundedCommand + "\r\n"
         connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self] error in
-            if let error { self?.eventHandler?(.notice("Send failed: \(error.localizedDescription)")) }
+            guard let error else { return }
+            Task { @MainActor [weak self] in
+                self?.eventHandler?(.notice("Send failed: \(error.localizedDescription)"))
+            }
         })
     }
 
@@ -185,21 +202,28 @@ final class IRCConnection {
 
     private func receiveNext() {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            if let data { self.process(data) }
-            if let error {
-                self.eventHandler?(.status(.failed(error.localizedDescription)))
-            } else if isComplete {
-                self.eventHandler?(.status(.offline))
-            } else if !isComplete {
-                self.receiveNext()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let data, !self.process(data) { return }
+                if let error {
+                    self.eventHandler?(.status(.failed(error.localizedDescription)))
+                } else if isComplete {
+                    self.eventHandler?(.status(.offline))
+                } else {
+                    self.receiveNext()
+                }
             }
         }
     }
 
-    private func process(_ data: Data) {
+    @discardableResult
+    private func process(_ data: Data) -> Bool {
         receiveBuffer.append(data)
         while let range = receiveBuffer.range(of: Data([13, 10])) {
+            guard range.lowerBound <= Self.maximumBufferedLineBytes else {
+                failMalformedInput("The server sent an IRC line larger than 64 KB.")
+                return false
+            }
             let lineData = receiveBuffer.subdata(in: 0..<range.lowerBound)
             receiveBuffer.removeSubrange(0..<range.upperBound)
             guard let line = String(data: lineData, encoding: .utf8), let message = IRCWireMessage(line: line) else { continue }
@@ -213,6 +237,30 @@ final class IRCConnection {
             handleSASLNumeric(message)
             eventHandler?(.received(message))
         }
+        guard receiveBuffer.count <= Self.maximumBufferedLineBytes else {
+            failMalformedInput("The server sent more than 64 KB without terminating an IRC line.")
+            return false
+        }
+        return true
+    }
+
+    private func failMalformedInput(_ message: String) {
+        eventHandler?(.notice(message))
+        eventHandler?(.status(.failed(message)))
+        disconnect()
+    }
+
+    private static func prefix(_ value: String, fittingUTF8ByteCount limit: Int) -> String {
+        guard value.utf8.count > limit else { return value }
+        var result = ""
+        var byteCount = 0
+        for character in value {
+            let characterByteCount = String(character).utf8.count
+            guard byteCount + characterByteCount <= limit else { break }
+            result.append(character)
+            byteCount += characterByteCount
+        }
+        return result
     }
 
     private func handleCapabilityMessage(_ message: IRCWireMessage) {
