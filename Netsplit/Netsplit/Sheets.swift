@@ -214,9 +214,15 @@ struct SettingsView: View {
                 )
                 Button("Reset Text Size") { state.resetTranscriptFontSize() }
             }
+            Section("Links") {
+                Toggle("Warn before opening links", isOn: $state.warnBeforeOpeningLinks)
+                Text("Links open in your default browser. The warning can help protect you from deceptive or malicious content shared in chat.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 360)
+        .frame(width: 480, height: 450)
         .padding()
     }
 }

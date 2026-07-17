@@ -3,6 +3,7 @@
 //  Netsplit
 //
 
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -273,6 +274,7 @@ private struct ConversationView: View {
     @State private var draft = ""
     @State private var tabCompletion: RecipientTabCompletion?
     @State private var showsMemberList = true
+    @State private var pendingURL: PendingURL?
     @FocusState private var composerFocused: Bool
 
     private var title: String { state.title(for: selection) }
@@ -360,6 +362,37 @@ private struct ConversationView: View {
                 tabCompletion = nil
             }
         }
+        .environment(\.openURL, OpenURLAction { url in
+            openURL(url)
+            return .handled
+        })
+        .sheet(item: $pendingURL) { pendingURL in
+            LinkWarningView(
+                url: pendingURL.url,
+                onCancel: { self.pendingURL = nil },
+                onOpen: { dontShowAgain in
+                    if dontShowAgain {
+                        state.warnBeforeOpeningLinks = false
+                    }
+                    self.pendingURL = nil
+                    NSWorkspace.shared.open(pendingURL.url)
+                }
+            )
+        }
+    }
+
+    private func openURL(_ url: URL) {
+        guard Self.isWebURL(url) else { return }
+        if state.warnBeforeOpeningLinks {
+            pendingURL = PendingURL(url: url)
+        } else {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private static func isWebURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
     }
 
     private func send() {
@@ -532,8 +565,88 @@ private struct MessageRow: View {
                 .frame(width: 52, alignment: .trailing)
             Text(message.sender).font(.system(size: max(fontSize - 1, 11), weight: .semibold))
                 .foregroundStyle(message.isSystem ? Color.secondary : Color.accentColor).frame(minWidth: 64, alignment: .leading)
-            Text(message.text).font(.system(size: fontSize)).textSelection(.enabled).foregroundStyle(message.isSystem ? .secondary : .primary)
+            Text(linkifiedText)
+                .font(.system(size: fontSize))
+                .textSelection(.enabled)
+                .foregroundStyle(message.isSystem ? .secondary : .primary)
         }
+    }
+
+    private var linkifiedText: AttributedString {
+        var attributedText = AttributedString(message.text)
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return attributedText
+        }
+
+        let fullRange = NSRange(message.text.startIndex..., in: message.text)
+        for match in detector.matches(in: message.text, range: fullRange) {
+            guard let url = match.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  let stringRange = Range(match.range, in: message.text),
+                  let attributedRange = Range(stringRange, in: attributedText) else { continue }
+            attributedText[attributedRange].link = url
+        }
+        return attributedText
+    }
+}
+
+private struct PendingURL: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct LinkWarningView: View {
+    let url: URL
+    let onCancel: () -> Void
+    let onOpen: (Bool) -> Void
+    @State private var dontShowAgain = false
+
+    private var destination: String {
+        url.host(percentEncoded: false) ?? url.absoluteString
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.yellow)
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Open External Link?")
+                        .font(.title2.weight(.semibold))
+                    Text("Links in IRC messages can lead to deceptive or malicious content. Only continue if you trust the sender and destination.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(destination)
+                    .font(.headline)
+                Text(url.absoluteString)
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(3)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            Toggle("Don’t show this warning again", isOn: $dontShowAgain)
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Open Link") { onOpen(dontShowAgain) }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 490)
     }
 }
 

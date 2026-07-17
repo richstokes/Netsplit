@@ -24,6 +24,9 @@ final class IRCAppState: ObservableObject {
             if !reconnectAutomatically { cancelAllScheduledReconnects() }
         }
     }
+    @Published var warnBeforeOpeningLinks: Bool {
+        didSet { UserDefaults.standard.set(warnBeforeOpeningLinks, forKey: "warnBeforeOpeningLinks") }
+    }
     @Published var transcriptFontSize: Double
     @Published var selection: SidebarItem?
     @Published private(set) var channels: [Conversation] = []
@@ -97,6 +100,7 @@ final class IRCAppState: ObservableObject {
         let savedQuitMessage = defaults.string(forKey: "quitMessage")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         quitMessage = savedQuitMessage.isEmpty ? Self.defaultQuitMessage : savedQuitMessage
         reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
+        warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
         let savedTranscriptFontSize = defaults.object(forKey: "transcriptFontSize") as? Double ?? 16
         transcriptFontSize = min(max(savedTranscriptFontSize, 12), 24)
 
