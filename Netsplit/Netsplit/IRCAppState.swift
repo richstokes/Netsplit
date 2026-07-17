@@ -956,9 +956,12 @@ final class IRCAppState: ObservableObject {
             // IRC notices are delivered as a distinct message type, but they
             // still belong beside the conversation they address. Server notices
             // have no user mask and remain in the server log.
-            if let first = target.first, "#&+!".contains(first) {
+            if isChannelName(target) {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 let channel = channel(named: target, serverID: profile.id)
+                append(IRCMessage(sender: "\(sender) (notice)", text: text), for: .channel(channel.id))
+            } else if let channel = channelReferencedByNotice(text, serverID: profile.id) {
+                guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 append(IRCMessage(sender: "\(sender) (notice)", text: text), for: .channel(channel.id))
             } else if wire.prefix?.contains("!") == true,
                       !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
@@ -1578,6 +1581,19 @@ final class IRCAppState: ObservableObject {
 
     private func isChannelName(_ value: String) -> Bool {
         value.first.map { "#&+!".contains($0) } == true
+    }
+
+    /// Some networks deliver channel welcome notices to the user's nickname
+    /// instead of the channel target, prefixing the text with "[#channel]".
+    /// Route those notices to an existing joined channel without treating every
+    /// private NOTICE as channel traffic.
+    private func channelReferencedByNotice(_ text: String, serverID: UUID) -> Conversation? {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedText.first == "[",
+              let closingBracket = trimmedText.firstIndex(of: "]") else { return nil }
+        let channelName = String(trimmedText[trimmedText.index(after: trimmedText.startIndex)..<closingBracket])
+        guard isChannelName(channelName) else { return nil }
+        return existingChannel(named: channelName, serverID: serverID)
     }
 
     private func directMessage(named name: String, serverID: UUID) -> Conversation {
