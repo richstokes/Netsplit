@@ -87,8 +87,14 @@ struct IRCWireMessage {
 final class IRCConnection {
     private static let maximumOutboundLineBytes = 510
     private static let maximumBufferedLineBytes = 64 * 1024
+    private static let heartbeatInterval: TimeInterval = 30
+    private static let heartbeatTimeout: TimeInterval = 15
     private var connection: NWConnection?
     private var receiveBuffer = Data()
+    private var heartbeatGeneration: UUID?
+    private var pendingHeartbeatToken: String?
+    private var hasReportedFailure = false
+    private var hasReachedReadyState = false
     private var nickname = "netsplit"
     private var advertisedCapabilities = Set<String>()
     private var capabilityNegotiationEnded = false
@@ -103,18 +109,26 @@ final class IRCConnection {
         advertisedCapabilities.removeAll()
         capabilityNegotiationEnded = false
         isWaitingForSASLResponse = false
+        hasReportedFailure = false
+        hasReachedReadyState = false
         self.serverPassword = serverPassword.isEmpty ? nil : serverPassword
         if profile.useSASL == true, !saslPassword.isEmpty {
             self.saslCredentials = (saslUsername?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? saslUsername!.trimmingCharacters(in: .whitespacesAndNewlines) : nickname, saslPassword)
         } else {
             self.saslCredentials = nil
         }
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 30
+        tcp.keepaliveInterval = 10
+        tcp.keepaliveCount = 3
+
         let parameters: NWParameters
         if profile.useTLS {
             let tls = NWProtocolTLS.Options()
-            parameters = NWParameters(tls: tls)
+            parameters = NWParameters(tls: tls, tcp: tcp)
         } else {
-            parameters = NWParameters.tcp
+            parameters = NWParameters(tls: nil, tcp: tcp)
         }
         guard let port = NWEndpoint.Port(rawValue: profile.port) else {
             eventHandler?(.status(.failed("Invalid port")))
@@ -122,18 +136,34 @@ final class IRCConnection {
         }
         let connection = NWConnection(host: NWEndpoint.Host(profile.hostname), port: port, using: parameters)
         self.connection = connection
-        connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor [weak self] in
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection, self.connection === connection else { return }
                 switch state {
-                case .setup, .preparing: self?.eventHandler?(.status(.connecting))
+                case .setup, .preparing: self.eventHandler?(.status(.connecting))
                 case .ready:
-                    self?.eventHandler?(.status(.online))
-                    self?.register(nickname: nickname, realName: realName)
-                    self?.receiveNext()
-                case .failed(let error): self?.eventHandler?(.status(.failed(error.localizedDescription)))
-                case .cancelled: self?.eventHandler?(.status(.offline))
+                    self.hasReachedReadyState = true
+                    self.eventHandler?(.status(.online))
+                    self.register(nickname: nickname, realName: realName)
+                    self.startHeartbeat()
+                    self.receiveNext(on: connection)
+                case .failed(let error): self.reportFailure(error.localizedDescription, cancelling: false)
+                case .cancelled:
+                    self.stopHeartbeat()
+                    self.connection = nil
+                    if !self.hasReportedFailure { self.eventHandler?(.status(.offline)) }
                 default: break
                 }
+            }
+        }
+        connection.viabilityUpdateHandler = { [weak self, weak connection] isViable in
+            Task { @MainActor [weak self, weak connection] in
+                guard let self,
+                      let connection,
+                      self.connection === connection,
+                      self.hasReachedReadyState,
+                      !isViable else { return }
+                self.reportFailure("The network path became unavailable.")
             }
         }
         eventHandler?(.status(.connecting))
@@ -141,6 +171,7 @@ final class IRCConnection {
     }
 
     func disconnect() {
+        stopHeartbeat()
         connection?.cancel()
         connection = nil
         receiveBuffer.removeAll()
@@ -162,9 +193,14 @@ final class IRCConnection {
         let line = "\(boundedCommand)\r\n"
         connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] _ in
             Task { @MainActor [weak self, weak connection] in
+                guard let self, self.connection === connection else {
+                    completion()
+                    return
+                }
                 connection?.cancel()
-                self?.connection = nil
-                self?.receiveBuffer.removeAll()
+                self.stopHeartbeat()
+                self.connection = nil
+                self.receiveBuffer.removeAll()
                 completion()
             }
         })
@@ -183,10 +219,14 @@ final class IRCConnection {
             eventHandler?(.notice("An outgoing IRC command exceeded the server line limit and was truncated."))
         }
         let line = boundedCommand + "\r\n"
-        connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self] error in
-            Task { @MainActor [weak self] in
+        connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] error in
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection, self.connection === connection else {
+                    completion?(false)
+                    return
+                }
                 if let error {
-                    self?.eventHandler?(.notice("Send failed: \(error.localizedDescription)"))
+                    self.reportFailure("Send failed: \(error.localizedDescription)")
                     completion?(false)
                 } else {
                     completion?(true)
@@ -207,17 +247,19 @@ final class IRCConnection {
         send(command: "USER \(nickname) 0 * :\(safeRealName)")
     }
 
-    private func receiveNext() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
+    private func receiveNext(on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self, weak connection] data, _, isComplete, error in
+            Task { @MainActor [weak self, weak connection] in
+                guard let self, let connection, self.connection === connection else { return }
                 if let data, !self.process(data) { return }
                 if let error {
-                    self.eventHandler?(.status(.failed(error.localizedDescription)))
+                    self.reportFailure(error.localizedDescription)
                 } else if isComplete {
+                    self.stopHeartbeat()
+                    self.connection = nil
                     self.eventHandler?(.status(.offline))
                 } else {
-                    self.receiveNext()
+                    self.receiveNext(on: connection)
                 }
             }
         }
@@ -239,6 +281,7 @@ final class IRCConnection {
             let line = String(decoding: lineData, as: UTF8.self)
             guard let message = IRCWireMessage(line: line) else { continue }
             if message.command == "PING" { send(command: "PONG :\(message.trailing ?? message.parameters.first ?? "")") }
+            if message.command == "PONG" { handleHeartbeatReply(message) }
             if message.command == "CAP" {
                 handleCapabilityMessage(message)
             }
@@ -257,8 +300,61 @@ final class IRCConnection {
 
     private func failMalformedInput(_ message: String) {
         eventHandler?(.notice(message))
+        reportFailure(message)
+    }
+
+    /// TCP can remain locally established through a network outage when no data
+    /// is in flight. Probe the IRC peer so a silent half-open connection has a
+    /// deterministic upper bound instead of waiting for the kernel's TCP timeout.
+    private func startHeartbeat() {
+        let generation = UUID()
+        heartbeatGeneration = generation
+        pendingHeartbeatToken = nil
+        scheduleHeartbeat(generation: generation)
+    }
+
+    private func scheduleHeartbeat(generation: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.heartbeatInterval) { [weak self] in
+            guard let self,
+                  self.heartbeatGeneration == generation,
+                  self.connection != nil,
+                  !self.hasReportedFailure else { return }
+
+            let token = "netsplit-\(UUID().uuidString)"
+            self.pendingHeartbeatToken = token
+            self.scheduleHeartbeatTimeout(token: token, generation: generation)
+            self.send(command: "PING :\(token)")
+        }
+    }
+
+    private func scheduleHeartbeatTimeout(token: String, generation: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.heartbeatTimeout) { [weak self] in
+            guard let self,
+                  self.heartbeatGeneration == generation,
+                  self.pendingHeartbeatToken == token else { return }
+            self.reportFailure("Connection heartbeat timed out after \(Int(Self.heartbeatTimeout)) seconds.")
+        }
+    }
+
+    private func handleHeartbeatReply(_ message: IRCWireMessage) {
+        guard let token = pendingHeartbeatToken else { return }
+        let isMatchingReply = message.trailing == token || message.parameters.contains(token)
+        guard isMatchingReply, let generation = heartbeatGeneration else { return }
+        pendingHeartbeatToken = nil
+        scheduleHeartbeat(generation: generation)
+    }
+
+    private func stopHeartbeat() {
+        heartbeatGeneration = nil
+        pendingHeartbeatToken = nil
+    }
+
+    private func reportFailure(_ message: String, cancelling: Bool = true) {
+        guard !hasReportedFailure else { return }
+        hasReportedFailure = true
+        stopHeartbeat()
         eventHandler?(.status(.failed(message)))
-        disconnect()
+        if cancelling { connection?.cancel() }
     }
 
     private static func prefix(_ value: String, fittingUTF8ByteCount limit: Int) -> String {
