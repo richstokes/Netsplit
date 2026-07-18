@@ -581,12 +581,15 @@ private struct MessageRow: View {
     let message: IRCMessage
     let fontSize: Double
 
+    private var timestampFontSize: Double { max(fontSize - 4, 10) }
+    private var timestampColumnWidth: Double { max(64, timestampFontSize * 5.2) }
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(message.timestamp, format: .dateTime.hour().minute())
-                .font(.system(size: max(fontSize - 4, 10), design: .monospaced)).foregroundStyle(.tertiary)
+                .font(.system(size: timestampFontSize, design: .monospaced)).foregroundStyle(.tertiary)
                 .lineLimit(1).fixedSize(horizontal: true, vertical: false)
-                .frame(width: 52, alignment: .trailing)
+                .frame(width: timestampColumnWidth, alignment: .trailing)
             Text(message.sender).font(.system(size: max(fontSize - 1, 11), weight: .semibold))
                 .foregroundStyle(message.isSystem ? Color.secondary : Color.accentColor).frame(minWidth: 64, alignment: .leading)
             Text(linkifiedText)
