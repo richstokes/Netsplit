@@ -67,6 +67,7 @@ struct ContentView: View {
                             Label("Browse channels", systemImage: "list.bullet.rectangle")
                         }
                         .disabled(!state.canBrowseSelectedChannels)
+                        .accessibilityHint("Shows the channel list for the selected server")
                     }
                 }
             }
@@ -127,8 +128,12 @@ private struct SidebarView: View {
                                 Image(systemName: "star.fill")
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
+                                    .accessibilityHidden(true)
                             }
                         }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel(channel.name)
+                            .accessibilityValue(channelAccessibilityValue(channel))
                             .foregroundStyle(channel.hasUnread ? .primary : .secondary)
                             .font(.system(size: textMetrics.size(15), weight: channel.hasUnread ? .semibold : .regular))
                             .padding(.vertical, textMetrics.spacing(1.5))
@@ -150,6 +155,7 @@ private struct SidebarView: View {
                             .font(.system(size: textMetrics.size(15), weight: message.hasUnread ? .semibold : .regular))
                             .padding(.vertical, textMetrics.spacing(1.5))
                             .tag(SidebarItem.directMessage(message.id))
+                            .accessibilityValue(message.hasUnread ? "Unread messages" : "No unread messages")
                             .contextMenu {
                                 Button("Mute and Close", systemImage: "speaker.slash") {
                                     state.muteAndClose(message)
@@ -180,19 +186,31 @@ private struct SidebarView: View {
                 Button { showAddServer = true } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless)
                     .help("Add server")
+                    .accessibilityLabel("Add server")
+                    .accessibilityHint("Opens the new server profile form")
                 Button { state.showConnections() } label: { Image(systemName: "bolt.horizontal.circle") }
                     .buttonStyle(.borderless)
                     .help("Manage connections")
+                    .accessibilityLabel("Manage connections")
+                    .accessibilityHint("Shows server profiles and connection controls")
                 Spacer()
                 Text("\(state.activeProfiles.count) active")
                     .font(.system(size: textMetrics.size(11), weight: .medium))
                     .foregroundStyle(.secondary)
+                    .accessibilityLabel("\(state.activeProfiles.count) active server profiles")
             }
             .font(.system(size: textMetrics.size(13)))
             .padding(.horizontal, textMetrics.spacing(13))
             .frame(height: textMetrics.spacing(38))
             .background(.bar)
         }
+    }
+
+    private func channelAccessibilityValue(_ channel: Conversation) -> String {
+        var values: [String] = []
+        values.append(channel.hasUnread ? "Unread messages" : "No unread messages")
+        if state.isFavorite(channel) { values.append("Favorite") }
+        return values.joined(separator: ", ")
     }
 }
 
@@ -206,6 +224,7 @@ private struct ServerRow: View {
             Image(systemName: state.status(for: profile) == .online ? "circle.inset.filled" : "circle")
                 .font(.system(size: textMetrics.size(12)))
                 .foregroundStyle(state.status(for: profile).tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(profile.hostname)
                     .font(.system(size: textMetrics.size(15)))
@@ -215,6 +234,9 @@ private struct ServerRow: View {
             }
         }
         .padding(.vertical, textMetrics.spacing(1))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(profile.hostname)
+        .accessibilityValue(state.status(for: profile).label)
     }
 }
 
@@ -237,6 +259,7 @@ private struct ConnectionCenterView: View {
                         Label("Connections", systemImage: "bolt.horizontal.circle.fill")
                             .font(.system(size: textMetrics.size(30), weight: .bold))
                             .foregroundStyle(.tint)
+                            .accessibilityAddTraits(.isHeader)
                         Text("Choose a network to connect, or add a profile for your own server. Active networks and their channels stay focused in the sidebar.")
                             .font(.system(size: textMetrics.size(15)))
                             .foregroundStyle(.secondary)
@@ -288,6 +311,7 @@ private struct ServerProfileCard: View {
                     .foregroundStyle(profile.useTLS ? Color.accentColor : Color.secondary)
                     .frame(width: textMetrics.spacing(36), height: textMetrics.spacing(36))
                     .background(Color.accentColor.opacity(profile.useTLS ? 0.12 : 0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(profile.name)
                         .font(.system(size: textMetrics.size(17), weight: .semibold))
@@ -389,6 +413,7 @@ private struct ConversationView: View {
                     .foregroundStyle(.tint)
                     .frame(width: textMetrics.spacing(34), height: textMetrics.spacing(34))
                     .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.system(size: textMetrics.size(18), weight: .semibold))
@@ -448,7 +473,9 @@ private struct ConversationView: View {
                             }
                             .padding(.horizontal, textMetrics.spacing(24))
                             .padding(.vertical, textMetrics.spacing(18))
+                            .accessibilityAddTraits(.updatesFrequently)
                         }
+                        .accessibilityLabel("Conversation messages")
                         .onAppear {
                             scrollToLatest(using: proxy)
                         }
@@ -467,6 +494,8 @@ private struct ConversationView: View {
                             .padding(.vertical, textMetrics.spacing(9))
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .focused($composerFocused)
+                            .accessibilityLabel("Message to \(title)")
+                            .accessibilityHint("Type a message. Press Return to send. In commands with a nickname, press Tab to complete the nickname.")
                             .onSubmit(send)
                             .onKeyPress(.tab) {
                                 completeRecipient()
@@ -480,6 +509,8 @@ private struct ConversationView: View {
                         }
                         .buttonStyle(.borderedProminent).clipShape(Circle())
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityLabel("Send message")
+                        .accessibilityHint("Sends the message to \(title)")
                     }
                     .padding(.horizontal, textMetrics.spacing(20))
                     .padding(.vertical, textMetrics.spacing(14))
@@ -737,7 +768,16 @@ private struct ChannelMemberRow: View {
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
         .onTapGesture(count: 2) {
-            state.startDirectMessage(with: member.nickname, from: selection)
+            startDirectMessage()
+        }
+        .focusable()
+        .onKeyPress(.return) {
+            startDirectMessage()
+            return .handled
+        }
+        .onKeyPress(.space) {
+            startDirectMessage()
+            return .handled
         }
         .contextMenu {
             Button("Message \(member.nickname)", systemImage: "message") {
@@ -759,7 +799,25 @@ private struct ChannelMemberRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(member.role.map { "\(member.nickname), \($0)" } ?? member.nickname)
-        .accessibilityHint("Double-click to start a private message")
+        .accessibilityValue(isMuted ? "Muted" : "Not muted")
+        .accessibilityHint("Starts a private message")
+        .accessibilityAction {
+            startDirectMessage()
+        }
+        .accessibilityAction(named: "View Whois") {
+            state.requestWhois(for: member.nickname, from: selection)
+        }
+        .accessibilityAction(named: isMuted ? "Unmute" : "Mute") {
+            if isMuted {
+                state.unmute(member.nickname, from: selection)
+            } else {
+                state.mute(member.nickname, from: selection)
+            }
+        }
+    }
+
+    private func startDirectMessage() {
+        state.startDirectMessage(with: member.nickname, from: selection)
     }
 }
 
@@ -788,6 +846,7 @@ private struct MessageRow: View {
                     .font(.system(size: textMetrics.size(5)))
                     .foregroundStyle(.tertiary)
                     .frame(width: textMetrics.spacing(10))
+                    .accessibilityHidden(true)
                 Text(linkified(systemText))
                     .font(.system(size: textMetrics.size(14)))
                     .foregroundStyle(.secondary)
@@ -853,9 +912,11 @@ private struct LinkWarningView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 30))
                     .foregroundStyle(.yellow)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Open External Link?")
                         .font(.title2.weight(.semibold))
+                        .accessibilityAddTraits(.isHeader)
                     Text("Links in IRC messages can lead to deceptive or malicious content. Only continue if you trust the sender and destination.")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

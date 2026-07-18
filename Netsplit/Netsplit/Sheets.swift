@@ -93,6 +93,7 @@ struct ServerProfileEditor: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(isEditing ? "Edit Server Profile" : "Add a Server")
                     .font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Text(isEditing ? "Profile changes apply the next time you connect." : "Create a connection profile for any IRC network.")
                     .foregroundStyle(.secondary)
             }
@@ -112,6 +113,7 @@ struct ServerProfileEditor: View {
                 }
                 .padding(24)
             }
+            .accessibilityLabel("Server profile settings")
 
             Divider()
 
@@ -124,9 +126,11 @@ struct ServerProfileEditor: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
                 Button(isEditing ? "Save Changes" : "Add Server", action: saveProfile)
                 .buttonStyle(.borderedProminent)
                 .disabled(!canSave)
+                .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
@@ -146,15 +150,19 @@ struct ServerProfileEditor: View {
         ServerEditorSection(title: "Connection", systemImage: "network") {
             ServerEditorFieldRow("Name") {
                 TextField("My IRC Network", text: $name, prompt: Text("My IRC Network"))
+                    .accessibilityLabel("Profile name")
+                    .accessibilityHint("A name used to identify this IRC network")
             }
             ServerEditorFieldRow("Server address") {
                 TextField("irc.example.org", text: $hostname, prompt: Text("irc.example.org"))
+                    .accessibilityLabel("Server address")
             }
             ServerEditorFieldRow("Port") {
                 TextField("6697", text: $port)
+                    .accessibilityLabel("IRC port")
             }
             if ircPort == nil {
-                ServerEditorHelpText("Enter an IRC port between 1 and 65535.", tint: .red)
+                ServerEditorHelpText("Enter an IRC port between 1 and 65535.", tint: .red, isError: true)
             }
             ServerEditorToggleRow("Use encrypted connection (TLS)", isOn: $useTLS)
             ServerEditorToggleRow("Connect automatically at launch", isOn: $autoConnect)
@@ -165,9 +173,11 @@ struct ServerProfileEditor: View {
         ServerEditorSection(title: "Identity", systemImage: "person.crop.circle") {
             ServerEditorFieldRow("Nickname") {
                 TextField("Use global nickname", text: $nicknameOverride, prompt: Text("Use global nickname"))
+                    .accessibilityLabel("Nickname override")
+                    .accessibilityHint("Leave blank to use the global nickname")
             }
             if let nicknameOverrideError {
-                ServerEditorHelpText(nicknameOverrideError, tint: .red)
+                ServerEditorHelpText(nicknameOverrideError, tint: .red, isError: true)
             }
             ServerEditorHelpText("Leave blank to use the global nickname from Settings. Set a value here when this network requires a different identity.")
         }
@@ -177,17 +187,20 @@ struct ServerProfileEditor: View {
         ServerEditorSection(title: "Server Authentication", systemImage: "key") {
             ServerEditorFieldRow("Server password") {
                 SecureField("Optional", text: $serverPassword)
+                    .accessibilityLabel("Server password")
             }
             ServerEditorToggleRow("Authenticate with SASL", isOn: $useSASL)
             if useSASL {
                 ServerEditorFieldRow("SASL username") {
                     TextField("Use server nickname", text: $saslUsername, prompt: Text("Use server nickname"))
+                        .accessibilityLabel("SASL username")
                 }
                 ServerEditorFieldRow("SASL password") {
                     SecureField("Required for SASL", text: $saslPassword)
+                        .accessibilityLabel("SASL password")
                 }
                 if saslPassword.isEmpty {
-                    ServerEditorHelpText("Enter a SASL password or turn off SASL authentication.", tint: .red)
+                    ServerEditorHelpText("Enter a SASL password or turn off SASL authentication.", tint: .red, isError: true)
                 }
             }
             ServerEditorHelpText("Passwords are stored in your macOS Keychain. SASL PLAIN is requested only when the IRC server advertises SASL support.")
@@ -200,40 +213,47 @@ struct ServerProfileEditor: View {
             if useSSHTunnel {
                 ServerEditorFieldRow("SSH hostname") {
                     TextField("ssh.example.org", text: $sshHostname, prompt: Text("ssh.example.org"))
+                        .accessibilityLabel("SSH hostname")
                 }
                 ServerEditorFieldRow("SSH port") {
                     TextField("22", text: $sshPort)
+                        .accessibilityLabel("SSH port")
                 }
                 if parsedSSHPort == nil {
-                    ServerEditorHelpText("Enter an SSH port between 1 and 65535.", tint: .red)
+                    ServerEditorHelpText("Enter an SSH port between 1 and 65535.", tint: .red, isError: true)
                 }
                 ServerEditorFieldRow("SSH username") {
                     TextField("Username", text: $sshUsername)
+                        .accessibilityLabel("SSH username")
                 }
                 ServerEditorFieldRow("SSH password") {
                     SecureField("Optional when using a key", text: $sshPassword)
+                        .accessibilityLabel("SSH password")
                 }
                 ServerEditorFieldRow("Private key") {
                     HStack(spacing: 10) {
                         Button(sshKeyFilename == nil ? "Choose Key…" : "Replace Key…") {
                             chooseSSHKey()
                         }
+                        .accessibilityLabel(sshKeyFilename == nil ? "Choose SSH private key" : "Replace SSH private key")
                         if let sshKeyFilename {
                             Text(sshKeyFilename)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .foregroundStyle(.secondary)
+                                .accessibilityLabel("Selected private key: \(sshKeyFilename)")
                             Spacer(minLength: 4)
                             Button("Remove") {
                                 self.sshKeyFilename = nil
                                 sshPrivateKey = ""
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Remove SSH private key")
                         }
                     }
                 }
                 if !hasSSHAuthentication {
-                    ServerEditorHelpText("Add an SSH password or private key to connect.", tint: .red)
+                    ServerEditorHelpText("Add an SSH password or private key to connect.", tint: .red, isError: true)
                 }
                 ServerEditorHelpText("SSH credentials are stored in Keychain. Unencrypted OpenSSH Ed25519 keys are recommended; many modern servers reject the legacy signature used by this transport for RSA keys.")
                 ServerEditorHelpText("The SSH host identity is learned on first connection and pinned to this server profile.")
@@ -267,6 +287,7 @@ struct ServerProfileEditor: View {
                                 ),
                                 prompt: Text("/msg NickServ IDENTIFY password")
                             )
+                            .accessibilityLabel("On-connect command \(index + 1)")
                             Button {
                                 moveOnConnectCommand(command.id, by: -1)
                             } label: {
@@ -275,6 +296,7 @@ struct ServerProfileEditor: View {
                             .buttonStyle(.borderless)
                             .disabled(index == 0)
                             .help("Move command earlier")
+                            .accessibilityLabel("Move command \(index + 1) earlier")
 
                             Button {
                                 moveOnConnectCommand(command.id, by: 1)
@@ -284,6 +306,7 @@ struct ServerProfileEditor: View {
                             .buttonStyle(.borderless)
                             .disabled(index == onConnectCommands.count - 1)
                             .help("Move command later")
+                            .accessibilityLabel("Move command \(index + 1) later")
 
                             Button(role: .destructive) {
                                 onConnectCommands.removeAll { $0.id == command.id }
@@ -292,6 +315,7 @@ struct ServerProfileEditor: View {
                             }
                             .buttonStyle(.borderless)
                             .help("Remove command")
+                            .accessibilityLabel("Remove command \(index + 1)")
                         }
                     }
                 }
@@ -444,6 +468,7 @@ private struct ServerEditorFieldRow<Content: View>: View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
             Text(label)
                 .frame(width: 140, alignment: .trailing)
+                .accessibilityHidden(true)
             content
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -472,10 +497,12 @@ private struct ServerEditorToggleRow: View {
 private struct ServerEditorHelpText: View {
     let text: String
     let tint: Color
+    let isError: Bool
 
-    init(_ text: String, tint: Color = .secondary) {
+    init(_ text: String, tint: Color = .secondary, isError: Bool = false) {
         self.text = text
         self.tint = tint
+        self.isError = isError
     }
 
     var body: some View {
@@ -484,12 +511,15 @@ private struct ServerEditorHelpText: View {
             HStack(alignment: .top, spacing: 7) {
                 Image(systemName: "info.circle")
                     .padding(.top, 1)
+                    .accessibilityHidden(true)
                 Text(text)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .font(.caption)
             .foregroundStyle(tint)
             .help(text)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(isError ? "Error: \(text)" : text)
             Spacer(minLength: 0)
         }
     }
@@ -518,6 +548,7 @@ struct ChannelBrowser: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Browse Channels")
                             .font(.system(size: textMetrics.size(22), weight: .semibold))
+                            .accessibilityAddTraits(.isHeader)
                         Text(profile?.name ?? "IRC network")
                             .font(.system(size: textMetrics.size(13)))
                             .foregroundStyle(.secondary)
@@ -525,11 +556,13 @@ struct ChannelBrowser: View {
                     Spacer()
                     Button("Done") { dismiss() }
                         .controlSize(textMetrics.scale > 1.15 ? .large : .regular)
+                        .keyboardShortcut(.cancelAction)
                 }
 
                 HStack(spacing: textMetrics.spacing(12)) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                     TextField("Search channel names and topics", text: $search)
                         .font(.system(size: textMetrics.size(14)))
                         .textFieldStyle(.plain)
@@ -543,6 +576,7 @@ struct ChannelBrowser: View {
                         }
                         .buttonStyle(.plain)
                         .help("Clear search")
+                        .accessibilityLabel("Clear channel search")
                     }
                 }
                 .padding(.horizontal, textMetrics.spacing(11))
@@ -557,6 +591,7 @@ struct ChannelBrowser: View {
                             : "\(results.count) of \(availableChannels.count) channels"))
                         .font(.system(size: textMetrics.size(12), weight: .medium))
                         .foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.updatesFrequently)
                 }
             }
             .padding(textMetrics.spacing(20))
@@ -572,6 +607,7 @@ struct ChannelBrowser: View {
                                 .foregroundStyle(.tint)
                                 .frame(width: textMetrics.spacing(30), height: textMetrics.spacing(30))
                                 .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .accessibilityHidden(true)
 
                             VStack(alignment: .leading, spacing: textMetrics.spacing(5)) {
                                 Text(channel.name)
@@ -591,10 +627,12 @@ struct ChannelBrowser: View {
                                 .padding(.horizontal, textMetrics.spacing(8))
                                 .padding(.vertical, textMetrics.spacing(5))
                                 .background(.quaternary, in: Capsule())
+                                .accessibilityLabel("\(channel.userCount) users")
 
                             Button("Join") { join(channel) }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(textMetrics.scale > 1.15 ? .large : .small)
+                                .accessibilityLabel("Join \(channel.name)")
                         }
                         .padding(.vertical, textMetrics.spacing(7))
                         .contentShape(Rectangle())
@@ -603,7 +641,9 @@ struct ChannelBrowser: View {
                     }
                 } else if isLoading {
                     VStack(spacing: 12) {
-                        ProgressView().controlSize(.large)
+                        ProgressView()
+                            .controlSize(.large)
+                            .accessibilityLabel("Fetching channels")
                         Text("Fetching channels").font(.title3.weight(.semibold))
                         Text("Large networks can take a moment to return their list.")
                             .font(.callout).foregroundStyle(.secondary)
@@ -648,6 +688,8 @@ struct SettingsView: View {
                     Text(nicknameError)
                         .font(.caption)
                         .foregroundStyle(.red)
+                        .accessibilityLabel("Error: \(nicknameError)")
+                        .accessibilityAddTraits(.updatesFrequently)
                 }
                 TextField("Real name", text: $state.realName)
                     .onSubmit(state.saveIdentity)
@@ -684,6 +726,9 @@ struct SettingsView: View {
                     in: 12...24,
                     step: 1
                 )
+                .accessibilityLabel("Interface text size")
+                .accessibilityValue("\(Int(state.transcriptFontSize)) points")
+                .accessibilityHint("Adjusts text throughout the app from 12 to 24 points")
                 Button("Reset Text Size") { state.resetTranscriptFontSize() }
                 Text("Applies to conversations, navigation, member lists, connection cards, and the channel browser.")
                     .font(.caption)
