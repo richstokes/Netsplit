@@ -229,7 +229,6 @@ private struct SidebarChannelLabel: View {
     @Environment(\.ircTextMetrics) private var textMetrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isPulseDimmed = false
-    @State private var pulseTask: Task<Void, Never>?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -253,52 +252,33 @@ private struct SidebarChannelLabel: View {
         .foregroundStyle(channel.hasMention ? Color.accentColor : (channel.hasUnread ? Color.primary : Color.secondary))
         .font(.system(size: textMetrics.size(15), weight: channel.hasUnread ? .semibold : .regular))
         .padding(.vertical, textMetrics.spacing(1.5))
-        .onAppear {
-            if channel.hasMention { startMentionPulse() }
-        }
-        .onChange(of: channel.mentionRevision) {
-            startMentionPulse()
-        }
-        .onChange(of: channel.hasMention) { _, hasMention in
-            if !hasMention { stopMentionPulse() }
-        }
-        .onDisappear {
-            pulseTask?.cancel()
+        .task(id: channel.hasMention ? channel.mentionRevision : nil) {
+            await pulseMention()
         }
     }
 
-    private func startMentionPulse() {
-        pulseTask?.cancel()
+    @MainActor
+    private func pulseMention() async {
         isPulseDimmed = false
         guard channel.hasMention, !reduceMotion else { return }
 
-        pulseTask = Task { @MainActor in
-            for _ in 0..<3 {
-                withAnimation(.easeInOut(duration: 0.5)) {
-                    isPulseDimmed = true
-                }
-                do {
-                    try await Task.sleep(nanoseconds: 500_000_000)
-                } catch {
-                    return
-                }
-                withAnimation(.easeInOut(duration: 0.5)) {
-                    isPulseDimmed = false
-                }
-                do {
-                    try await Task.sleep(nanoseconds: 500_000_000)
-                } catch {
-                    return
-                }
+        for _ in 0..<3 {
+            withAnimation(.easeInOut(duration: 0.5)) {
+                isPulseDimmed = true
             }
-        }
-    }
-
-    private func stopMentionPulse() {
-        pulseTask?.cancel()
-        pulseTask = nil
-        withAnimation(.easeOut(duration: 0.15)) {
-            isPulseDimmed = false
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.5)) {
+                isPulseDimmed = false
+            }
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return
+            }
         }
     }
 }
@@ -544,14 +524,15 @@ private struct ConversationView: View {
                             .accessibilityAddTraits(.updatesFrequently)
                         }
                         .accessibilityLabel("Conversation messages")
-                        .onAppear {
-                            scrollToLatest(using: proxy)
-                        }
-                        .onChange(of: state.messageRevision) {
-                            scrollToLatest(using: proxy)
-                        }
-                        .onChange(of: selection) {
-                            scrollToLatest(using: proxy)
+                        .task(id: state.messages(for: selection).last?.id) {
+                            // Coalesce reconnect bursts and scroll only when the
+                            // visible conversation receives a new final message.
+                            await Task.yield()
+                            guard !Task.isCancelled,
+                                  let id = state.messages(for: selection).last?.id else { return }
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                proxy.scrollTo(id, anchor: .bottom)
+                            }
                         }
                     }
                     HStack(alignment: .bottom, spacing: 12) {
@@ -645,15 +626,6 @@ private struct ConversationView: View {
         guard !text.isEmpty else { return }
         state.send(text, to: selection)
         draft = ""
-    }
-
-    private func scrollToLatest(using proxy: ScrollViewProxy) {
-        guard let id = state.messages(for: selection).last?.id else { return }
-        DispatchQueue.main.async {
-            withAnimation(.easeOut(duration: 0.16)) {
-                proxy.scrollTo(id, anchor: .bottom)
-            }
-        }
     }
 
     private func completeRecipient() -> Bool {
