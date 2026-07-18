@@ -29,6 +29,7 @@ final class IRCAppState: ObservableObject {
     }
     @Published var transcriptFontSize: Double
     @Published var selection: SidebarItem?
+    @Published var showsMemberList = true
     @Published private(set) var channels: [Conversation] = []
     @Published private(set) var directMessages: [Conversation] = []
     @Published private(set) var connectionStatuses: [UUID: ConnectionStatus] = [:]
@@ -135,6 +136,48 @@ final class IRCAppState: ObservableObject {
     var canBrowseSelectedChannels: Bool {
         guard let profile = selectedProfile else { return false }
         return registeredServerIDs.contains(profile.id)
+    }
+
+    var canToggleMemberList: Bool {
+        guard case .channel(let id) = selection else { return false }
+        return channels.contains { $0.id == id }
+    }
+
+    var canCloseActiveSelection: Bool {
+        guard let selection else { return false }
+        switch selection {
+        case .connectionCenter:
+            return false
+        case .server(let id):
+            return profiles.contains { $0.id == id }
+        case .channel(let id):
+            return channels.contains { $0.id == id }
+        case .directMessage(let id):
+            return directMessages.contains { $0.id == id }
+        }
+    }
+
+    func toggleMemberList() {
+        guard canToggleMemberList else { return }
+        showsMemberList.toggle()
+    }
+
+    func closeActiveSelection() {
+        guard let selection else { return }
+        switch selection {
+        case .connectionCenter:
+            return
+        case .server(let id):
+            guard let profile = profiles.first(where: { $0.id == id }) else { return }
+            disconnect(profile)
+            self.selection = .connectionCenter
+        case .channel(let id):
+            guard let channel = channels.first(where: { $0.id == id }) else { return }
+            leave(channel)
+        case .directMessage(let id):
+            guard let directMessage = directMessages.first(where: { $0.id == id }) else { return }
+            close(directMessage)
+        }
     }
 
     func status(for profile: ServerProfile) -> ConnectionStatus {

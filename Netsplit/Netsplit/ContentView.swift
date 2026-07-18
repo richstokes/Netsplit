@@ -394,7 +394,6 @@ private struct ConversationView: View {
     let selection: SidebarItem
     @State private var draft = ""
     @State private var tabCompletion: RecipientTabCompletion?
-    @State private var showsMemberList = true
     @State private var pendingURL: PendingURL?
     @FocusState private var composerFocused: Bool
     @Environment(\.ircTextMetrics) private var textMetrics
@@ -444,13 +443,13 @@ private struct ConversationView: View {
                             .padding(.horizontal, textMetrics.spacing(10))
                             .padding(.vertical, textMetrics.spacing(6))
                             .background(.quaternary, in: Capsule())
-                        Button { showsMemberList.toggle() } label: {
-                            Label(showsMemberList ? "Hide Members" : "Show Members", systemImage: "sidebar.right")
+                        Button { state.toggleMemberList() } label: {
+                            Label(state.showsMemberList ? "Hide Members" : "Show Members", systemImage: "sidebar.right")
                         }
                         .font(.system(size: textMetrics.size(12), weight: .medium))
                         .buttonStyle(.bordered)
                         .controlSize(textMetrics.scale > 1.15 ? .large : .small)
-                        .help(showsMemberList ? "Hide member list" : "Show member list")
+                        .help(state.showsMemberList ? "Hide member list" : "Show member list")
                     }
                     .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(2)
@@ -516,7 +515,7 @@ private struct ConversationView: View {
                     .padding(.vertical, textMetrics.spacing(14))
                     .background(.bar)
                 }
-                if isChannel && showsMemberList {
+                if isChannel && state.showsMemberList {
                     Divider()
                     ChannelMemberList(members: state.members(for: selection), state: state, selection: selection)
                 }

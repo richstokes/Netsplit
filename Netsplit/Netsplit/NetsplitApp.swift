@@ -12,6 +12,7 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
     weak var state: IRCAppState?
     private var isTerminating = false
     private var hasRepliedToTermination = false
+    private var shortcutMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let notifications = NSWorkspace.shared.notificationCenter
@@ -27,10 +28,24 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+
+        // SwiftUI's WindowGroup installs its own Command-W equivalent. Handle
+        // the conversation shortcut before AppKit turns it into Close Window.
+        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard !event.isARepeat,
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers?.lowercased() == "w",
+                  self?.state?.canCloseActiveSelection == true else { return event }
+            self?.state?.closeActiveSelection()
+            return nil
+        }
     }
 
     deinit {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        if let shortcutMonitor {
+            NSEvent.removeMonitor(shortcutMonitor)
+        }
     }
 
     @objc private func workspaceWillSleep(_ notification: Notification) {
@@ -78,6 +93,13 @@ struct NetsplitApp: App {
                 }
         }
         .commands {
+            CommandGroup(after: .newItem) {
+                Button("Close Current Conversation") {
+                    state.closeActiveSelection()
+                }
+                .keyboardShortcut("w", modifiers: [.command])
+                .disabled(!state.canCloseActiveSelection)
+            }
             CommandMenu("Connection") {
                 Button("Connect") { state.showConnections() }
                     .keyboardShortcut("k", modifiers: [.command])
@@ -90,6 +112,12 @@ struct NetsplitApp: App {
                     .keyboardShortcut("0", modifiers: [.command, .shift])
             }
             CommandGroup(after: .toolbar) {
+                Button(state.showsMemberList ? "Hide Members" : "Show Members") {
+                    state.toggleMemberList()
+                }
+                .keyboardShortcut("b", modifiers: [.command])
+                .disabled(!state.canToggleMemberList)
+                Divider()
                 Button("Zoom In") { state.adjustTranscriptFontSize(by: 1) }
                     .keyboardShortcut("+", modifiers: [.command])
                 Button("Zoom Out") { state.adjustTranscriptFontSize(by: -1) }

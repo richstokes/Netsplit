@@ -119,4 +119,31 @@ struct IRCModelsAndPolicyTests {
         #expect(merged.map(\.text) == ["one", "two", "three"])
         #expect(IRCConversationHistory.merging(first, second, limit: 0).isEmpty)
     }
+
+    @Test("Closing a direct message returns to its server")
+    @MainActor
+    func closesActiveDirectMessage() {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+
+        #expect(state.canCloseActiveSelection)
+        #expect(state.directMessages.count == 1)
+
+        state.closeActiveSelection()
+
+        #expect(state.directMessages.isEmpty)
+        #expect(state.selection == .server(profile.id))
+    }
+
+    @Test("Member list shortcut only applies to channels")
+    @MainActor
+    func ignoresMemberListToggleOutsideChannels() {
+        let state = IRCAppState()
+        let initialValue = state.showsMemberList
+
+        #expect(!state.canToggleMemberList)
+        state.toggleMemberList()
+        #expect(state.showsMemberList == initialValue)
+    }
 }
