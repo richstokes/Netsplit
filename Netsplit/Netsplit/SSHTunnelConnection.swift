@@ -218,9 +218,13 @@ final class SSHTunnelConnection {
         self.channel = nil
         self.client = nil
         Task {
-            // Closing the parent SSH transport closes its children on the same
-            // event loop. Closing a child first can race an inbound flow-control
-            // update and trip NIOSSH's closed-channel precondition.
+            // Work around a NIOSSH child-channel state-machine bug: closing a
+            // child can race a pending inbound read, which then sends a window
+            // adjustment after the channel has left its valid state and trips a
+            // fatal precondition. Revisit this ordering after upgrading NIOSSH
+            // to a version that safely handles window adjustments while closing.
+            // Closing the parent transport lets it close its children on the
+            // same event loop and avoids exposing that race here.
             if let client {
                 // Stop requesting more child-channel reads before closing the
                 // parent. This narrows NIOSSH's pending-read/window-adjust race
