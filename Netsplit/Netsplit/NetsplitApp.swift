@@ -14,7 +14,7 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
     private var isTerminating = false
     private var hasRepliedToTermination = false
     private var shortcutMonitor: Any?
-    private let swipeCommitThreshold: CGFloat = 0.35
+    private let swipeCommitThreshold: CGFloat = 0.25
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let notifications = NSWorkspace.shared.notificationCenter
@@ -108,7 +108,7 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func beginSwipeTracking(with event: NSEvent) -> Bool {
-        guard event.phase == .began,
+        guard event.phase == .began || event.phase == .changed,
               NSEvent.isSwipeTrackingFromScrollEventsEnabled,
               abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY),
               let state else { return false }
@@ -126,10 +126,11 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] amount, phase, isComplete, _ in
             guard let self, !didNavigate else { return }
 
-            // Commit as soon as the physical gesture ends instead of waiting
-            // for AppKit's settling animation. Keep the completed amount as a
-            // fallback so a short, fast flick still follows system behavior.
-            let reachedPhysicalThreshold = phase == .ended && abs(amount) >= swipeCommitThreshold
+            // Commit once the gesture is clearly intentional instead of
+            // waiting for finger lift or AppKit's settling animation. Keep the
+            // completed amount as a fallback so a short, fast flick still
+            // follows system behavior.
+            let reachedPhysicalThreshold = phase == .changed && abs(amount) >= swipeCommitThreshold
             let systemCommittedSwipe = isComplete && abs(amount) >= 1
             guard reachedPhysicalThreshold || systemCommittedSwipe else { return }
 

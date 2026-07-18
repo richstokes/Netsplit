@@ -12,6 +12,8 @@ If you enjoy using Netsplit and want to support it, [feel free to buy me a coffe
 
 Open an issue here for bug reports/feature requests.
 
+Navigate backward and forward through recently viewed servers, channels, and direct messages with Command-[ and Command-], mouse back/forward buttons, or horizontal trackpad swipes. Closed conversations are skipped automatically.
+
 ## Development and tests
 
 Open `Netsplit/Netsplit.xcodeproj` and use the shared **Netsplit** scheme. Its
