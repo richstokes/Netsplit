@@ -111,7 +111,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         .init(name: "Libera.Chat", hostname: "irc.libera.chat", port: 6697, useTLS: true, isBuiltIn: true, presetID: "libera-chat"),
         .init(name: "Snoonet", hostname: "irc.snoonet.org", port: 6697, useTLS: true, isBuiltIn: true, presetID: "snoonet"),
         .init(name: "OFTC", hostname: "irc.oftc.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "oftc"),
-        .init(name: "EFnet", hostname: "irc.efnet.org", port: 6697, useTLS: true, isBuiltIn: true, presetID: "efnet"),
+        .init(name: "EFnet", hostname: "irc.efnet.org", port: 6667, useTLS: false, isBuiltIn: true, presetID: "efnet"),
         .init(name: "Freenode", hostname: "irc.freenode.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "freenode"),
         .init(name: "DALnet", hostname: "irc.dal.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "dalnet"),
         .init(name: "Undernet", hostname: "irc.undernet.org", port: 6667, useTLS: false, isBuiltIn: true, presetID: "undernet"),
@@ -154,6 +154,31 @@ enum IRCCaseMapping: String {
                 }
             }
         })
+    }
+}
+
+enum IRCIdentityValidation {
+    static func nicknameError(_ value: String) -> String? {
+        let nickname = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !nickname.isEmpty else { return "Enter a nickname." }
+        guard nickname == value else { return "Nicknames cannot begin or end with whitespace." }
+        guard !nickname.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }) else {
+            return "Nicknames cannot contain whitespace or control characters."
+        }
+        let leadingSymbols = "[]\\`_^{|}"
+        guard let first = nickname.first,
+              first.isLetter || leadingSymbols.contains(first) else {
+            return "Nicknames must begin with a letter or nickname symbol."
+        }
+        let remainingSymbols = "-[]\\`_^{|}"
+        guard nickname.allSatisfy({ $0.isLetter || $0.isNumber || remainingSymbols.contains($0) }) else {
+            return "The nickname contains a character reserved by IRC."
+        }
+        return nil
+    }
+
+    static func isValidNickname(_ value: String) -> Bool {
+        nicknameError(value) == nil
     }
 }
 

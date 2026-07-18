@@ -21,6 +21,7 @@ struct ContentView: View {
                     ConnectionCenterView(state: state, showAddServer: $showAddServer, editingProfile: $editingProfile)
                 } else if let selection = state.selection {
                     ConversationView(state: state, selection: selection)
+                        .id(selection)
                 }
             }
             .toolbar {

@@ -91,11 +91,13 @@ final class IRCConnection {
     private static let maximumBufferedLineBytes = 64 * 1024
     private static let heartbeatInterval: TimeInterval = 30
     private static let heartbeatTimeout: TimeInterval = 15
+    private static let registrationTimeout: TimeInterval = 30
     private var connection: NWConnection?
     private var sshTunnel: SSHTunnelConnection?
     private var receiveBuffer = Data()
     private var heartbeatGeneration: UUID?
     private var pendingHeartbeatToken: String?
+    private var registrationTimeoutGeneration: UUID?
     private var hasReportedFailure = false
     private var hasReachedReadyState = false
     private var nickname = "netsplit"
@@ -114,6 +116,14 @@ final class IRCConnection {
         isWaitingForSASLResponse = false
         hasReportedFailure = false
         hasReachedReadyState = false
+        guard IRCIdentityValidation.isValidNickname(nickname) else {
+            eventHandler?(.terminalFailure(IRCIdentityValidation.nicknameError(nickname) ?? "The configured nickname is invalid."))
+            return
+        }
+        guard profile.useSASL != true || !saslPassword.isEmpty else {
+            eventHandler?(.terminalFailure("SASL is enabled for this profile, but no SASL password is configured."))
+            return
+        }
         self.serverPassword = serverPassword.isEmpty ? nil : serverPassword
         if profile.useSASL == true, !saslPassword.isEmpty {
             self.saslCredentials = (saslUsername?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? saslUsername!.trimmingCharacters(in: .whitespacesAndNewlines) : nickname, saslPassword)
@@ -149,6 +159,7 @@ final class IRCConnection {
                     self.hasReachedReadyState = true
                     self.eventHandler?(.status(.online))
                     self.register(nickname: nickname, realName: realName)
+                    self.startRegistrationTimeout()
                     self.startHeartbeat()
                 },
                 onData: { [weak self, weak tunnel] data in
@@ -208,6 +219,7 @@ final class IRCConnection {
                     self.hasReachedReadyState = true
                     self.eventHandler?(.status(.online))
                     self.register(nickname: nickname, realName: realName)
+                    self.startRegistrationTimeout()
                     self.startHeartbeat()
                     self.receiveNext(on: connection)
                 case .failed(let error): self.reportFailure(error.localizedDescription, cancelling: false)
@@ -235,6 +247,7 @@ final class IRCConnection {
 
     func disconnect() {
         stopHeartbeat()
+        stopRegistrationTimeout()
         connection?.cancel()
         connection = nil
         sshTunnel?.close()
@@ -382,6 +395,7 @@ final class IRCConnection {
             // payload bytes instead of silently discarding the entire line.
             let line = String(decoding: lineData, as: UTF8.self)
             guard let message = IRCWireMessage(line: line) else { continue }
+            if message.command == "001" { stopRegistrationTimeout() }
             if message.command == "PING" { send(command: "PONG :\(message.trailing ?? message.parameters.first ?? "")") }
             if message.command == "PONG" { handleHeartbeatReply(message) }
             if message.command == "CAP" {
@@ -451,6 +465,22 @@ final class IRCConnection {
         pendingHeartbeatToken = nil
     }
 
+    private func startRegistrationTimeout() {
+        let generation = UUID()
+        registrationTimeoutGeneration = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.registrationTimeout) { [weak self] in
+            guard let self,
+                  self.registrationTimeoutGeneration == generation,
+                  self.connection != nil || self.sshTunnel != nil,
+                  !self.hasReportedFailure else { return }
+            self.reportFailure("The IRC server did not complete registration within \(Int(Self.registrationTimeout)) seconds.")
+        }
+    }
+
+    private func stopRegistrationTimeout() {
+        registrationTimeoutGeneration = nil
+    }
+
     private func reportFailure(
         _ message: String,
         cancelling: Bool = true,
@@ -459,6 +489,7 @@ final class IRCConnection {
         guard !hasReportedFailure else { return }
         hasReportedFailure = true
         stopHeartbeat()
+        stopRegistrationTimeout()
         if automaticallyReconnect {
             eventHandler?(.status(.failed(message)))
         } else {

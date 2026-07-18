@@ -64,6 +64,7 @@ final class IRCAppState: ObservableObject {
     private var knownChannelNamesByServer: [UUID: Set<String>] = [:]
     private var scheduledChannelListFlushes: Set<UUID> = []
     private var channelListCompletionDates: [UUID: Date] = [:]
+    private var channelListRequestIDs: [UUID: UUID] = [:]
     private var reconnectAttempts: [UUID: Int] = [:]
     private var scheduledReconnects: [UUID: UUID] = [:]
     private var registrationNicknameSuffixes: [UUID: Set<Int>] = [:]
@@ -71,6 +72,7 @@ final class IRCAppState: ObservableObject {
     private var sessionIDs: [UUID: UUID] = [:]
     private var sessionOnConnectCommands: [UUID: [String]] = [:]
     private let channelListCacheLifetime: TimeInterval = 120
+    private let channelListRequestTimeout: TimeInterval = 30
     private let favoriteJoinInterval: TimeInterval = 0.45
     private let onConnectCommandInterval: TimeInterval = 0.5
     private let favoriteJoinDelayAfterCommands: TimeInterval = 2
@@ -86,7 +88,9 @@ final class IRCAppState: ObservableObject {
         let defaults = UserDefaults.standard
         let legacyAccountNickname = NSFullUserName().replacingOccurrences(of: " ", with: "").lowercased()
         let savedNickname = defaults.string(forKey: "nickname")
-        if let savedNickname, !savedNickname.isEmpty, savedNickname != legacyAccountNickname {
+        if let savedNickname,
+           IRCIdentityValidation.isValidNickname(savedNickname),
+           savedNickname != legacyAccountNickname {
             nickname = savedNickname
         } else {
             let anonymousNickname = Self.anonymousNickname()
@@ -473,6 +477,11 @@ final class IRCAppState: ObservableObject {
     }
 
     func saveIdentity() {
+        let trimmedNickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        if IRCIdentityValidation.isValidNickname(trimmedNickname), nickname != trimmedNickname {
+            nickname = trimmedNickname
+        }
+        guard IRCIdentityValidation.isValidNickname(nickname) else { return }
         UserDefaults.standard.set(nickname, forKey: "nickname")
         UserDefaults.standard.set(resolvedRealName(), forKey: "realName")
     }
@@ -736,7 +745,7 @@ final class IRCAppState: ObservableObject {
                       self.sessionIDs[profile.id] == sessionID,
                       self.registeredServerIDs.contains(profile.id) else { return }
                 self.rememberOutgoingEcho(serverID: profile.id, target: target, text: chunk)
-                self.append(IRCMessage(sender: sender, text: chunk), for: item)
+                self.append(IRCMessage(sender: sender, text: chunk), for: item, markUnread: false)
             }
         }
     }
@@ -800,7 +809,7 @@ final class IRCAppState: ObservableObject {
                           self.sessionIDs[profile.id] == sessionID,
                           self.registeredServerIDs.contains(profile.id) else { return }
                     self.rememberOutgoingEcho(serverID: profile.id, target: fields[0], text: chunk)
-                    self.append(IRCMessage(sender: sender, text: chunk), for: .directMessage(conversation.id))
+                    self.append(IRCMessage(sender: sender, text: chunk), for: .directMessage(conversation.id), markUnread: false)
                 }
             }
             if command == "QUERY" { selection = .directMessage(conversation.id) }
@@ -830,7 +839,7 @@ final class IRCAppState: ObservableObject {
                           self.sessionIDs[profile.id] == sessionID,
                           self.registeredServerIDs.contains(profile.id) else { return }
                     self.rememberOutgoingEcho(serverID: profile.id, target: target, text: action)
-                    self.append(IRCMessage(sender: "* \(sender)", text: chunk), for: item)
+                    self.append(IRCMessage(sender: "* \(sender)", text: chunk), for: item, markUnread: false)
                 }
             }
         case "SLAP":
@@ -853,7 +862,7 @@ final class IRCAppState: ObservableObject {
                           self.sessionIDs[profile.id] == sessionID,
                           self.registeredServerIDs.contains(profile.id) else { return }
                     self.rememberOutgoingEcho(serverID: profile.id, target: target, text: action)
-                    self.append(IRCMessage(sender: "* \(sender)", text: chunk), for: item)
+                    self.append(IRCMessage(sender: "* \(sender)", text: chunk), for: item, markUnread: false)
                 }
             }
         case "VERSION":
@@ -1119,7 +1128,8 @@ final class IRCAppState: ObservableObject {
             }
             if isChannelName(target) {
                 let channel = channel(named: target, serverID: profile.id)
-                append(IRCMessage(sender: sender, text: text), for: .channel(channel.id))
+                let isOwnMessage = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
+                append(IRCMessage(sender: sender, text: text), for: .channel(channel.id), markUnread: !isOwnMessage)
             } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
                 append(IRCMessage(sender: sender, text: text), for: .directMessage(conversation.id))
@@ -1186,6 +1196,8 @@ final class IRCAppState: ObservableObject {
             let requestedDestination = isLocalNicknameChange ? pendingNickDestinations.removeValue(forKey: profile.id) : nil
             if isLocalNicknameChange {
                 activeNicknames[profile.id] = newNickname
+            } else {
+                renameDirectMessage(from: sender, to: newNickname, serverID: profile.id)
             }
             var deliveredConfirmation = false
             for channel in channels(for: profile) where renameMember(sender, to: newNickname, in: channel.id) {
@@ -1260,9 +1272,13 @@ final class IRCAppState: ObservableObject {
             let listing = ChannelListing(name: wire.parameters[1], userCount: users, topic: wire.trailing ?? "")
             queueChannelListing(listing, for: profile.id)
         case "323":
+            guard channelListsInProgress.contains(profile.id) else { return }
             flushChannelListings(for: profile.id)
             channelListsInProgress.remove(profile.id)
+            channelListRequestIDs.removeValue(forKey: profile.id)
             channelListCompletionDates[profile.id] = Date()
+        case "263", "416":
+            _ = handleChannelListError(wire, serverID: profile.id)
         case "301", "311", "312", "313", "317", "318", "319", "330", "338", "378", "379", "671":
             handleWhoisReply(wire, serverID: profile.id)
         case "401":
@@ -1296,6 +1312,7 @@ final class IRCAppState: ObservableObject {
             let destination = pendingNickDestinations.removeValue(forKey: profile.id) ?? .server(profile.id)
             appendSystem("Nickname change failed: \(wire.trailing ?? "The server rejected that nickname.")", for: destination)
         case "421", "461":
+            if handleChannelListError(wire, serverID: profile.id) { return }
             guard let destination = pendingVersionDestinations.removeValue(forKey: profile.id) else { return }
             pendingVersionRequestIDs.removeValue(forKey: profile.id)
             appendSystem("Server version request failed: \(wire.trailing ?? "The server rejected the request.")", for: destination)
@@ -1587,7 +1604,8 @@ final class IRCAppState: ObservableObject {
             let message = IRCMessage(sender: "* \(sender)", text: command[1])
             if let first = target.first, "#&+!".contains(first) {
                 let channel = channel(named: target, serverID: profile.id)
-                append(message, for: .channel(channel.id))
+                let isOwnAction = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
+                append(message, for: .channel(channel.id), markUnread: !isOwnAction)
             } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
                 append(message, for: .directMessage(conversation.id))
@@ -1709,11 +1727,25 @@ final class IRCAppState: ObservableObject {
 
     private func resetChannelListingRequest(for serverID: UUID) {
         channelListsInProgress.remove(serverID)
+        channelListRequestIDs.removeValue(forKey: serverID)
         pendingChannelListingsByServer.removeValue(forKey: serverID)
         listedChannelsByServer.removeValue(forKey: serverID)
         knownChannelNamesByServer.removeValue(forKey: serverID)
         scheduledChannelListFlushes.remove(serverID)
         channelListCompletionDates.removeValue(forKey: serverID)
+    }
+
+    @discardableResult
+    private func handleChannelListError(_ wire: IRCWireMessage, serverID: UUID) -> Bool {
+        guard channelListsInProgress.contains(serverID),
+              wire.parameters.dropFirst().contains(where: { $0.caseInsensitiveCompare("LIST") == .orderedSame }) else {
+            return false
+        }
+        flushChannelListings(for: serverID)
+        channelListsInProgress.remove(serverID)
+        channelListRequestIDs.removeValue(forKey: serverID)
+        appendSystem("Channel list request failed: \(wire.trailing ?? "The server rejected the LIST request.")", for: .server(serverID))
+        return true
     }
 
     private func isChannelName(_ value: String) -> Bool {
@@ -1740,6 +1772,36 @@ final class IRCAppState: ObservableObject {
         return conversation
     }
 
+    private func renameDirectMessage(from oldNickname: String, to newNickname: String, serverID: UUID) {
+        guard let oldIndex = directMessages.firstIndex(where: {
+            $0.serverID == serverID && identifiersEqual($0.name, oldNickname, serverID: serverID)
+        }) else { return }
+
+        let oldConversation = directMessages[oldIndex]
+        if let newIndex = directMessages.firstIndex(where: {
+            $0.id != oldConversation.id
+                && $0.serverID == serverID
+                && identifiersEqual($0.name, newNickname, serverID: serverID)
+        }) {
+            let newConversation = directMessages[newIndex]
+            var mergedMessages = (conversations[newConversation.id] ?? []) + (conversations[oldConversation.id] ?? [])
+            mergedMessages.sort { $0.timestamp < $1.timestamp }
+            if mergedMessages.count > maximumRetainedMessagesPerConversation {
+                mergedMessages.removeFirst(mergedMessages.count - maximumRetainedMessagesPerConversation)
+            }
+            conversations[newConversation.id] = mergedMessages
+            conversations.removeValue(forKey: oldConversation.id)
+            directMessages[newIndex].hasUnread = directMessages[newIndex].hasUnread || oldConversation.hasUnread
+            directMessages.removeAll { $0.id == oldConversation.id }
+            if selection == .directMessage(oldConversation.id) {
+                selection = .directMessage(newConversation.id)
+            }
+        } else {
+            directMessages[oldIndex].name = newNickname
+        }
+        messageRevision += 1
+    }
+
     private func channelMember(from rawName: String) -> ChannelMember {
         guard let first = rawName.first, "~&@%+".contains(first) else { return ChannelMember(nickname: rawName, prefix: nil) }
         return ChannelMember(nickname: String(rawName.dropFirst()), prefix: first)
@@ -1748,11 +1810,6 @@ final class IRCAppState: ObservableObject {
     private func stageMembers(_ newMembers: [ChannelMember], for channelID: UUID) {
         guard let serverID = channels.first(where: { $0.id == channelID })?.serverID else { return }
         var pending = pendingChannelMembers[channelID] ?? [:]
-        if pending.isEmpty {
-            for member in channelMembers[channelID] ?? [] {
-                upsert(member, into: &pending, serverID: serverID)
-            }
-        }
         for member in newMembers {
             upsert(member, into: &pending, serverID: serverID)
         }
@@ -2002,7 +2059,7 @@ final class IRCAppState: ObservableObject {
         append(IRCMessage(sender: "•", text: text, isSystem: true), for: .channel(channelID))
     }
 
-    private func append(_ message: IRCMessage, for item: SidebarItem) {
+    private func append(_ message: IRCMessage, for item: SidebarItem, markUnread shouldMarkUnread: Bool = true) {
         guard let id = conversationID(for: item) else { return }
         conversations[id, default: []].append(message)
         let trimThreshold = maximumRetainedMessagesPerConversation + transcriptTrimBatchSize
@@ -2010,7 +2067,7 @@ final class IRCAppState: ObservableObject {
         if messageCount > trimThreshold {
             conversations[id]?.removeFirst(messageCount - maximumRetainedMessagesPerConversation)
         }
-        if !message.isSystem && selection != item { markUnread(item) }
+        if shouldMarkUnread && !message.isSystem && selection != item { markUnread(item) }
         messageRevision += 1
     }
 
@@ -2137,7 +2194,28 @@ final class IRCAppState: ObservableObject {
         knownChannelNamesByServer[profile.id] = []
         scheduledChannelListFlushes.remove(profile.id)
         channelListsInProgress.insert(profile.id)
-        connections[profile.id]?.send(command: hasArguments ? "LIST \(arguments)" : "LIST")
+        let requestID = UUID()
+        let sessionID = sessionIDs[profile.id]
+        channelListRequestIDs[profile.id] = requestID
+        connections[profile.id]?.send(command: hasArguments ? "LIST \(arguments)" : "LIST") { [weak self] sent in
+            guard let self,
+                  !sent,
+                  self.sessionIDs[profile.id] == sessionID,
+                  self.channelListRequestIDs[profile.id] == requestID else { return }
+            self.channelListsInProgress.remove(profile.id)
+            self.channelListRequestIDs.removeValue(forKey: profile.id)
+            self.appendSystem("The channel list request could not be sent.", for: .server(profile.id))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + channelListRequestTimeout) { [weak self] in
+            guard let self,
+                  self.sessionIDs[profile.id] == sessionID,
+                  self.channelListRequestIDs[profile.id] == requestID,
+                  self.channelListsInProgress.contains(profile.id) else { return }
+            self.flushChannelListings(for: profile.id)
+            self.channelListsInProgress.remove(profile.id)
+            self.channelListRequestIDs.removeValue(forKey: profile.id)
+            self.appendSystem("The channel list request timed out. You can retry the request.", for: .server(profile.id))
+        }
     }
 
     private func queueChannelListing(_ listing: ChannelListing, for serverID: UUID) {

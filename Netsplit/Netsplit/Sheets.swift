@@ -65,11 +65,26 @@ struct ServerProfileEditor: View {
     private var hasSSHAuthentication: Bool {
         !sshPassword.isEmpty || !sshPrivateKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+    private var nicknameOverrideError: String? {
+        let nickname = nicknameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        return nickname.isEmpty ? nil : IRCIdentityValidation.nicknameError(nickname)
+    }
+    private var ircPort: UInt16? {
+        guard let value = UInt16(port), value > 0 else { return nil }
+        return value
+    }
+    private var parsedSSHPort: UInt16? {
+        guard let value = UInt16(sshPort), value > 0 else { return nil }
+        return value
+    }
     private var canSave: Bool {
         guard !hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard ircPort != nil, nicknameOverrideError == nil else { return false }
+        guard !useSASL || !saslPassword.isEmpty else { return false }
         guard useSSHTunnel else { return true }
         return !sshHostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !sshUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && parsedSSHPort != nil
             && hasSSHAuthentication
     }
 
@@ -138,6 +153,9 @@ struct ServerProfileEditor: View {
             ServerEditorFieldRow("Port") {
                 TextField("6697", text: $port)
             }
+            if ircPort == nil {
+                ServerEditorHelpText("Enter an IRC port between 1 and 65535.", tint: .red)
+            }
             ServerEditorToggleRow("Use encrypted connection (TLS)", isOn: $useTLS)
             ServerEditorToggleRow("Connect automatically at launch", isOn: $autoConnect)
         }
@@ -147,6 +165,9 @@ struct ServerProfileEditor: View {
         ServerEditorSection(title: "Identity", systemImage: "person.crop.circle") {
             ServerEditorFieldRow("Nickname") {
                 TextField("Use global nickname", text: $nicknameOverride, prompt: Text("Use global nickname"))
+            }
+            if let nicknameOverrideError {
+                ServerEditorHelpText(nicknameOverrideError, tint: .red)
             }
             ServerEditorHelpText("Leave blank to use the global nickname from Settings. Set a value here when this network requires a different identity.")
         }
@@ -165,6 +186,9 @@ struct ServerProfileEditor: View {
                 ServerEditorFieldRow("SASL password") {
                     SecureField("Required for SASL", text: $saslPassword)
                 }
+                if saslPassword.isEmpty {
+                    ServerEditorHelpText("Enter a SASL password or turn off SASL authentication.", tint: .red)
+                }
             }
             ServerEditorHelpText("Passwords are stored in your macOS Keychain. SASL PLAIN is requested only when the IRC server advertises SASL support.")
         }
@@ -179,6 +203,9 @@ struct ServerProfileEditor: View {
                 }
                 ServerEditorFieldRow("SSH port") {
                     TextField("22", text: $sshPort)
+                }
+                if parsedSSHPort == nil {
+                    ServerEditorHelpText("Enter an SSH port between 1 and 65535.", tint: .red)
                 }
                 ServerEditorFieldRow("SSH username") {
                     TextField("Username", text: $sshUsername)
@@ -285,10 +312,18 @@ struct ServerProfileEditor: View {
     private func saveProfile() {
         let cleanHost = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let profileToEdit {
-            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: UInt16(port) ?? (useTLS ? 6697 : 6667), useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: UInt16(sshPort) ?? 22, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
+        guard let ircPort else { return }
+        let savedSSHPort: UInt16
+        if useSSHTunnel {
+            guard let parsedSSHPort else { return }
+            savedSSHPort = parsedSSHPort
         } else {
-            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: UInt16(port) ?? (useTLS ? 6697 : 6667), useTLS: useTLS, autoConnect: autoConnect, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: UInt16(sshPort) ?? 22, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
+            savedSSHPort = parsedSSHPort ?? 22
+        }
+        if let profileToEdit {
+            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
+        } else {
+            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
         }
         dismiss()
     }
@@ -545,6 +580,11 @@ struct SettingsView: View {
             Section("Identity") {
                 TextField("Nickname", text: $state.nickname)
                     .onSubmit(state.saveIdentity)
+                if let nicknameError = IRCIdentityValidation.nicknameError(state.nickname) {
+                    Text(nicknameError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
                 TextField("Real name", text: $state.realName)
                     .onSubmit(state.saveIdentity)
                 Text("Used when you connect to an IRC network. Some networks may require registration for preferred nicknames.")

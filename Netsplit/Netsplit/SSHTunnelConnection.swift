@@ -3,13 +3,13 @@
 //  Netsplit
 //
 
-import Citadel
-import Crypto
+@preconcurrency import Citadel
+@preconcurrency import Crypto
 import Foundation
-import NIO
-import NIOSSH
-import NIOSSL
-import NIOTLS
+@preconcurrency import NIO
+@preconcurrency import NIOSSH
+@preconcurrency import NIOSSL
+@preconcurrency import NIOTLS
 
 struct SSHTunnelConfiguration: Sendable {
     var sshHostname: String
@@ -111,50 +111,54 @@ final class SSHTunnelConnection {
                 self.client = client
 
                 let origin = try SocketAddress(ipAddress: "127.0.0.1", port: 0)
+                let owner = self
+                let initializeChannel: @Sendable (Channel) -> EventLoopFuture<Void> = { childChannel in
+                    do {
+                        let streamHandler = IRCSSHStreamHandler(
+                            waitsForTLS: configuration.useTLS,
+                            onReady: {
+                                Task { @MainActor in
+                                    guard owner.generation == generation else { return }
+                                    onReady()
+                                }
+                            },
+                            onData: { data in
+                                Task { @MainActor in
+                                    guard owner.generation == generation else { return }
+                                    onData(data)
+                                }
+                            },
+                            onClose: { error in
+                                Task { @MainActor in
+                                    guard owner.generation == generation else { return }
+                                    owner.finish(generation: generation, error: error, onClose: onClose)
+                                }
+                            }
+                        )
+                        if configuration.useTLS {
+                            var tls = TLSConfiguration.makeClientConfiguration()
+                            tls.certificateVerification = .fullVerification
+                            let context = try NIOSSLContext(configuration: tls)
+                            let tlsHandler = try NIOSSLClientHandler(
+                                context: context,
+                                serverHostname: configuration.targetHostname
+                            )
+                            try childChannel.pipeline.syncOperations.addHandler(tlsHandler)
+                        }
+                        try childChannel.pipeline.syncOperations.addHandler(streamHandler)
+                        return childChannel.eventLoop.makeSucceededFuture(())
+                    } catch {
+                        return childChannel.eventLoop.makeFailedFuture(error)
+                    }
+                }
                 let channel = try await client.createDirectTCPIPChannel(
                     using: SSHChannelType.DirectTCPIP(
                         targetHost: configuration.targetHostname,
                         targetPort: configuration.targetPort,
                         originatorAddress: origin
-                    )
-                ) { childChannel in
-                    do {
-                        var handlers: [ChannelHandler] = []
-                        if configuration.useTLS {
-                            var tls = TLSConfiguration.makeClientConfiguration()
-                            tls.certificateVerification = .fullVerification
-                            let context = try NIOSSLContext(configuration: tls)
-                            handlers.append(try NIOSSLClientHandler(
-                                context: context,
-                                serverHostname: configuration.targetHostname
-                            ))
-                        }
-                        handlers.append(IRCSSHStreamHandler(
-                            waitsForTLS: configuration.useTLS,
-                            onReady: {
-                                Task { @MainActor [weak self] in
-                                    guard let self, self.generation == generation else { return }
-                                    onReady()
-                                }
-                            },
-                            onData: { data in
-                                Task { @MainActor [weak self] in
-                                    guard let self, self.generation == generation else { return }
-                                    onData(data)
-                                }
-                            },
-                            onClose: { error in
-                                Task { @MainActor [weak self] in
-                                    guard let self, self.generation == generation else { return }
-                                    self.finish(generation: generation, error: error, onClose: onClose)
-                                }
-                            }
-                        ))
-                        return childChannel.pipeline.addHandlers(handlers)
-                    } catch {
-                        return childChannel.eventLoop.makeFailedFuture(error)
-                    }
-                }
+                    ),
+                    initialize: initializeChannel
+                )
                 guard !Task.isCancelled, self.generation == generation else {
                     try? await channel.close()
                     try? await client.close()
@@ -281,7 +285,7 @@ final class SSHTunnelConnection {
     }
 }
 
-private final class PinnedSSHHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
+private nonisolated final class PinnedSSHHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var trustedKey: NIOSSHPublicKey?
     private let onFirstSeen: @Sendable (String) -> Void
@@ -319,7 +323,7 @@ private final class PinnedSSHHostKeyValidator: NIOSSHClientServerAuthenticationD
     }
 }
 
-private final class IRCSSHStreamHandler: ChannelInboundHandler, @unchecked Sendable {
+private nonisolated final class IRCSSHStreamHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
 
     private let waitsForTLS: Bool
