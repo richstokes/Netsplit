@@ -659,6 +659,18 @@ final class IRCAppState: ObservableObject {
         join(listing, on: profile, selectConversation: true, destination: selection ?? .server(profile.id))
     }
 
+    func joinChannel(named channelName: String, from item: SidebarItem) {
+        guard let profile = profile(for: item) else { return }
+        let channel = channelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isChannelName(channel) else { return }
+        join(
+            ChannelListing(name: channel, userCount: 0, topic: ""),
+            on: profile,
+            selectConversation: true,
+            destination: item
+        )
+    }
+
     private func runPostRegistrationSequence(for profile: ServerProfile) {
         guard let sessionID = sessionIDs[profile.id] else { return }
         let commands = (sessionOnConnectCommands[profile.id] ?? [])
@@ -1465,6 +1477,7 @@ final class IRCAppState: ObservableObject {
         let key = whoisKey(serverID: serverID, target: target)
         guard let destination = pendingWhoisDestinations[key] else { return false }
         let message: String
+        var channelLinks: [String] = []
         switch wire.command {
         case "301": message = "\(target) is away: \(wire.trailing ?? "away")"
         case "311":
@@ -1474,7 +1487,10 @@ final class IRCAppState: ObservableObject {
         case "312": message = "\(target) is on \(wire.parameters.count > 2 ? wire.parameters[2] : "the server")\(wire.trailing.map { " — \($0)" } ?? "")"
         case "313": message = "\(target) is an IRC operator."
         case "317": message = "\(target) has been idle \(formatIdle(wire.parameters.count > 2 ? Int(wire.parameters[2]) ?? 0 : 0))."
-        case "319": message = "\(target) is on: \(wire.trailing ?? "no visible channels")"
+        case "319":
+            let channels = wire.trailing ?? "no visible channels"
+            channelLinks = IRCWhoisChannelParser.channels(from: channels)
+            message = "\(target) is on: \(channels)"
         case "330": message = "\(target) is logged in as \(wire.parameters.count > 2 ? wire.parameters[2] : "an account")."
         case "671": message = "\(target) is using a secure connection."
         case "318":
@@ -1485,7 +1501,10 @@ final class IRCAppState: ObservableObject {
             pendingWhoisDestinations.removeValue(forKey: key)
         default: message = wire.trailing ?? "WHOIS information for \(target)."
         }
-        appendSystem(message, for: destination)
+        append(
+            IRCMessage(sender: "System", text: message, isSystem: true, channelLinks: channelLinks),
+            for: destination
+        )
         return true
     }
 

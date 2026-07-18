@@ -623,6 +623,10 @@ private struct ConversationView: View {
     }
 
     private func openURL(_ url: URL) {
+        if let channel = IRCInternalLink.channelName(from: url) {
+            state.joinChannel(named: channel, from: selection)
+            return
+        }
         guard Self.isWebURL(url) else { return }
         if state.warnBeforeOpeningLinks {
             pendingURL = PendingURL(url: url)
@@ -942,18 +946,28 @@ private struct MessageRow: View {
 
     private func linkified(_ text: String) -> AttributedString {
         var attributedText = AttributedString(text)
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
-            return attributedText
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+            let fullRange = NSRange(text.startIndex..., in: text)
+            for match in detector.matches(in: text, range: fullRange) {
+                guard let url = match.url,
+                      let scheme = url.scheme?.lowercased(),
+                      scheme == "http" || scheme == "https",
+                      let stringRange = Range(match.range, in: text),
+                      let attributedRange = Range(stringRange, in: attributedText) else { continue }
+                attributedText[attributedRange].link = url
+            }
         }
 
-        let fullRange = NSRange(text.startIndex..., in: text)
-        for match in detector.matches(in: text, range: fullRange) {
-            guard let url = match.url,
-                  let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https",
-                  let stringRange = Range(match.range, in: text),
-                  let attributedRange = Range(stringRange, in: attributedText) else { continue }
-            attributedText[attributedRange].link = url
+        for channel in message.channelLinks {
+            guard let url = IRCInternalLink.channelURL(for: channel) else { continue }
+            var searchStart = text.startIndex
+            while searchStart < text.endIndex,
+                  let stringRange = text.range(of: channel, range: searchStart..<text.endIndex) {
+                if let attributedRange = Range(stringRange, in: attributedText) {
+                    attributedText[attributedRange].link = url
+                }
+                searchStart = stringRange.upperBound
+            }
         }
         return attributedText
     }

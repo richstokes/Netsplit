@@ -45,6 +45,23 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCMentionPolicy.containsMention(of: "[Nick]", in: "hello {nick}", caseMapping: mapping))
     }
 
+    @Test("WHOIS channel lists preserve channels and remove membership prefixes")
+    func parsesWhoisChannels() {
+        let channels = IRCWhoisChannelParser.channels(
+            from: "@#operators +#voiced #general &local +modeless not-a-channel #general"
+        )
+        #expect(channels == ["#operators", "#voiced", "#general", "&local", "+modeless"])
+    }
+
+    @Test("Internal channel links round-trip reserved channel characters")
+    func roundTripsChannelLinks() {
+        let channel = "#swift+macOS"
+        let url = IRCInternalLink.channelURL(for: channel)
+        #expect(url != nil)
+        #expect(url.flatMap(IRCInternalLink.channelName(from:)) == channel)
+        #expect(IRCInternalLink.channelName(from: URL(string: "https://example.com/#swift")!) == nil)
+    }
+
     @Test("Member roles retain fallback privileges in server priority order")
     func prioritizesMemberRoles() {
         var member = ChannelMember(nickname: "Alice", modes: ["v", "o"])

@@ -188,6 +188,7 @@ struct IRCMessage: Identifiable, Hashable {
     var text: String
     var timestamp = Date()
     var isSystem = false
+    var channelLinks: [String] = []
 }
 
 struct Conversation: Identifiable, Hashable {
@@ -227,6 +228,53 @@ enum IRCMentionPolicy {
 
     private static func isNicknameCharacter(_ character: Character) -> Bool {
         character.isLetter || character.isNumber || "-[]\\`_^{|}".contains(character)
+    }
+}
+
+enum IRCWhoisChannelParser {
+    static func channels(from value: String) -> [String] {
+        var seen = Set<String>()
+        return value.split(whereSeparator: { $0.isWhitespace }).compactMap { token in
+            guard let channel = channelName(from: String(token)), seen.insert(channel).inserted else { return nil }
+            return channel
+        }
+    }
+
+    private static func channelName(from token: String) -> String? {
+        var channel = token
+        while channel.count > 1 {
+            let first = channel.first!
+            let second = channel[channel.index(after: channel.startIndex)]
+            let isUnambiguousMembershipPrefix = "~@%".contains(first)
+                || ((first == "+" || first == "&") && "#&+!".contains(second))
+            guard isUnambiguousMembershipPrefix else { break }
+            channel.removeFirst()
+        }
+        guard let first = channel.first, "#&+!".contains(first) else { return nil }
+        return channel
+    }
+}
+
+enum IRCInternalLink {
+    private static let scheme = "netsplit"
+    private static let joinChannelHost = "join-channel"
+
+    static func channelURL(for channel: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = joinChannelHost
+        components.queryItems = [URLQueryItem(name: "name", value: channel)]
+        return components.url
+    }
+
+    static func channelName(from url: URL) -> String? {
+        guard url.scheme?.lowercased() == scheme,
+              url.host?.lowercased() == joinChannelHost,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let channel = components.queryItems?.first(where: { $0.name == "name" })?.value,
+              let first = channel.first,
+              "#&+!".contains(first) else { return nil }
+        return channel
     }
 }
 
