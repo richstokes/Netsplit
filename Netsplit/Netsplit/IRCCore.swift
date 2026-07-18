@@ -1,5 +1,16 @@
 import Foundation
 
+enum IRCSystemSleepPolicy {
+    static func shouldRestoreConnection(status: ConnectionStatus, reconnectWasScheduled: Bool) -> Bool {
+        switch status {
+        case .connecting, .online:
+            true
+        case .offline, .failed:
+            reconnectWasScheduled
+        }
+    }
+}
+
 struct IRCLineBufferOutput {
     var lines: [String] = []
     var exceededMaximumLineLength = false

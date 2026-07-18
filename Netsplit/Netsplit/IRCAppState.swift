@@ -82,6 +82,9 @@ final class IRCAppState: ObservableObject {
     private let transcriptTrimBatchSize = 250
     private static let defaultQuitMessage = "Closing macOS client"
     private var hasStartedLaunchConnections = false
+    private var isSystemSleeping = false
+    private var systemSleepServerIDs = Set<UUID>()
+    private var systemWakeGeneration: UUID?
 
     init() {
         let defaults = UserDefaults.standard
@@ -303,6 +306,61 @@ final class IRCAppState: ObservableObject {
         selection = originalSelection
     }
 
+    /// A sleeping Mac can retain sockets that look active locally even though
+    /// their remote TCP/SSH state has expired. Close them before networking is
+    /// frozen, then recreate only the sessions that were active after wake.
+    func systemWillSleep() {
+        guard !isSystemSleeping else { return }
+        isSystemSleeping = true
+        systemWakeGeneration = nil
+
+        let reconnectingServerIDs = Set(scheduledReconnects.keys)
+        let serverIDsToRestore = Set(connections.keys.filter { serverID in
+            IRCSystemSleepPolicy.shouldRestoreConnection(
+                status: connectionStatuses[serverID] ?? .offline,
+                reconnectWasScheduled: reconnectingServerIDs.contains(serverID)
+            )
+        })
+        systemSleepServerIDs.formUnion(serverIDsToRestore)
+
+        for serverID in serverIDsToRestore {
+            cancelScheduledReconnect(for: serverID, resetAttempts: true)
+            let transport = connections.removeValue(forKey: serverID)
+            sessionIDs.removeValue(forKey: serverID)
+            sessionOnConnectCommands.removeValue(forKey: serverID)
+            activeNicknames.removeValue(forKey: serverID)
+            registeredServerIDs.remove(serverID)
+            terminalServerErrors.removeValue(forKey: serverID)
+            registrationNicknameSuffixes.removeValue(forKey: serverID)
+            connectionStatuses[serverID] = .offline
+            prepareChannelsForDisconnectedSession(for: serverID)
+            resetChannelListingRequest(for: serverID)
+            transport?.disconnect()
+        }
+    }
+
+    func systemDidWake() {
+        guard isSystemSleeping else { return }
+        isSystemSleeping = false
+
+        let generation = UUID()
+        systemWakeGeneration = generation
+        let serverIDsToRestore = systemSleepServerIDs
+
+        // Give Wi-Fi and DNS a short opportunity to become usable. Normal
+        // reconnect backoff remains in force if the path needs longer.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self,
+                  !self.isSystemSleeping,
+                  self.systemWakeGeneration == generation else { return }
+            self.systemWakeGeneration = nil
+            for profile in self.profiles where serverIDsToRestore.contains(profile.id) {
+                guard self.systemSleepServerIDs.remove(profile.id) != nil else { continue }
+                self.connect(profile, selectConversation: false)
+            }
+        }
+    }
+
     func toggleConnection(for profile: ServerProfile) {
         if connections[profile.id] != nil {
             if case .failed = status(for: profile) {
@@ -353,6 +411,7 @@ final class IRCAppState: ObservableObject {
     }
 
     func disconnect(_ profile: ServerProfile, reason: String? = nil) {
+        systemSleepServerIDs.remove(profile.id)
         cancelScheduledReconnect(for: profile.id, resetAttempts: true)
         resetChannelListingRequest(for: profile.id)
         prepareChannelsForDisconnectedSession(for: profile.id)

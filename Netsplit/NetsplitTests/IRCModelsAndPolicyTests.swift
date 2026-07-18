@@ -4,6 +4,16 @@ import Testing
 
 @Suite("IRC models and state policies")
 struct IRCModelsAndPolicyTests {
+    @Test("System wake restores only active or already-reconnecting sessions")
+    func selectsConnectionsToRestoreAfterSleep() {
+        #expect(IRCSystemSleepPolicy.shouldRestoreConnection(status: .online, reconnectWasScheduled: false))
+        #expect(IRCSystemSleepPolicy.shouldRestoreConnection(status: .connecting, reconnectWasScheduled: false))
+        #expect(IRCSystemSleepPolicy.shouldRestoreConnection(status: .failed("offline"), reconnectWasScheduled: true))
+        #expect(IRCSystemSleepPolicy.shouldRestoreConnection(status: .offline, reconnectWasScheduled: true))
+        #expect(!IRCSystemSleepPolicy.shouldRestoreConnection(status: .failed("bad credentials"), reconnectWasScheduled: false))
+        #expect(!IRCSystemSleepPolicy.shouldRestoreConnection(status: .offline, reconnectWasScheduled: false))
+    }
+
     @Test("Nickname validation accepts IRC-safe names and rejects malformed identities")
     func validatesNicknames() {
         for nickname in ["Netsplit_User", "[Netsplit]", "rich-stokes", "Ålice42"] {

@@ -13,6 +13,34 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
     private var isTerminating = false
     private var hasRepliedToTermination = false
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let notifications = NSWorkspace.shared.notificationCenter
+        notifications.addObserver(
+            self,
+            selector: #selector(workspaceWillSleep),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        notifications.addObserver(
+            self,
+            selector: #selector(workspaceDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func workspaceWillSleep(_ notification: Notification) {
+        state?.systemWillSleep()
+    }
+
+    @objc private func workspaceDidWake(_ notification: Notification) {
+        state?.systemDidWake()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateNow }
         guard let state else { return .terminateNow }

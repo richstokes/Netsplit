@@ -160,7 +160,7 @@ final class SSHTunnelConnection {
                     initialize: initializeChannel
                 )
                 guard !Task.isCancelled, self.generation == generation else {
-                    try? await channel.close()
+                    try? await channel.setOption(ChannelOptions.autoRead, value: false).get()
                     try? await client.close()
                     return
                 }
@@ -218,8 +218,20 @@ final class SSHTunnelConnection {
         self.channel = nil
         self.client = nil
         Task {
-            if let channel { try? await channel.close() }
-            if let client { try? await client.close() }
+            // Closing the parent SSH transport closes its children on the same
+            // event loop. Closing a child first can race an inbound flow-control
+            // update and trip NIOSSH's closed-channel precondition.
+            if let client {
+                // Stop requesting more child-channel reads before closing the
+                // parent. This narrows NIOSSH's pending-read/window-adjust race
+                // when macOS is about to suspend the network stack.
+                if let channel {
+                    try? await channel.setOption(ChannelOptions.autoRead, value: false).get()
+                }
+                try? await client.close()
+            } else if let channel {
+                try? await channel.close()
+            }
         }
     }
 
