@@ -93,7 +93,7 @@ final class IRCConnection {
     private static let registrationTimeout: TimeInterval = 30
     private var connection: NWConnection?
     private var sshTunnel: SSHTunnelConnection?
-    private var receiveBuffer = Data()
+    private var receiveBuffer = IRCLineBuffer(maximumLineBytes: maximumBufferedLineBytes)
     private var heartbeatGeneration: UUID?
     private var pendingHeartbeatToken: String?
     private var registrationTimeoutGeneration: UUID?
@@ -379,18 +379,8 @@ final class IRCConnection {
 
     @discardableResult
     private func process(_ data: Data) -> Bool {
-        receiveBuffer.append(data)
-        while let range = receiveBuffer.range(of: Data([13, 10])) {
-            guard range.lowerBound <= Self.maximumBufferedLineBytes else {
-                failMalformedInput("The server sent an IRC line larger than 64 KB.")
-                return false
-            }
-            let lineData = receiveBuffer.subdata(in: 0..<range.lowerBound)
-            receiveBuffer.removeSubrange(0..<range.upperBound)
-            // IRC commands are ASCII, but legacy networks can include text in a
-            // different encoding. Preserve the command and replace only invalid
-            // payload bytes instead of silently discarding the entire line.
-            let line = String(decoding: lineData, as: UTF8.self)
+        let output = receiveBuffer.append(data)
+        for line in output.lines {
             guard let message = IRCWireMessage(line: line) else { continue }
             if message.command == "001" { stopRegistrationTimeout() }
             if message.command == "PING" { send(command: "PONG :\(message.trailing ?? message.parameters.first ?? "")") }
@@ -404,8 +394,8 @@ final class IRCConnection {
             handleSASLNumeric(message)
             eventHandler?(.received(message))
         }
-        guard receiveBuffer.count <= Self.maximumBufferedLineBytes else {
-            failMalformedInput("The server sent more than 64 KB without terminating an IRC line.")
+        guard !output.exceededMaximumLineLength else {
+            failMalformedInput("The server sent an IRC line larger than 64 KB.")
             return false
         }
         return true
@@ -505,7 +495,7 @@ final class IRCConnection {
         let subcommand = message.parameters[1].uppercased()
         switch subcommand {
         case "LS":
-            let capabilities = (message.trailing ?? "").split(separator: " ").map { capabilityName(String($0)) }
+            let capabilities = (message.trailing ?? "").split(separator: " ").map { IRCCapability.name(from: String($0)) }
             advertisedCapabilities.formUnion(capabilities)
             // An asterisk after LS signals a multi-line capability list.
             let hasMore = message.parameters.dropFirst(2).contains("*")
@@ -525,24 +515,20 @@ final class IRCConnection {
                 send(command: "CAP REQ :\(supported.joined(separator: " "))")
             }
         case "ACK":
-            let acknowledged = (message.trailing ?? "").split(separator: " ").map { capabilityName(String($0)) }
+            let acknowledged = (message.trailing ?? "").split(separator: " ").map { IRCCapability.name(from: String($0)) }
             if acknowledged.contains("sasl"), saslCredentials != nil {
                 send(command: "AUTHENTICATE PLAIN")
             } else {
                 endCapabilityNegotiation()
             }
         case "NAK":
-            if saslCredentials != nil, (message.trailing ?? "").split(separator: " ").map({ capabilityName(String($0)) }).contains("sasl") {
+            if saslCredentials != nil, (message.trailing ?? "").split(separator: " ").map({ IRCCapability.name(from: String($0)) }).contains("sasl") {
                 eventHandler?(.notice("The server declined SASL authentication."))
             }
             endCapabilityNegotiation()
         default:
             break
         }
-    }
-
-    private func capabilityName(_ advertised: String) -> String {
-        String(advertised.drop(while: { $0 == "-" }).split(separator: "=", maxSplits: 1).first ?? "")
     }
 
     private func endCapabilityNegotiation() {

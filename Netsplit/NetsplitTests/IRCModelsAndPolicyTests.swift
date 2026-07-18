@@ -36,6 +36,21 @@ struct IRCModelsAndPolicyTests {
         #expect(member.role == "Owner")
     }
 
+    @Test("Parses single and multi-prefix NAMES entries without corrupting nicknames")
+    func parsesNamesMembers() {
+        let plain = IRCMemberParser.member(from: "Alice")
+        let operatorMember = IRCMemberParser.member(from: "@Bob")
+        let multiPrefix = IRCMemberParser.member(from: "@+Carol")
+
+        #expect(plain.nickname == "Alice")
+        #expect(plain.modes.isEmpty)
+        #expect(operatorMember.nickname == "Bob")
+        #expect(operatorMember.modes == ["o"])
+        #expect(multiPrefix.nickname == "Carol")
+        #expect(multiPrefix.modes == ["o", "v"])
+        #expect(multiPrefix.prefix == "@")
+    }
+
     @Test("Mixed channel modes consume arguments without shifting nicknames")
     func parsesMembershipModes() {
         let mixed = IRCChannelModeParser.membershipChanges(
@@ -53,6 +68,21 @@ struct IRCModelsAndPolicyTests {
         )
         #expect(multiple.map(\.nickname) == ["Alice", "Bob", "Carol"])
         #expect(multiple.map(\.adding) == [true, true, false])
+
+        let removalWithoutArgument = IRCChannelModeParser.membershipChanges(
+            modeString: "-l+o",
+            arguments: ["Dana"]
+        )
+        #expect(removalWithoutArgument == [
+            IRCMembershipModeChange(nickname: "Dana", mode: "o", adding: true)
+        ])
+    }
+
+    @Test("Normalizes capability modifiers and advertised values")
+    func parsesCapabilityNames() {
+        #expect(IRCCapability.name(from: "sasl=PLAIN,EXTERNAL") == "sasl")
+        #expect(IRCCapability.name(from: "-echo-message") == "echo-message")
+        #expect(IRCCapability.name(from: "server-time") == "server-time")
     }
 
     @Test("Reconnect backoff is exponential and capped")

@@ -1,5 +1,64 @@
 import Foundation
 
+struct IRCLineBufferOutput {
+    var lines: [String] = []
+    var exceededMaximumLineLength = false
+}
+
+struct IRCLineBuffer {
+    private var buffer = Data()
+    private let maximumLineBytes: Int
+    private static let delimiter = Data([13, 10])
+
+    init(maximumLineBytes: Int) {
+        self.maximumLineBytes = maximumLineBytes
+    }
+
+    mutating func append(_ data: Data) -> IRCLineBufferOutput {
+        buffer.append(data)
+        var output = IRCLineBufferOutput()
+
+        while let range = buffer.range(of: Self.delimiter) {
+            guard range.lowerBound <= maximumLineBytes else {
+                output.exceededMaximumLineLength = true
+                return output
+            }
+            output.lines.append(String(decoding: buffer[..<range.lowerBound], as: UTF8.self))
+            buffer.removeSubrange(..<range.upperBound)
+        }
+
+        if buffer.count > maximumLineBytes {
+            output.exceededMaximumLineLength = true
+        }
+        return output
+    }
+
+    mutating func removeAll() {
+        buffer.removeAll()
+    }
+}
+
+enum IRCCapability {
+    static func name(from advertisedValue: String) -> String {
+        String(advertisedValue.drop(while: { $0 == "-" }).split(separator: "=", maxSplits: 1).first ?? "")
+    }
+}
+
+enum IRCMemberParser {
+    static func member(from rawName: String) -> ChannelMember {
+        let modeByPrefix: [Character: Character] = [
+            "~": "q", "&": "a", "@": "o", "%": "h", "+": "v"
+        ]
+        var nickname = rawName[...]
+        var modes = Set<Character>()
+        while let first = nickname.first, let mode = modeByPrefix[first] {
+            modes.insert(mode)
+            nickname = nickname.dropFirst()
+        }
+        return ChannelMember(nickname: String(nickname), modes: modes)
+    }
+}
+
 enum IRCTextFraming {
     static let maximumLineBytes = 510
 

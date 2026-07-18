@@ -1201,7 +1201,7 @@ final class IRCAppState: ObservableObject {
         case "353":
             guard wire.parameters.count >= 3 else { return }
             let channel = channel(named: wire.parameters[2], serverID: profile.id)
-            stageMembers((wire.trailing ?? "").split(separator: " ").map(String.init).map(channelMember(from:)), for: channel.id)
+            stageMembers((wire.trailing ?? "").split(separator: " ").map(String.init).map(IRCMemberParser.member(from:)), for: channel.id)
         case "366":
             guard wire.parameters.count >= 2,
                   let channel = existingChannel(named: wire.parameters[1], serverID: profile.id) else { return }
@@ -1759,11 +1759,6 @@ final class IRCAppState: ObservableObject {
             directMessages[oldIndex].name = newNickname
         }
         messageRevision += 1
-    }
-
-    private func channelMember(from rawName: String) -> ChannelMember {
-        guard let first = rawName.first, "~&@%+".contains(first) else { return ChannelMember(nickname: rawName, prefix: nil) }
-        return ChannelMember(nickname: String(rawName.dropFirst()), prefix: first)
     }
 
     private func stageMembers(_ newMembers: [ChannelMember], for channelID: UUID) {
