@@ -8,7 +8,7 @@ I couldn't find a macOS client that I liked, so I built this one.
 
 It's 100% free and open source. Contributions welcome, throw me a PR. If changing something graphical, include a screenshot showing what the change is/does.
 
-If you enjoy using Netsplit and want to support it, [feel free to buy me a coffee](https://buymeacoffee.com/richstokes)!
+If you enjoy using Netsplit and want to show your appreciation, [feel free to buy me a coffee](https://buymeacoffee.com/richstokes)!
 
 Open an issue here for bug reports/feature requests.
 
