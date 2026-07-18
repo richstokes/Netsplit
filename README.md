@@ -12,6 +12,14 @@ If you enjoy using Netsplit and want to support it, [feel free to buy me a coffe
 
 Open an issue here for bug reports/feature requests.
 
+## Development and tests
+
+Open `Netsplit/Netsplit.xcodeproj` and use the shared **Netsplit** scheme. Its
+normal Debug Build action compiles and runs the focused regression suite
+automatically, so no separate test command is required. **Test**
+(Command-U) uses the shared `NetsplitCore` test plan when you want the standard
+Xcode test report. Release archives omit the test bundle.
+
 ## SSH tunneling
 
 Each server profile can route its IRC connection through an SSH server. Enable

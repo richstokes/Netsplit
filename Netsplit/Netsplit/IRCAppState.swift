@@ -78,7 +78,6 @@ final class IRCAppState: ObservableObject {
     private let favoriteJoinDelayAfterCommands: TimeInterval = 2
     private let initialReconnectDelay: TimeInterval = 2
     private let maximumReconnectDelay: TimeInterval = 60
-    private let maximumOutboundIRCLineBytes = 510
     private let maximumRetainedMessagesPerConversation = 5_000
     private let transcriptTrimBatchSize = 250
     private static let defaultQuitMessage = "Closing macOS client"
@@ -552,7 +551,7 @@ final class IRCAppState: ObservableObject {
     private func runPostRegistrationSequence(for profile: ServerProfile) {
         guard let sessionID = sessionIDs[profile.id] else { return }
         let commands = (sessionOnConnectCommands[profile.id] ?? [])
-            .compactMap(onConnectWireCommand(from:))
+            .compactMap(IRCCommandTranslator.onConnectWireCommand(from:))
 
         if !commands.isEmpty {
             appendSystem(
@@ -610,45 +609,6 @@ final class IRCAppState: ObservableObject {
                     self.join(ChannelListing(name: channelName, userCount: 0, topic: ""), on: activeProfile, selectConversation: false, destination: .server(profile.id))
                 }
             }
-        }
-    }
-
-    private func onConnectWireCommand(from input: String) -> String? {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard trimmed.hasPrefix("/") else { return trimmed }
-
-        let parts = trimmed.dropFirst().split(separator: " ", maxSplits: 1).map(String.init)
-        guard let command = parts.first?.uppercased() else { return nil }
-        let argument = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
-
-        switch command {
-        case "MSG", "QUERY":
-            let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
-            guard fields.count == 2 else { return nil }
-            return "PRIVMSG \(fields[0]) :\(fields[1])"
-        case "NOTICE":
-            let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
-            guard fields.count == 2 else { return nil }
-            return "NOTICE \(fields[0]) :\(fields[1])"
-        case "NS", "NICKSERV":
-            guard !argument.isEmpty else { return nil }
-            return "PRIVMSG NickServ :\(argument)"
-        case "CS", "CHANSERV":
-            guard !argument.isEmpty else { return nil }
-            return "PRIVMSG ChanServ :\(argument)"
-        case "IDENTIFY":
-            guard !argument.isEmpty else { return nil }
-            return "PRIVMSG NickServ :IDENTIFY \(argument)"
-        case "RAW", "QUOTE":
-            return argument.isEmpty ? nil : argument
-        case "JOIN":
-            let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
-            guard let rawChannel = fields.first, !rawChannel.isEmpty else { return nil }
-            let channel = rawChannel.first.map { "#&+!".contains($0) } == true ? rawChannel : "#\(rawChannel)"
-            return fields.count == 2 ? "JOIN \(channel) \(fields[1])" : "JOIN \(channel)"
-        default:
-            return argument.isEmpty ? command : "\(command) \(argument)"
         }
     }
 
@@ -1784,12 +1744,11 @@ final class IRCAppState: ObservableObject {
                 && identifiersEqual($0.name, newNickname, serverID: serverID)
         }) {
             let newConversation = directMessages[newIndex]
-            var mergedMessages = (conversations[newConversation.id] ?? []) + (conversations[oldConversation.id] ?? [])
-            mergedMessages.sort { $0.timestamp < $1.timestamp }
-            if mergedMessages.count > maximumRetainedMessagesPerConversation {
-                mergedMessages.removeFirst(mergedMessages.count - maximumRetainedMessagesPerConversation)
-            }
-            conversations[newConversation.id] = mergedMessages
+            conversations[newConversation.id] = IRCConversationHistory.merging(
+                conversations[newConversation.id] ?? [],
+                conversations[oldConversation.id] ?? [],
+                limit: maximumRetainedMessagesPerConversation
+            )
             conversations.removeValue(forKey: oldConversation.id)
             directMessages[newIndex].hasUnread = directMessages[newIndex].hasUnread || oldConversation.hasUnread
             directMessages.removeAll { $0.id == oldConversation.id }
@@ -1866,37 +1825,8 @@ final class IRCAppState: ObservableObject {
     /// member list. Non-membership modes consume their IRC parameters so a
     /// mixed MODE command (for example +klo key 50 nick) stays aligned.
     private func applyMembershipModes(_ modeString: String, arguments: [String], to channelID: UUID) {
-        var adding = true
-        var argumentIndex = 0
-
-        for mode in modeString {
-            switch mode {
-            case "+":
-                adding = true
-                continue
-            case "-":
-                adding = false
-                continue
-            default:
-                break
-            }
-
-            if "qaohv".contains(mode) {
-                guard argumentIndex < arguments.count else { continue }
-                let nickname = arguments[argumentIndex]
-                argumentIndex += 1
-                updateMembershipMode(mode, for: nickname, adding: adding, in: channelID)
-            } else if channelModeConsumesArgument(mode, adding: adding) {
-                argumentIndex += 1
-            }
-        }
-    }
-
-    private func channelModeConsumesArgument(_ mode: Character, adding: Bool) -> Bool {
-        switch mode {
-        case "b", "e", "I", "k": true
-        case "l", "f", "j", "L": adding
-        default: false
+        for change in IRCChannelModeParser.membershipChanges(modeString: modeString, arguments: arguments) {
+            updateMembershipMode(change.mode, for: change.nickname, adding: change.adding, in: channelID)
         }
     }
 
@@ -2019,7 +1949,11 @@ final class IRCAppState: ObservableObject {
 
         let attempt = reconnectAttempts[profile.id, default: 0] + 1
         reconnectAttempts[profile.id] = attempt
-        let delay = min(initialReconnectDelay * pow(2, Double(attempt - 1)), maximumReconnectDelay)
+        let delay = IRCReconnectPolicy.delay(
+            attempt: attempt,
+            initialDelay: initialReconnectDelay,
+            maximumDelay: maximumReconnectDelay
+        )
         let requestID = UUID()
         scheduledReconnects[profile.id] = requestID
         appendSystem("Connection lost. Reconnecting in \(Int(delay)) seconds (attempt \(attempt))…", for: .server(profile.id))
@@ -2123,32 +2057,7 @@ final class IRCAppState: ObservableObject {
     }
 
     private func outgoingTextChunks(_ text: String, commandPrefix: String, suffix: String = "") -> [String] {
-        let availableBytes = maximumOutboundIRCLineBytes - commandPrefix.utf8.count - suffix.utf8.count
-        guard availableBytes > 0 else { return [] }
-
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        let logicalLines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var result: [String] = []
-
-        for line in logicalLines where !line.isEmpty {
-            var chunk = ""
-            var byteCount = 0
-            for character in line {
-                let characterByteCount = String(character).utf8.count
-                if !chunk.isEmpty, byteCount + characterByteCount > availableBytes {
-                    result.append(chunk)
-                    chunk = ""
-                    byteCount = 0
-                }
-                guard characterByteCount <= availableBytes else { continue }
-                chunk.append(character)
-                byteCount += characterByteCount
-            }
-            if !chunk.isEmpty { result.append(chunk) }
-        }
-        return result
+        IRCTextFraming.messageChunks(text, commandPrefix: commandPrefix, suffix: suffix)
     }
 
     private func rememberOutgoingEcho(serverID: UUID, target: String, text: String) {

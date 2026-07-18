@@ -1,0 +1,30 @@
+{
+  "configurations" : [
+    {
+      "id" : "D475217D-D0BB-49E5-A3C6-FE663AC36933",
+      "name" : "Default",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:Netsplit.xcodeproj",
+      "identifier" : "9B86C40B3009D6870054D952",
+      "name" : "Netsplit"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:Netsplit.xcodeproj",
+        "identifier" : "A2C000000000000000000008",
+        "name" : "NetsplitTests"
+      }
+    }
+  ],
+  "version" : 1
+}

@@ -87,7 +87,6 @@ struct IRCWireMessage {
 }
 
 final class IRCConnection {
-    private static let maximumOutboundLineBytes = 510
     private static let maximumBufferedLineBytes = 64 * 1024
     private static let heartbeatInterval: TimeInterval = 30
     private static let heartbeatTimeout: TimeInterval = 15
@@ -263,7 +262,7 @@ final class IRCConnection {
             let safeReason = reason
                 .replacingOccurrences(of: "\r", with: "")
                 .replacingOccurrences(of: "\n", with: "")
-            let boundedCommand = Self.prefix("QUIT :\(safeReason)", fittingUTF8ByteCount: Self.maximumOutboundLineBytes)
+            let boundedCommand = IRCTextFraming.prefix("QUIT :\(safeReason)")
             sshTunnel.send(Data("\(boundedCommand)\r\n".utf8)) { [weak self, weak sshTunnel] _, _ in
                 guard let self, self.sshTunnel === sshTunnel else {
                     completion()
@@ -285,7 +284,7 @@ final class IRCConnection {
         let safeReason = reason
             .replacingOccurrences(of: "\r", with: "")
             .replacingOccurrences(of: "\n", with: "")
-        let boundedCommand = Self.prefix("QUIT :\(safeReason)", fittingUTF8ByteCount: Self.maximumOutboundLineBytes)
+        let boundedCommand = IRCTextFraming.prefix("QUIT :\(safeReason)")
         let line = "\(boundedCommand)\r\n"
         connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] _ in
             Task { @MainActor [weak self, weak connection] in
@@ -307,10 +306,8 @@ final class IRCConnection {
             completion?(false)
             return
         }
-        let singleLine = command
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-        let boundedCommand = Self.prefix(singleLine, fittingUTF8ByteCount: Self.maximumOutboundLineBytes)
+        let singleLine = IRCTextFraming.sanitizedSingleLine(command)
+        let boundedCommand = IRCTextFraming.prefix(singleLine)
         if boundedCommand != singleLine {
             eventHandler?(.notice("An outgoing IRC command exceeded the server line limit and was truncated."))
         }
@@ -502,19 +499,6 @@ final class IRCConnection {
         }
     }
 
-    private static func prefix(_ value: String, fittingUTF8ByteCount limit: Int) -> String {
-        guard value.utf8.count > limit else { return value }
-        var result = ""
-        var byteCount = 0
-        for character in value {
-            let characterByteCount = String(character).utf8.count
-            guard byteCount + characterByteCount <= limit else { break }
-            result.append(character)
-            byteCount += characterByteCount
-        }
-        return result
-    }
-
     private func handleCapabilityMessage(_ message: IRCWireMessage) {
         // CAP replies are normally: CAP <nick|*> <LS|ACK|NAK> [*] :capabilities
         guard message.parameters.count >= 2 else { return }
@@ -570,12 +554,8 @@ final class IRCConnection {
     private func handleAuthenticationMessage(_ message: IRCWireMessage) {
         guard message.parameters.first == "+", let credentials = saslCredentials, !isWaitingForSASLResponse else { return }
         isWaitingForSASLResponse = true
-        let payload = Data(([0] + Array(credentials.username.utf8) + [0] + Array(credentials.password.utf8))).base64EncodedString()
-        let chunks = stride(from: 0, to: payload.count, by: 400).map { start in
-            String(payload.dropFirst(start).prefix(400))
-        }
-        chunks.forEach { send(command: "AUTHENTICATE \($0)") }
-        if payload.count.isMultiple(of: 400) { send(command: "AUTHENTICATE +") }
+        IRCSASL.plainAuthenticationChunks(username: credentials.username, password: credentials.password)
+            .forEach { send(command: "AUTHENTICATE \($0)") }
     }
 
     private func handleSASLNumeric(_ message: IRCWireMessage) {

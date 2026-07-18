@@ -1,0 +1,85 @@
+import Foundation
+import Testing
+@testable import Netsplit
+
+@Suite("IRC outbound framing and commands")
+struct IRCFramingAndCommandTests {
+    @Test("Removes CR/LF command injection and enforces the IRC byte limit")
+    func sanitizesAndBoundsCommands() {
+        let sanitized = IRCTextFraming.sanitizedSingleLine("PRIVMSG #swift :hello\r\nOPER attacker")
+        #expect(sanitized == "PRIVMSG #swift :hello  OPER attacker")
+        #expect(!sanitized.contains("\r"))
+        #expect(!sanitized.contains("\n"))
+
+        let bounded = IRCTextFraming.prefix(String(repeating: "é", count: 300))
+        #expect(bounded.utf8.count == 510)
+        #expect(bounded.count == 255)
+    }
+
+    @Test("Splits long Unicode messages into complete, reconstructable wire-safe chunks")
+    func chunksUnicodeMessages() {
+        let prefix = "PRIVMSG #swift :"
+        let text = String(repeating: "Swift 🦉 ", count: 100)
+        let chunks = IRCTextFraming.messageChunks(text, commandPrefix: prefix)
+
+        #expect(chunks.count > 1)
+        #expect(chunks.joined() == text)
+        #expect(chunks.allSatisfy { (prefix + $0).utf8.count <= IRCTextFraming.maximumLineBytes })
+    }
+
+    @Test("Honors logical lines and CTCP suffix overhead")
+    func chunksActionsAndLogicalLines() {
+        let prefix = "PRIVMSG #swift :\u{01}ACTION "
+        let suffix = "\u{01}"
+        let chunks = IRCTextFraming.messageChunks("first\r\nsecond\rthird", commandPrefix: prefix, suffix: suffix)
+
+        #expect(chunks == ["first", "second", "third"])
+        #expect(chunks.allSatisfy { (prefix + $0 + suffix).utf8.count <= IRCTextFraming.maximumLineBytes })
+        #expect(IRCTextFraming.messageChunks("message", commandPrefix: String(repeating: "x", count: 510)).isEmpty)
+    }
+
+    @Test("Translates user-friendly on-connect commands to IRC wire commands")
+    func translatesOnConnectCommands() {
+        let cases: [(String, String?)] = [
+            ("  PRIVMSG NickServ :STATUS  ", "PRIVMSG NickServ :STATUS"),
+            ("/msg Alice hello there", "PRIVMSG Alice :hello there"),
+            ("/query Alice hello there", "PRIVMSG Alice :hello there"),
+            ("/notice #swift deployment soon", "NOTICE #swift :deployment soon"),
+            ("/ns identify secret", "PRIVMSG NickServ :identify secret"),
+            ("/chanserv op #swift Alice", "PRIVMSG ChanServ :op #swift Alice"),
+            ("/identify secret", "PRIVMSG NickServ :IDENTIFY secret"),
+            ("/raw MODE #swift +i", "MODE #swift +i"),
+            ("/join swift", "JOIN #swift"),
+            ("/join &staff key", "JOIN &staff key"),
+            ("/away lunch", "AWAY lunch"),
+            ("/away", "AWAY"),
+            ("", nil),
+            ("/msg Alice", nil),
+            ("/join", nil),
+            ("/raw", nil)
+        ]
+
+        for (input, expected) in cases {
+            #expect(IRCCommandTranslator.onConnectWireCommand(from: input) == expected, "Input: \(input)")
+        }
+    }
+
+    @Test("Builds SASL PLAIN payloads and emits the required terminal chunk")
+    func buildsSASLPlainChunks() throws {
+        let chunks = IRCSASL.plainAuthenticationChunks(username: "alice", password: "pässword")
+        let encoded = chunks.filter { $0 != "+" }.joined()
+        let decoded = try #require(Data(base64Encoded: encoded))
+        let expected = Data([0] + Array("alice".utf8) + [0] + Array("pässword".utf8))
+
+        #expect(decoded == expected)
+        #expect(chunks.allSatisfy { $0 == "+" || $0.count <= 400 })
+
+        let exactBoundary = IRCSASL.plainAuthenticationChunks(
+            username: "u",
+            password: String(repeating: "p", count: 295)
+        )
+        #expect(exactBoundary.count == 2)
+        #expect(exactBoundary[0].count == 400)
+        #expect(exactBoundary[1] == "+")
+    }
+}
