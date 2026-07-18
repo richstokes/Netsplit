@@ -42,6 +42,11 @@ struct ContentView: View {
     @State private var editingProfile: ServerProfile?
 
     private var textMetrics: IRCTextMetrics { IRCTextMetrics(bodySize: state.transcriptFontSize) }
+    private var hasSelectedChannel: Bool {
+        guard let selection = state.selection else { return false }
+        if case .channel = selection { return true }
+        return false
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -68,6 +73,17 @@ struct ContentView: View {
                         }
                         .disabled(!state.canBrowseSelectedChannels)
                         .accessibilityHint("Shows the channel list for the selected server")
+                    }
+                    if hasSelectedChannel {
+                        Toggle(isOn: Binding(
+                            get: { state.showsMemberList },
+                            set: { _ in state.toggleMemberList() }
+                        )) {
+                            Label("Members", systemImage: "sidebar.right")
+                        }
+                        .toggleStyle(.button)
+                        .accessibilityLabel(state.showsMemberList ? "Hide Members" : "Show Members")
+                        .help(state.showsMemberList ? "Hide member list" : "Show member list")
                     }
                 }
             }
@@ -401,7 +417,6 @@ private struct ConversationView: View {
     private var title: String { state.title(for: selection) }
     private var subtitle: String { state.subtitle(for: selection) }
     private var isChannel: Bool { if case .channel = selection { return true }; return false }
-    private var memberCount: Int { isChannel ? state.members(for: selection).count : 0 }
     private var channelTopic: String? { state.topic(for: selection) }
 
     var body: some View {
@@ -435,25 +450,6 @@ private struct ConversationView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                if isChannel {
-                    HStack(spacing: textMetrics.spacing(8)) {
-                        Label("\(memberCount) members", systemImage: "person.2.fill")
-                            .font(.system(size: textMetrics.size(12), weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, textMetrics.spacing(10))
-                            .padding(.vertical, textMetrics.spacing(6))
-                            .background(.quaternary, in: Capsule())
-                        Button { state.toggleMemberList() } label: {
-                            Label(state.showsMemberList ? "Hide Members" : "Show Members", systemImage: "sidebar.right")
-                        }
-                        .font(.system(size: textMetrics.size(12), weight: .medium))
-                        .buttonStyle(.bordered)
-                        .controlSize(textMetrics.scale > 1.15 ? .large : .small)
-                        .help(state.showsMemberList ? "Hide member list" : "Show member list")
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .layoutPriority(2)
-                }
             }
             .padding(.horizontal, textMetrics.spacing(22))
             .padding(.vertical, textMetrics.spacing(13))
