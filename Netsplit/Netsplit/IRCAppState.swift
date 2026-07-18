@@ -34,6 +34,7 @@ final class IRCAppState: ObservableObject {
     @Published private(set) var connectionStatuses: [UUID: ConnectionStatus] = [:]
     @Published private(set) var messageRevision = 0
     @Published private(set) var memberRevision = 0
+    @Published private var channelTopics: [UUID: String] = [:]
     @Published var isChannelBrowserPresented = false
     @Published private var listedChannelsByServer: [UUID: [ChannelListing]] = [:]
     @Published private var channelListsInProgress: Set<UUID> = []
@@ -568,6 +569,13 @@ final class IRCAppState: ObservableObject {
         return channelMembers[id] ?? [ChannelMember(nickname: fallbackNickname, prefix: nil)]
     }
 
+    func topic(for item: SidebarItem) -> String? {
+        guard case .channel(let id) = item,
+              let topic = channelTopics[id]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !topic.isEmpty else { return nil }
+        return topic
+    }
+
     func channelListings(for profileID: UUID?) -> [ChannelListing] {
         guard let profileID else { return [] }
         return listedChannelsByServer[profileID] ?? []
@@ -674,6 +682,7 @@ final class IRCAppState: ObservableObject {
     private func rejoin(_ channel: Conversation, on profile: ServerProfile) {
         let key = joinKey(serverID: profile.id, channel: channel.name)
         guard pendingJoins[key] == nil else { return }
+        channelTopics.removeValue(forKey: channel.id)
         channelMembers[channel.id] = [ChannelMember(nickname: nickname(for: profile), prefix: nil)]
         let statusMessage = IRCMessage(sender: "System", text: "Rejoining \(channel.name)…", isSystem: true)
         conversations[channel.id, default: []].append(statusMessage)
@@ -702,6 +711,10 @@ final class IRCAppState: ObservableObject {
         }
         let channel = Conversation(name: listing.name, serverID: profile.id)
         channels.append(channel)
+        let listedTopic = listing.topic.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !listedTopic.isEmpty {
+            channelTopics[channel.id] = listedTopic
+        }
         channelMembers[channel.id] = [ChannelMember(nickname: nickname(for: profile), prefix: nil)]
         let joiningMessage = IRCMessage(sender: "System", text: "Joining \(listing.name)…", isSystem: true)
         conversations[channel.id] = [joiningMessage]
@@ -1234,6 +1247,12 @@ final class IRCAppState: ObservableObject {
             guard let channelName = wire.parameters.first,
                   let channel = existingChannel(named: channelName, serverID: profile.id),
                   let topic = wire.trailing else { return }
+            let trimmedTopic = topic.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedTopic.isEmpty {
+                channelTopics.removeValue(forKey: channel.id)
+            } else {
+                channelTopics[channel.id] = trimmedTopic
+            }
             let key = topicKey(serverID: profile.id, channel: channelName)
             let destination = pendingTopicDestinations.removeValue(forKey: key)
             appendChannelEvent("\(sender) changed the topic to: \(topic)", channelID: channel.id)
@@ -1553,12 +1572,26 @@ final class IRCAppState: ObservableObject {
         guard wire.parameters.count >= 2 else { return }
         let channelName = wire.parameters[1]
         let key = topicKey(serverID: serverID, channel: channelName)
-        guard let destination = pendingTopicDestinations.removeValue(forKey: key) else { return }
         switch wire.command {
         case "331":
-            appendSystem("\(channelName) has no topic.", for: destination)
+            if let channel = existingChannel(named: channelName, serverID: serverID) {
+                channelTopics.removeValue(forKey: channel.id)
+            }
+            if let destination = pendingTopicDestinations.removeValue(forKey: key) {
+                appendSystem("\(channelName) has no topic.", for: destination)
+            }
         case "332":
-            appendSystem("Topic for \(channelName): \(wire.trailing ?? "")", for: destination)
+            let topic = (wire.trailing ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let channel = existingChannel(named: channelName, serverID: serverID) {
+                if topic.isEmpty {
+                    channelTopics.removeValue(forKey: channel.id)
+                } else {
+                    channelTopics[channel.id] = topic
+                }
+            }
+            if let destination = pendingTopicDestinations.removeValue(forKey: key) {
+                appendSystem("Topic for \(channelName): \(topic)", for: destination)
+            }
         default:
             break
         }
@@ -1685,6 +1718,7 @@ final class IRCAppState: ObservableObject {
     private func removeChannelConversation(_ channel: Conversation) {
         channels.removeAll { $0.id == channel.id }
         conversations.removeValue(forKey: channel.id)
+        channelTopics.removeValue(forKey: channel.id)
         channelMembers.removeValue(forKey: channel.id)
         pendingChannelMembers.removeValue(forKey: channel.id)
         pendingJoins.removeValue(forKey: joinKey(serverID: channel.serverID, channel: channel.name))
@@ -1715,6 +1749,7 @@ final class IRCAppState: ObservableObject {
         directMessages.removeAll { $0.serverID == serverID }
         for conversationID in removedConversationIDs {
             conversations.removeValue(forKey: conversationID)
+            channelTopics.removeValue(forKey: conversationID)
             channelMembers.removeValue(forKey: conversationID)
             pendingChannelMembers.removeValue(forKey: conversationID)
         }

@@ -379,6 +379,7 @@ private struct ConversationView: View {
     private var subtitle: String { state.subtitle(for: selection) }
     private var isChannel: Bool { if case .channel = selection { return true }; return false }
     private var memberCount: Int { isChannel ? state.members(for: selection).count : 0 }
+    private var channelTopic: String? { state.topic(for: selection) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -391,25 +392,43 @@ private struct ConversationView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.system(size: textMetrics.size(18), weight: .semibold))
-                    Text(subtitle)
-                        .font(.system(size: textMetrics.size(12)))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if isChannel {
-                    Label("\(memberCount) members", systemImage: "person.2.fill")
-                        .font(.system(size: textMetrics.size(12), weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, textMetrics.spacing(10))
-                        .padding(.vertical, textMetrics.spacing(6))
-                        .background(.quaternary, in: Capsule())
-                    Button { showsMemberList.toggle() } label: {
-                        Label(showsMemberList ? "Hide Members" : "Show Members", systemImage: "sidebar.right")
+                    HStack(spacing: textMetrics.spacing(5)) {
+                        Text(subtitle)
+                            .fontWeight(.medium)
+                            .fixedSize(horizontal: true, vertical: false)
+                        if let channelTopic {
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                            Text(channelTopic)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .layoutPriority(-1)
+                                .help(channelTopic)
+                        }
                     }
-                    .font(.system(size: textMetrics.size(12), weight: .medium))
-                    .buttonStyle(.bordered)
-                    .controlSize(textMetrics.scale > 1.15 ? .large : .small)
-                    .help(showsMemberList ? "Hide member list" : "Show member list")
+                    .font(.system(size: textMetrics.size(12)))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if isChannel {
+                    HStack(spacing: textMetrics.spacing(8)) {
+                        Label("\(memberCount) members", systemImage: "person.2.fill")
+                            .font(.system(size: textMetrics.size(12), weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, textMetrics.spacing(10))
+                            .padding(.vertical, textMetrics.spacing(6))
+                            .background(.quaternary, in: Capsule())
+                        Button { showsMemberList.toggle() } label: {
+                            Label(showsMemberList ? "Hide Members" : "Show Members", systemImage: "sidebar.right")
+                        }
+                        .font(.system(size: textMetrics.size(12), weight: .medium))
+                        .buttonStyle(.bordered)
+                        .controlSize(textMetrics.scale > 1.15 ? .large : .small)
+                        .help(showsMemberList ? "Hide member list" : "Show member list")
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(2)
                 }
             }
             .padding(.horizontal, textMetrics.spacing(22))
@@ -778,8 +797,8 @@ private struct MessageRow: View {
                     .font(.system(size: textMetrics.size(15), weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(width: senderColumnWidth, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: senderColumnWidth, alignment: .leading)
                     .help(message.sender)
                 Text(linkifiedText)
                     .font(.system(size: textMetrics.bodySize))
