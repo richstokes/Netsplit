@@ -137,22 +137,13 @@ private struct SidebarView: View {
                     }
 
                     ForEach(state.channels(for: profile)) { channel in
-                        HStack(spacing: 6) {
-                            Label(channel.name, systemImage: channel.hasUnread ? "number.circle.fill" : "number.circle")
-                            Spacer(minLength: 0)
-                            if state.isFavorite(channel) {
-                                Image(systemName: "star.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                    .accessibilityHidden(true)
-                            }
-                        }
+                        SidebarChannelLabel(
+                            channel: channel,
+                            isFavorite: state.isFavorite(channel)
+                        )
                             .accessibilityElement(children: .combine)
                             .accessibilityLabel(channel.name)
                             .accessibilityValue(channelAccessibilityValue(channel))
-                            .foregroundStyle(channel.hasUnread ? .primary : .secondary)
-                            .font(.system(size: textMetrics.size(15), weight: channel.hasUnread ? .semibold : .regular))
-                            .padding(.vertical, textMetrics.spacing(1.5))
                             .tag(SidebarItem.channel(channel.id))
                             .contextMenu {
                                 Button(state.isFavorite(channel) ? "Unfavorite" : "Favorite", systemImage: state.isFavorite(channel) ? "star.slash" : "star") {
@@ -225,8 +216,90 @@ private struct SidebarView: View {
     private func channelAccessibilityValue(_ channel: Conversation) -> String {
         var values: [String] = []
         values.append(channel.hasUnread ? "Unread messages" : "No unread messages")
+        if channel.hasMention { values.append("Mentioned you") }
         if state.isFavorite(channel) { values.append("Favorite") }
         return values.joined(separator: ", ")
+    }
+}
+
+private struct SidebarChannelLabel: View {
+    let channel: Conversation
+    let isFavorite: Bool
+
+    @Environment(\.ircTextMetrics) private var textMetrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isPulseDimmed = false
+    @State private var pulseTask: Task<Void, Never>?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Label(
+                channel.name,
+                systemImage: channel.hasMention
+                    ? "at.circle.fill"
+                    : (channel.hasUnread ? "number.circle.fill" : "number.circle")
+            )
+            .opacity(isPulseDimmed ? 0.42 : 1)
+
+            Spacer(minLength: 0)
+
+            if isFavorite {
+                Image(systemName: "star.fill")
+                    .font(.system(size: textMetrics.size(10)))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .foregroundStyle(channel.hasMention ? Color.accentColor : (channel.hasUnread ? Color.primary : Color.secondary))
+        .font(.system(size: textMetrics.size(15), weight: channel.hasUnread ? .semibold : .regular))
+        .padding(.vertical, textMetrics.spacing(1.5))
+        .onAppear {
+            if channel.hasMention { startMentionPulse() }
+        }
+        .onChange(of: channel.mentionRevision) {
+            startMentionPulse()
+        }
+        .onChange(of: channel.hasMention) { _, hasMention in
+            if !hasMention { stopMentionPulse() }
+        }
+        .onDisappear {
+            pulseTask?.cancel()
+        }
+    }
+
+    private func startMentionPulse() {
+        pulseTask?.cancel()
+        isPulseDimmed = false
+        guard channel.hasMention, !reduceMotion else { return }
+
+        pulseTask = Task { @MainActor in
+            for _ in 0..<3 {
+                withAnimation(.easeInOut(duration: 0.5)) {
+                    isPulseDimmed = true
+                }
+                do {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                } catch {
+                    return
+                }
+                withAnimation(.easeInOut(duration: 0.5)) {
+                    isPulseDimmed = false
+                }
+                do {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopMentionPulse() {
+        pulseTask?.cancel()
+        pulseTask = nil
+        withAnimation(.easeOut(duration: 0.15)) {
+            isPulseDimmed = false
+        }
     }
 }
 

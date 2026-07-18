@@ -596,8 +596,9 @@ final class IRCAppState: ObservableObject {
     func markRead(_ item: SidebarItem) {
         switch item {
         case .channel(let id):
-            guard let index = channels.firstIndex(where: { $0.id == id }), channels[index].hasUnread else { return }
+            guard let index = channels.firstIndex(where: { $0.id == id }) else { return }
             channels[index].hasUnread = false
+            channels[index].hasMention = false
         case .directMessage(let id):
             guard let index = directMessages.firstIndex(where: { $0.id == id }), directMessages[index].hasUnread else { return }
             directMessages[index].hasUnread = false
@@ -1180,10 +1181,18 @@ final class IRCAppState: ObservableObject {
             if isChannelName(target) {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 let channel = channel(named: target, serverID: profile.id)
-                append(IRCMessage(sender: "\(sender) (notice)", text: text), for: .channel(channel.id))
+                append(
+                    IRCMessage(sender: "\(sender) (notice)", text: text),
+                    for: .channel(channel.id),
+                    markMention: messageMentionsLocalNickname(text, on: profile)
+                )
             } else if let channel = channelReferencedByNotice(text, serverID: profile.id) {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
-                append(IRCMessage(sender: "\(sender) (notice)", text: text), for: .channel(channel.id))
+                append(
+                    IRCMessage(sender: "\(sender) (notice)", text: text),
+                    for: .channel(channel.id),
+                    markMention: messageMentionsLocalNickname(text, on: profile)
+                )
             } else if wire.prefix?.contains("!") == true,
                       !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
@@ -1204,7 +1213,12 @@ final class IRCAppState: ObservableObject {
             if isChannelName(target) {
                 let channel = channel(named: target, serverID: profile.id)
                 let isOwnMessage = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
-                append(IRCMessage(sender: sender, text: text), for: .channel(channel.id), markUnread: !isOwnMessage)
+                append(
+                    IRCMessage(sender: sender, text: text),
+                    for: .channel(channel.id),
+                    markUnread: !isOwnMessage,
+                    markMention: !isOwnMessage && messageMentionsLocalNickname(text, on: profile)
+                )
             } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
                 append(IRCMessage(sender: sender, text: text), for: .directMessage(conversation.id))
@@ -1700,7 +1714,12 @@ final class IRCAppState: ObservableObject {
             if let first = target.first, "#&+!".contains(first) {
                 let channel = channel(named: target, serverID: profile.id)
                 let isOwnAction = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
-                append(message, for: .channel(channel.id), markUnread: !isOwnAction)
+                append(
+                    message,
+                    for: .channel(channel.id),
+                    markUnread: !isOwnAction,
+                    markMention: !isOwnAction && messageMentionsLocalNickname(command[1], on: profile)
+                )
             } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
                 append(message, for: .directMessage(conversation.id))
@@ -2036,6 +2055,14 @@ final class IRCAppState: ObservableObject {
         (caseMappings[serverID] ?? .rfc1459).normalize(value)
     }
 
+    private func messageMentionsLocalNickname(_ message: String, on profile: ServerProfile) -> Bool {
+        IRCMentionPolicy.containsMention(
+            of: nickname(for: profile),
+            in: message,
+            caseMapping: caseMappings[profile.id] ?? .rfc1459
+        )
+    }
+
     private func identifiersEqual(_ lhs: String, _ rhs: String, serverID: UUID) -> Bool {
         normalizedIdentifier(lhs, serverID: serverID) == normalizedIdentifier(rhs, serverID: serverID)
     }
@@ -2125,7 +2152,12 @@ final class IRCAppState: ObservableObject {
         append(IRCMessage(sender: "•", text: text, isSystem: true), for: .channel(channelID))
     }
 
-    private func append(_ message: IRCMessage, for item: SidebarItem, markUnread shouldMarkUnread: Bool = true) {
+    private func append(
+        _ message: IRCMessage,
+        for item: SidebarItem,
+        markUnread shouldMarkUnread: Bool = true,
+        markMention shouldMarkMention: Bool = false
+    ) {
         guard let id = conversationID(for: item) else { return }
         conversations[id, default: []].append(message)
         let trimThreshold = maximumRetainedMessagesPerConversation + transcriptTrimBatchSize
@@ -2133,7 +2165,13 @@ final class IRCAppState: ObservableObject {
         if messageCount > trimThreshold {
             conversations[id]?.removeFirst(messageCount - maximumRetainedMessagesPerConversation)
         }
-        if shouldMarkUnread && !message.isSystem && selection != item { markUnread(item) }
+        if selection != item, !message.isSystem {
+            if shouldMarkMention {
+                markMention(item)
+            } else if shouldMarkUnread {
+                markUnread(item)
+            }
+        }
         messageRevision += 1
     }
 
@@ -2148,6 +2186,14 @@ final class IRCAppState: ObservableObject {
         case .connectionCenter, .server:
             break
         }
+    }
+
+    private func markMention(_ item: SidebarItem) {
+        guard case .channel(let id) = item,
+              let index = channels.firstIndex(where: { $0.id == id }) else { return }
+        channels[index].hasUnread = true
+        channels[index].hasMention = true
+        channels[index].mentionRevision &+= 1
     }
 
     private func formatIdle(_ seconds: Int) -> String {

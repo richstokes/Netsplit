@@ -31,6 +31,20 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCCaseMapping.rfc1459.normalize("[Nick]\\^") == "{nick}|~")
     }
 
+    @Test("Nickname mentions require IRC nickname boundaries")
+    func detectsNicknameMentions() {
+        let mapping = IRCCaseMapping.rfc1459
+
+        for message in ["hello dbr", "DBR: are you there?", "ping @dbr", "(dbr)"] {
+            #expect(IRCMentionPolicy.containsMention(of: "dbr", in: message, caseMapping: mapping), "Message: \(message)")
+        }
+        for message in ["adbr", "dbr2", "dbr_name", "not related"] {
+            #expect(!IRCMentionPolicy.containsMention(of: "dbr", in: message, caseMapping: mapping), "Message: \(message)")
+        }
+
+        #expect(IRCMentionPolicy.containsMention(of: "[Nick]", in: "hello {nick}", caseMapping: mapping))
+    }
+
     @Test("Member roles retain fallback privileges in server priority order")
     func prioritizesMemberRoles() {
         var member = ChannelMember(nickname: "Alice", modes: ["v", "o"])

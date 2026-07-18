@@ -195,6 +195,39 @@ struct Conversation: Identifiable, Hashable {
     var name: String
     var serverID: UUID
     var hasUnread = false
+    var hasMention = false
+    var mentionRevision = 0
+}
+
+enum IRCMentionPolicy {
+    static func containsMention(
+        of nickname: String,
+        in message: String,
+        caseMapping: IRCCaseMapping
+    ) -> Bool {
+        let normalizedNickname = caseMapping.normalize(nickname)
+        let normalizedMessage = caseMapping.normalize(message)
+        guard !normalizedNickname.isEmpty, !normalizedMessage.isEmpty else { return false }
+
+        var searchStart = normalizedMessage.startIndex
+        while searchStart < normalizedMessage.endIndex,
+              let match = normalizedMessage.range(
+                of: normalizedNickname,
+                range: searchStart..<normalizedMessage.endIndex
+              ) {
+            let hasLeadingBoundary = match.lowerBound == normalizedMessage.startIndex
+                || !isNicknameCharacter(normalizedMessage[normalizedMessage.index(before: match.lowerBound)])
+            let hasTrailingBoundary = match.upperBound == normalizedMessage.endIndex
+                || !isNicknameCharacter(normalizedMessage[match.upperBound])
+            if hasLeadingBoundary && hasTrailingBoundary { return true }
+            searchStart = match.upperBound
+        }
+        return false
+    }
+
+    private static func isNicknameCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || "-[]\\`_^{|}".contains(character)
+    }
 }
 
 struct ChannelListing: Identifiable, Hashable {
