@@ -464,6 +464,7 @@ private struct ConversationView: View {
     @State private var draft = ""
     @State private var tabCompletion: RecipientTabCompletion?
     @State private var pendingURL: PendingURL?
+    @State private var hasPositionedInitialMessages = false
     @FocusState private var composerFocused: Bool
     @Environment(\.ircTextMetrics) private var textMetrics
 
@@ -523,6 +524,7 @@ private struct ConversationView: View {
                             .padding(.vertical, textMetrics.spacing(18))
                             .accessibilityAddTraits(.updatesFrequently)
                         }
+                        .defaultScrollAnchor(.bottom)
                         .accessibilityLabel("Conversation messages")
                         .task(id: state.messages(for: selection).last?.id) {
                             // Coalesce reconnect bursts and scroll only when the
@@ -530,6 +532,15 @@ private struct ConversationView: View {
                             await Task.yield()
                             guard !Task.isCancelled,
                                   let id = state.messages(for: selection).last?.id else { return }
+
+                            // The scroll view starts at the bottom when a
+                            // conversation appears. Avoid animating that initial
+                            // position as though a new message had just arrived.
+                            guard hasPositionedInitialMessages else {
+                                hasPositionedInitialMessages = true
+                                return
+                            }
+
                             withAnimation(.easeOut(duration: 0.16)) {
                                 proxy.scrollTo(id, anchor: .bottom)
                             }
