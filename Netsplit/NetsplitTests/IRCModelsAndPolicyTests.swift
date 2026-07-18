@@ -177,4 +177,55 @@ struct IRCModelsAndPolicyTests {
         state.toggleMemberList()
         #expect(state.showsMemberList == initialValue)
     }
+
+    @Test("Selection history navigates backward, forward, and clears forward branches")
+    @MainActor
+    func navigatesSelectionHistory() {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let alice = state.selection
+        state.startDirectMessage(with: "Bob", from: .server(profile.id))
+        let bob = state.selection
+
+        #expect(state.canNavigateBack)
+        #expect(!state.canNavigateForward)
+
+        state.navigateBack()
+        #expect(state.selection == alice)
+        #expect(state.canNavigateForward)
+
+        state.navigateBack()
+        #expect(state.selection == .connectionCenter)
+
+        state.navigateForward()
+        #expect(state.selection == alice)
+        state.navigateForward()
+        #expect(state.selection == bob)
+
+        state.navigateBack()
+        state.selection = .connectionCenter
+        #expect(!state.canNavigateForward)
+    }
+
+    @Test("Selection history skips conversations after they close")
+    @MainActor
+    func skipsClosedHistoryItems() {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let alice = state.selection
+        state.startDirectMessage(with: "Bob", from: .server(profile.id))
+        guard let bob = state.directMessages.first(where: { $0.name == "Bob" }) else {
+            Issue.record("Expected Bob direct message")
+            return
+        }
+
+        state.close(bob)
+        state.navigateBack()
+
+        #expect(state.selection == alice)
+    }
 }

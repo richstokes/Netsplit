@@ -10,6 +10,7 @@ import SwiftUI
 
 final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
     weak var state: IRCAppState?
+    weak var mainWindow: NSWindow?
     private var isTerminating = false
     private var hasRepliedToTermination = false
     private var shortcutMonitor: Any?
@@ -29,15 +30,12 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        // SwiftUI's WindowGroup installs its own Command-W equivalent. Handle
-        // the conversation shortcut before AppKit turns it into Close Window.
-        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard !event.isARepeat,
-                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                  event.charactersIgnoringModifiers?.lowercased() == "w",
-                  self?.state?.canCloseActiveSelection == true else { return event }
-            self?.state?.closeActiveSelection()
-            return nil
+        // Handle conversation and history shortcuts before AppKit turns
+        // Command-W into Close Window or delivers navigation input elsewhere.
+        shortcutMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .otherMouseDown, .scrollWheel, .swipe]
+        ) { [weak self] event in
+            self?.handleShortcutEvent(event) ?? event
         }
     }
 
@@ -54,6 +52,86 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func workspaceDidWake(_ notification: Notification) {
         state?.systemDidWake()
+    }
+
+    private func handleShortcutEvent(_ event: NSEvent) -> NSEvent? {
+        guard event.window === mainWindow, mainWindow?.attachedSheet == nil else { return event }
+
+        switch event.type {
+        case .keyDown:
+            guard !event.isARepeat,
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else { return event }
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "w" where state?.canCloseActiveSelection == true:
+                state?.closeActiveSelection()
+                return nil
+            case "[" where state?.canNavigateBack == true:
+                state?.navigateBack()
+                return nil
+            case "]" where state?.canNavigateForward == true:
+                state?.navigateForward()
+                return nil
+            default:
+                return event
+            }
+
+        case .otherMouseDown:
+            switch event.buttonNumber {
+            case 3 where state?.canNavigateBack == true:
+                state?.navigateBack()
+                return nil
+            case 4 where state?.canNavigateForward == true:
+                state?.navigateForward()
+                return nil
+            default:
+                return event
+            }
+
+        case .scrollWheel:
+            return beginSwipeTracking(with: event) ? nil : event
+
+        case .swipe:
+            if event.deltaX > 0, state?.canNavigateBack == true {
+                state?.navigateBack()
+                return nil
+            }
+            if event.deltaX < 0, state?.canNavigateForward == true {
+                state?.navigateForward()
+                return nil
+            }
+            return event
+
+        default:
+            return event
+        }
+    }
+
+    private func beginSwipeTracking(with event: NSEvent) -> Bool {
+        guard event.phase == .began,
+              NSEvent.isSwipeTrackingFromScrollEventsEnabled,
+              abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY),
+              let state else { return false }
+
+        let canGoBack = state.canNavigateBack
+        let canGoForward = state.canNavigateForward
+        guard (event.scrollingDeltaX > 0 && canGoBack) ||
+              (event.scrollingDeltaX < 0 && canGoForward) else { return false }
+
+        var didNavigate = false
+        event.trackSwipeEvent(
+            options: [.lockDirection, .clampGestureAmount],
+            dampenAmountThresholdMin: canGoForward ? -1 : 0,
+            max: canGoBack ? 1 : 0
+        ) { [weak self] amount, _, isComplete, _ in
+            guard isComplete, !didNavigate else { return }
+            didNavigate = true
+            if amount >= 1 {
+                self?.state?.navigateBack()
+            } else if amount <= -1 {
+                self?.state?.navigateForward()
+            }
+        }
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -87,6 +165,9 @@ struct NetsplitApp: App {
                 .frame(minWidth: 920, minHeight: 620)
                 .onAppear {
                     appDelegate.state = state
+                    DispatchQueue.main.async {
+                        appDelegate.mainWindow = NSApp.keyWindow
+                    }
                 }
                 .task {
                     state.connectProfilesConfiguredForLaunch()

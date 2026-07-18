@@ -28,7 +28,9 @@ final class IRCAppState: ObservableObject {
         didSet { UserDefaults.standard.set(warnBeforeOpeningLinks, forKey: "warnBeforeOpeningLinks") }
     }
     @Published var transcriptFontSize: Double
-    @Published var selection: SidebarItem?
+    @Published var selection: SidebarItem? {
+        didSet { recordSelectionChange(from: oldValue) }
+    }
     @Published var showsMemberList = true
     @Published private(set) var channels: [Conversation] = []
     @Published private(set) var directMessages: [Conversation] = []
@@ -87,6 +89,10 @@ final class IRCAppState: ObservableObject {
     private var isSystemSleeping = false
     private var systemSleepServerIDs = Set<UUID>()
     private var systemWakeGeneration: UUID?
+    private var backSelectionHistory: [SidebarItem] = []
+    private var forwardSelectionHistory: [SidebarItem] = []
+    private var isNavigatingSelectionHistory = false
+    private let maximumSelectionHistoryCount = 100
 
     init() {
         let defaults = UserDefaults.standard
@@ -157,6 +163,14 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    var canNavigateBack: Bool {
+        backSelectionHistory.contains { isValidNavigationSelection($0) }
+    }
+
+    var canNavigateForward: Bool {
+        forwardSelectionHistory.contains { isValidNavigationSelection($0) }
+    }
+
     func toggleMemberList() {
         guard canToggleMemberList else { return }
         showsMemberList.toggle()
@@ -177,6 +191,28 @@ final class IRCAppState: ObservableObject {
         case .directMessage(let id):
             guard let directMessage = directMessages.first(where: { $0.id == id }) else { return }
             close(directMessage)
+        }
+    }
+
+    func navigateBack() {
+        while let destination = backSelectionHistory.popLast() {
+            guard isValidNavigationSelection(destination) else { continue }
+            if let selection, isValidNavigationSelection(selection) {
+                appendToForwardHistory(selection)
+            }
+            selectFromHistory(destination)
+            return
+        }
+    }
+
+    func navigateForward() {
+        while let destination = forwardSelectionHistory.popLast() {
+            guard isValidNavigationSelection(destination) else { continue }
+            if let selection, isValidNavigationSelection(selection) {
+                appendToBackHistory(selection)
+            }
+            selectFromHistory(destination)
+            return
         }
     }
 
@@ -345,7 +381,7 @@ final class IRCAppState: ObservableObject {
 
         let originalSelection = selection
         for profile in profiles where profile.autoConnect {
-            connect(profile)
+            connect(profile, selectConversation: false)
         }
         selection = originalSelection
     }
@@ -1765,6 +1801,46 @@ final class IRCAppState: ObservableObject {
 
     private func clientVersionKey(serverID: UUID, nickname: String) -> String {
         "\(serverID.uuidString)|\(normalizedIdentifier(nickname, serverID: serverID))"
+    }
+
+    private func recordSelectionChange(from previousSelection: SidebarItem?) {
+        guard !isNavigatingSelectionHistory, previousSelection != selection else { return }
+        forwardSelectionHistory.removeAll()
+        guard let previousSelection, isValidNavigationSelection(previousSelection) else { return }
+        appendToBackHistory(previousSelection)
+    }
+
+    private func selectFromHistory(_ destination: SidebarItem) {
+        isNavigatingSelectionHistory = true
+        selection = destination
+        isNavigatingSelectionHistory = false
+    }
+
+    private func appendToBackHistory(_ item: SidebarItem) {
+        backSelectionHistory.append(item)
+        if backSelectionHistory.count > maximumSelectionHistoryCount {
+            backSelectionHistory.removeFirst(backSelectionHistory.count - maximumSelectionHistoryCount)
+        }
+    }
+
+    private func appendToForwardHistory(_ item: SidebarItem) {
+        forwardSelectionHistory.append(item)
+        if forwardSelectionHistory.count > maximumSelectionHistoryCount {
+            forwardSelectionHistory.removeFirst(forwardSelectionHistory.count - maximumSelectionHistoryCount)
+        }
+    }
+
+    private func isValidNavigationSelection(_ item: SidebarItem) -> Bool {
+        switch item {
+        case .connectionCenter:
+            return true
+        case .server(let id):
+            return profiles.contains { $0.id == id }
+        case .channel(let id):
+            return channels.contains { $0.id == id }
+        case .directMessage(let id):
+            return directMessages.contains { $0.id == id }
+        }
     }
 
     private func profile(for item: SidebarItem) -> ServerProfile? {
