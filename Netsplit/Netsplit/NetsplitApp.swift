@@ -14,6 +14,7 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
     private var isTerminating = false
     private var hasRepliedToTermination = false
     private var shortcutMonitor: Any?
+    private let swipeCommitThreshold: CGFloat = 0.35
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let notifications = NSWorkspace.shared.notificationCenter
@@ -122,13 +123,21 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
             options: [.lockDirection, .clampGestureAmount],
             dampenAmountThresholdMin: canGoForward ? -1 : 0,
             max: canGoBack ? 1 : 0
-        ) { [weak self] amount, _, isComplete, _ in
-            guard isComplete, !didNavigate else { return }
+        ) { [weak self] amount, phase, isComplete, _ in
+            guard let self, !didNavigate else { return }
+
+            // Commit as soon as the physical gesture ends instead of waiting
+            // for AppKit's settling animation. Keep the completed amount as a
+            // fallback so a short, fast flick still follows system behavior.
+            let reachedPhysicalThreshold = phase == .ended && abs(amount) >= swipeCommitThreshold
+            let systemCommittedSwipe = isComplete && abs(amount) >= 1
+            guard reachedPhysicalThreshold || systemCommittedSwipe else { return }
+
             didNavigate = true
-            if amount >= 1 {
-                self?.state?.navigateBack()
-            } else if amount <= -1 {
-                self?.state?.navigateForward()
+            if amount > 0 {
+                state.navigateBack()
+            } else if amount < 0 {
+                state.navigateForward()
             }
         }
         return true
