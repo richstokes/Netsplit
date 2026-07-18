@@ -498,6 +498,7 @@ private struct ServerEditorHelpText: View {
 struct ChannelBrowser: View {
     @ObservedObject var state: IRCAppState
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.ircTextMetrics) private var textMetrics
     @State private var search = ""
 
     private var profile: ServerProfile? { state.selectedProfile }
@@ -512,38 +513,93 @@ struct ChannelBrowser: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            VStack(alignment: .leading, spacing: textMetrics.spacing(14)) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Browse Channels")
+                            .font(.system(size: textMetrics.size(22), weight: .semibold))
+                        Text(profile?.name ?? "IRC network")
+                            .font(.system(size: textMetrics.size(13)))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Done") { dismiss() }
+                        .controlSize(textMetrics.scale > 1.15 ? .large : .regular)
+                }
+
+                HStack(spacing: textMetrics.spacing(12)) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search channel names and topics", text: $search)
+                        .font(.system(size: textMetrics.size(14)))
+                        .textFieldStyle(.plain)
+                        .disabled(availableChannels.isEmpty)
+                    if !search.isEmpty {
+                        Button {
+                            search = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear search")
+                    }
+                }
+                .padding(.horizontal, textMetrics.spacing(11))
+                .padding(.vertical, textMetrics.spacing(8))
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Browse Channels").font(.title2.weight(.semibold))
-                    Text(isLoading ? "Receiving the live channel list from \(profile?.name ?? "the server")…" : "\(availableChannels.count) live results · double-click a channel to join.")
+                    Text(isLoading
+                         ? "Receiving the live channel list…"
+                         : (search.isEmpty
+                            ? "\(availableChannels.count) live channels"
+                            : "\(results.count) of \(availableChannels.count) channels"))
+                        .font(.system(size: textMetrics.size(12), weight: .medium))
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
-                TextField("Search channels", text: $search)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 210)
-                    .disabled(availableChannels.isEmpty)
-                if isLoading { ProgressView().controlSize(.small) }
-                Button("Done") { dismiss() }
             }
-            .padding(20)
+            .padding(textMetrics.spacing(20))
+
+            Divider()
 
             Group {
                 if !results.isEmpty {
                     List(results) { channel in
-                        HStack(spacing: 14) {
-                            Image(systemName: "number.circle.fill").foregroundStyle(.tint)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(channel.name).fontWeight(.medium)
-                                Text(channel.topic).font(.caption).foregroundStyle(.secondary)
+                        HStack(alignment: .top, spacing: textMetrics.spacing(14)) {
+                            Image(systemName: "number")
+                                .font(.system(size: textMetrics.size(14), weight: .bold))
+                                .foregroundStyle(.tint)
+                                .frame(width: textMetrics.spacing(30), height: textMetrics.spacing(30))
+                                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                            VStack(alignment: .leading, spacing: textMetrics.spacing(5)) {
+                                Text(channel.name)
+                                    .font(.system(size: textMetrics.size(16), weight: .semibold))
+                                Text(channel.topic.isEmpty ? "No topic" : channel.topic)
+                                    .font(.system(size: textMetrics.size(12)))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                    .help(channel.topic)
                             }
+
                             Spacer()
+
                             Label("\(channel.userCount)", systemImage: "person.2")
-                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                .font(.system(size: textMetrics.size(11), design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, textMetrics.spacing(8))
+                                .padding(.vertical, textMetrics.spacing(5))
+                                .background(.quaternary, in: Capsule())
+
+                            Button("Join") { join(channel) }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(textMetrics.scale > 1.15 ? .large : .small)
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, textMetrics.spacing(7))
                         .contentShape(Rectangle())
-                        .onTapGesture(count: 2) { state.join(channel); dismiss() }
+                        .onTapGesture(count: 2) { join(channel) }
+                        .accessibilityElement(children: .contain)
                     }
                 } else if isLoading {
                     VStack(spacing: 12) {
@@ -553,6 +609,9 @@ struct ChannelBrowser: View {
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if !search.isEmpty {
+                    ContentUnavailableView.search(text: search)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ContentUnavailableView {
                         Label("No Channels Returned", systemImage: "number.circle")
@@ -567,8 +626,13 @@ struct ChannelBrowser: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 610, minHeight: 460)
+        .frame(minWidth: textMetrics.spacing(720), minHeight: textMetrics.spacing(540))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private func join(_ channel: ChannelListing) {
+        state.join(channel)
+        dismiss()
     }
 }
 
@@ -606,7 +670,7 @@ struct SettingsView: View {
             }
             Section("Chat Appearance") {
                 HStack {
-                    Text("Message text size")
+                    Text("Interface text size")
                     Spacer()
                     Text("\(Int(state.transcriptFontSize)) pt")
                         .foregroundStyle(.secondary)
@@ -621,6 +685,9 @@ struct SettingsView: View {
                     step: 1
                 )
                 Button("Reset Text Size") { state.resetTranscriptFontSize() }
+                Text("Applies to conversations, navigation, member lists, connection cards, and the channel browser.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("Links") {
                 Toggle("Warn before opening links", isOn: $state.warnBeforeOpeningLinks)

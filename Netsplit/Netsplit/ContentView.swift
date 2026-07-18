@@ -6,15 +6,51 @@
 import AppKit
 import SwiftUI
 
+struct IRCTextMetrics: Equatable {
+    let bodySize: CGFloat
+
+    init(bodySize: Double = 16) {
+        self.bodySize = CGFloat(bodySize)
+    }
+
+    var scale: CGFloat { bodySize / 16 }
+    var layoutScale: CGFloat { min(max(scale, 0.8), 1.25) }
+
+    func size(_ points: CGFloat) -> CGFloat {
+        max(10, (points * scale).rounded(.toNearestOrAwayFromZero))
+    }
+
+    func spacing(_ points: CGFloat) -> CGFloat {
+        (points * layoutScale).rounded(.toNearestOrAwayFromZero)
+    }
+}
+
+private struct IRCTextMetricsKey: EnvironmentKey {
+    static let defaultValue = IRCTextMetrics()
+}
+
+extension EnvironmentValues {
+    var ircTextMetrics: IRCTextMetrics {
+        get { self[IRCTextMetricsKey.self] }
+        set { self[IRCTextMetricsKey.self] = newValue }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var state: IRCAppState
     @State private var showAddServer = false
     @State private var editingProfile: ServerProfile?
 
+    private var textMetrics: IRCTextMetrics { IRCTextMetrics(bodySize: state.transcriptFontSize) }
+
     var body: some View {
         NavigationSplitView {
             SidebarView(state: state, showAddServer: $showAddServer, editingProfile: $editingProfile)
-                .navigationSplitViewColumnWidth(min: 218, ideal: 250, max: 320)
+                .navigationSplitViewColumnWidth(
+                    min: textMetrics.spacing(218),
+                    ideal: textMetrics.spacing(250),
+                    max: textMetrics.spacing(340)
+                )
         } detail: {
             Group {
                 if state.selection == .connectionCenter || state.selection == nil {
@@ -35,6 +71,7 @@ struct ContentView: View {
                 }
             }
         }
+        .environment(\.ircTextMetrics, textMetrics)
         .sheet(isPresented: $showAddServer) {
             ServerProfileEditor(state: state)
         }
@@ -52,16 +89,19 @@ private struct SidebarView: View {
     @Binding var showAddServer: Bool
     @Binding var editingProfile: ServerProfile?
     @State private var listSelection: SidebarItem?
+    @Environment(\.ircTextMetrics) private var textMetrics
 
     var body: some View {
         List(selection: $listSelection) {
             Section {
                 Label("Connections", systemImage: "bolt.horizontal.circle")
+                    .font(.system(size: textMetrics.size(16), weight: .medium))
+                    .padding(.vertical, textMetrics.spacing(2))
                     .tag(SidebarItem.connectionCenter)
             }
 
             ForEach(state.activeProfiles) { profile in
-                Section(profile.name) {
+                Section {
                     ServerRow(profile: profile, state: state)
                         .tag(SidebarItem.server(profile.id))
                         .contextMenu {
@@ -90,7 +130,8 @@ private struct SidebarView: View {
                             }
                         }
                             .foregroundStyle(channel.hasUnread ? .primary : .secondary)
-                            .font(channel.hasUnread ? .body.weight(.semibold) : .body)
+                            .font(.system(size: textMetrics.size(15), weight: channel.hasUnread ? .semibold : .regular))
+                            .padding(.vertical, textMetrics.spacing(1.5))
                             .tag(SidebarItem.channel(channel.id))
                             .contextMenu {
                                 Button(state.isFavorite(channel) ? "Unfavorite" : "Favorite", systemImage: state.isFavorite(channel) ? "star.slash" : "star") {
@@ -106,7 +147,8 @@ private struct SidebarView: View {
                     ForEach(state.directMessages(for: profile)) { message in
                         Label(message.name, systemImage: "person.crop.circle")
                             .foregroundStyle(message.hasUnread ? .primary : .secondary)
-                            .font(message.hasUnread ? .body.weight(.semibold) : .body)
+                            .font(.system(size: textMetrics.size(15), weight: message.hasUnread ? .semibold : .regular))
+                            .padding(.vertical, textMetrics.spacing(1.5))
                             .tag(SidebarItem.directMessage(message.id))
                             .contextMenu {
                                 Button("Mute and Close", systemImage: "speaker.slash") {
@@ -118,6 +160,10 @@ private struct SidebarView: View {
                                 }
                             }
                     }
+                } header: {
+                    Text(profile.name)
+                        .font(.system(size: textMetrics.size(11), weight: .semibold))
+                        .textCase(nil)
                 }
             }
         }
@@ -139,11 +185,12 @@ private struct SidebarView: View {
                     .help("Manage connections")
                 Spacer()
                 Text("\(state.activeProfiles.count) active")
-                    .font(.caption2.weight(.medium))
+                    .font(.system(size: textMetrics.size(11), weight: .medium))
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 13)
-            .frame(height: 38)
+            .font(.system(size: textMetrics.size(13)))
+            .padding(.horizontal, textMetrics.spacing(13))
+            .frame(height: textMetrics.spacing(38))
             .background(.bar)
         }
     }
@@ -152,19 +199,22 @@ private struct SidebarView: View {
 private struct ServerRow: View {
     let profile: ServerProfile
     @ObservedObject var state: IRCAppState
+    @Environment(\.ircTextMetrics) private var textMetrics
 
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: state.status(for: profile) == .online ? "circle.inset.filled" : "circle")
-                .font(.caption)
+                .font(.system(size: textMetrics.size(12)))
                 .foregroundStyle(state.status(for: profile).tint)
             VStack(alignment: .leading, spacing: 2) {
                 Text(profile.hostname)
+                    .font(.system(size: textMetrics.size(15)))
                 Text(state.status(for: profile).label)
-                    .font(.caption2)
+                    .font(.system(size: textMetrics.size(11)))
                     .foregroundStyle(.secondary)
             }
         }
+        .padding(.vertical, textMetrics.spacing(1))
     }
 }
 
@@ -173,7 +223,11 @@ private struct ConnectionCenterView: View {
     @Binding var showAddServer: Bool
     @Binding var editingProfile: ServerProfile?
 
-    private let columns = [GridItem(.adaptive(minimum: 250, maximum: 360), spacing: 16)]
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: textMetrics.spacing(330), maximum: textMetrics.spacing(480)), spacing: 18)]
+    }
 
     var body: some View {
         ScrollView {
@@ -181,20 +235,22 @@ private struct ConnectionCenterView: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Connections", systemImage: "bolt.horizontal.circle.fill")
-                            .font(.largeTitle.weight(.bold))
+                            .font(.system(size: textMetrics.size(30), weight: .bold))
                             .foregroundStyle(.tint)
                         Text("Choose a network to connect, or add a profile for your own server. Active networks and their channels stay focused in the sidebar.")
+                            .font(.system(size: textMetrics.size(15)))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
                     Button("Add Server", systemImage: "plus") { showAddServer = true }
                         .buttonStyle(.borderedProminent)
+                        .controlSize(textMetrics.scale > 1.15 ? .large : .regular)
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Server Profiles")
-                        .font(.title3.weight(.semibold))
+                        .font(.system(size: textMetrics.size(20), weight: .semibold))
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
                         ForEach(state.profiles) { profile in
                             ServerProfileCard(profile: profile, state: state, editingProfile: $editingProfile)
@@ -202,7 +258,7 @@ private struct ConnectionCenterView: View {
                     }
                 }
             }
-            .padding(32)
+            .padding(textMetrics.spacing(32))
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -213,50 +269,64 @@ private struct ServerProfileCard: View {
     let profile: ServerProfile
     @ObservedObject var state: IRCAppState
     @Binding var editingProfile: ServerProfile?
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    private var statusText: String {
+        if state.isWaitingToReconnect(profile) { return "Reconnecting" }
+        return state.isActive(profile) ? state.status(for: profile).label : "Ready"
+    }
+
+    private var statusTint: Color {
+        state.isActive(profile) ? state.status(for: profile).tint : .secondary
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
+        VStack(alignment: .leading, spacing: textMetrics.spacing(16)) {
             HStack(alignment: .top) {
                 Image(systemName: profile.useTLS ? "lock.shield.fill" : "network")
-                    .font(.title2)
+                    .font(.system(size: textMetrics.size(20), weight: .medium))
                     .foregroundStyle(profile.useTLS ? Color.accentColor : Color.secondary)
-                    .frame(width: 30, height: 30)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .frame(width: textMetrics.spacing(36), height: textMetrics.spacing(36))
+                    .background(Color.accentColor.opacity(profile.useTLS ? 0.12 : 0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(profile.name).font(.headline)
-                    Text(profile.hostname).font(.caption).foregroundStyle(.secondary)
+                    Text(profile.name)
+                        .font(.system(size: textMetrics.size(17), weight: .semibold))
+                    Text(profile.hostname)
+                        .font(.system(size: textMetrics.size(12)))
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if state.isActive(profile) {
-                    Circle().fill(state.status(for: profile).tint).frame(width: 8, height: 8)
+                Label(statusText, systemImage: "circle.fill")
+                    .font(.system(size: textMetrics.size(11), weight: .medium))
+                    .foregroundStyle(statusTint)
+                    .labelStyle(.titleAndIcon)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(statusTint.opacity(0.1), in: Capsule())
+            }
+
+            VStack(alignment: .leading, spacing: textMetrics.spacing(7)) {
+                HStack(spacing: 6) {
+                    Label(profile.useTLS ? "TLS encrypted" : "Plain-text IRC", systemImage: profile.useTLS ? "lock.fill" : "exclamationmark.triangle")
+                    Text(verbatim: "· Port \(profile.port)")
+                }
+                if let nickname = profile.nicknameOverride, !nickname.isEmpty {
+                    Label("Nickname: \(nickname)", systemImage: "person.crop.circle")
+                }
+                if profile.useSSHTunnel == true, let sshHostname = profile.sshHostname {
+                    Label("SSH via \(sshHostname):\(profile.sshPort ?? 22)", systemImage: "point.3.connected.trianglepath.dotted")
+                        .lineLimit(1)
                 }
             }
-            HStack(spacing: 6) {
-                Label(profile.useTLS ? "TLS encrypted" : "Plain-text IRC", systemImage: profile.useTLS ? "lock.fill" : "exclamationmark.triangle")
-                Text(verbatim: "· \(profile.port)")
-            }
-            .font(.caption)
+            .font(.system(size: textMetrics.size(12)))
             .foregroundStyle(.secondary)
-            if let nickname = profile.nicknameOverride, !nickname.isEmpty {
-                Label("Nick: \(nickname)", systemImage: "person.crop.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if profile.useSSHTunnel == true, let sshHostname = profile.sshHostname {
-                Label("SSH via \(sshHostname):\(profile.sshPort ?? 22)", systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+
+            Divider()
+
             HStack {
-                Text(
-                    state.isWaitingToReconnect(profile)
-                        ? "Waiting to reconnect"
-                        : (state.isActive(profile) ? state.status(for: profile).label : "Ready to connect")
-                )
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(state.isActive(profile) ? state.status(for: profile).tint : .secondary)
                 Spacer()
+                Button("Edit") { editingProfile = profile }
+                    .buttonStyle(.bordered)
                 if state.isActive(profile) {
                     if case .failed = state.status(for: profile) {
                         Button("Retry") { state.toggleConnection(for: profile) }
@@ -264,21 +334,24 @@ private struct ServerProfileCard: View {
                         Button("Disconnect") { state.disconnect(profile) }
                             .buttonStyle(.bordered)
                     } else {
-                        Button("Edit") { editingProfile = profile }
-                            .buttonStyle(.borderless)
                         Button("Disconnect") { state.toggleConnection(for: profile) }
                             .buttonStyle(.bordered)
                     }
                 } else {
-                    Button("Edit") { editingProfile = profile }
-                        .buttonStyle(.borderless)
                     Button("Connect") { state.toggleConnection(for: profile) }
                         .buttonStyle(.borderedProminent)
                 }
             }
+            .controlSize(textMetrics.scale > 1.15 ? .large : .regular)
         }
-        .padding(16)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(textMetrics.spacing(18))
+        .frame(maxWidth: .infinity, minHeight: textMetrics.spacing(168), alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
         .contextMenu {
             Button("Edit Profile…") { editingProfile = profile }
             if profile.isBuiltIn && profile.isPresetModified == true {
@@ -300,42 +373,62 @@ private struct ConversationView: View {
     @State private var showsMemberList = true
     @State private var pendingURL: PendingURL?
     @FocusState private var composerFocused: Bool
+    @Environment(\.ircTextMetrics) private var textMetrics
 
     private var title: String { state.title(for: selection) }
     private var subtitle: String { state.subtitle(for: selection) }
     private var isChannel: Bool { if case .channel = selection { return true }; return false }
+    private var memberCount: Int { isChannel ? state.members(for: selection).count : 0 }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Image(systemName: selection.icon).foregroundStyle(.tint)
+            HStack(spacing: textMetrics.spacing(13)) {
+                Image(systemName: selection.icon)
+                    .font(.system(size: textMetrics.size(17), weight: .semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: textMetrics.spacing(34), height: textMetrics.spacing(34))
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                    Text(title)
+                        .font(.system(size: textMetrics.size(18), weight: .semibold))
+                    Text(subtitle)
+                        .font(.system(size: textMetrics.size(12)))
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if isChannel {
-                    Label("\(state.members(for: selection).count)", systemImage: "person.2")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Label("\(memberCount) members", systemImage: "person.2.fill")
+                        .font(.system(size: textMetrics.size(12), weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, textMetrics.spacing(10))
+                        .padding(.vertical, textMetrics.spacing(6))
+                        .background(.quaternary, in: Capsule())
                     Button { showsMemberList.toggle() } label: {
-                        Label(showsMemberList ? "Hide members" : "Show members", systemImage: "sidebar.right")
+                        Label(showsMemberList ? "Hide Members" : "Show Members", systemImage: "sidebar.right")
                     }
-                    .labelStyle(.iconOnly)
+                    .font(.system(size: textMetrics.size(12), weight: .medium))
+                    .buttonStyle(.bordered)
+                    .controlSize(textMetrics.scale > 1.15 ? .large : .small)
                     .help(showsMemberList ? "Hide member list" : "Show member list")
                 }
             }
-            .padding(.horizontal, 22).padding(.vertical, 14).background(.bar)
+            .padding(.horizontal, textMetrics.spacing(22))
+            .padding(.vertical, textMetrics.spacing(13))
+            .background(.bar)
+
+            Divider()
 
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     ScrollViewReader { proxy in
                         ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 6) {
+                            LazyVStack(alignment: .leading, spacing: textMetrics.spacing(3)) {
                                 ForEach(state.messages(for: selection)) { message in
-                                    MessageRow(message: message, fontSize: state.transcriptFontSize).id(message.id)
+                                    MessageRow(message: message).id(message.id)
                                 }
                             }
-                            .padding(.horizontal, 24).padding(.vertical, 20)
+                            .padding(.horizontal, textMetrics.spacing(24))
+                            .padding(.vertical, textMetrics.spacing(18))
                         }
                         .onAppear {
                             scrollToLatest(using: proxy)
@@ -349,8 +442,10 @@ private struct ConversationView: View {
                     }
                     HStack(alignment: .bottom, spacing: 12) {
                         TextField("Message \(title)", text: $draft, axis: .vertical)
+                            .font(.system(size: textMetrics.size(15)))
                             .textFieldStyle(.plain).lineLimit(1...5)
-                            .padding(.horizontal, 12).padding(.vertical, 9)
+                            .padding(.horizontal, textMetrics.spacing(12))
+                            .padding(.vertical, textMetrics.spacing(9))
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .focused($composerFocused)
                             .onSubmit(send)
@@ -360,12 +455,16 @@ private struct ConversationView: View {
                                     : .ignored
                             }
                         Button(action: send) {
-                            Image(systemName: "arrow.up").font(.body.weight(.bold)).frame(width: 30, height: 30)
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: textMetrics.size(14), weight: .bold))
+                                .frame(width: textMetrics.spacing(30), height: textMetrics.spacing(30))
                         }
                         .buttonStyle(.borderedProminent).clipShape(Circle())
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    .padding(.horizontal, 20).padding(.vertical, 14).background(.bar)
+                    .padding(.horizontal, textMetrics.spacing(20))
+                    .padding(.vertical, textMetrics.spacing(14))
+                    .background(.bar)
                 }
                 if isChannel && showsMemberList {
                     Divider()
@@ -525,92 +624,188 @@ private struct ChannelMemberList: View {
     let members: [ChannelMember]
     @ObservedObject var state: IRCAppState
     let selection: SidebarItem
+    @State private var search = ""
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    private var filteredMembers: [ChannelMember] {
+        guard !search.isEmpty else { return members }
+        return members.filter { $0.nickname.localizedCaseInsensitiveContains(search) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Members").font(.headline)
+                Text("Members")
+                    .font(.system(size: textMetrics.size(16), weight: .semibold))
                 Spacer()
-                Text("\(members.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Text("\(members.count)")
+                    .font(.system(size: textMetrics.size(11), design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 16).padding(.vertical, 15)
+            .padding(.horizontal, textMetrics.spacing(16))
+            .padding(.top, textMetrics.spacing(15))
+            .padding(.bottom, textMetrics.spacing(10))
+
+            TextField("Filter members", text: $search)
+                .font(.system(size: textMetrics.size(13)))
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, textMetrics.spacing(12))
+                .padding(.bottom, textMetrics.spacing(10))
+
+            Divider()
+
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(members) { member in
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(state.isMuted(member.nickname, from: selection) ? Color.secondary : Color.green)
-                                .frame(width: 7, height: 7)
-                            Text(member.nickname).font(.subheadline)
-                            Spacer(minLength: 4)
-                            if let role = member.role { Text(role).font(.caption2.weight(.medium)).foregroundStyle(.secondary) }
-                        }
-                        .padding(.horizontal, 16).padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) {
-                            state.startDirectMessage(with: member.nickname, from: selection)
-                        }
-                        .contextMenu {
-                            Button("Message \(member.nickname)", systemImage: "message") {
-                                state.startDirectMessage(with: member.nickname, from: selection)
-                            }
-                            Button("Whois \(member.nickname)", systemImage: "person.text.rectangle") {
-                                state.requestWhois(for: member.nickname, from: selection)
-                            }
-                            Divider()
-                            if state.isMuted(member.nickname, from: selection) {
-                                Button("Unmute \(member.nickname)", systemImage: "speaker.wave.2") {
-                                    state.unmute(member.nickname, from: selection)
-                                }
-                            } else {
-                                Button("Mute \(member.nickname)", systemImage: "speaker.slash") {
-                                    state.mute(member.nickname, from: selection)
-                                }
-                            }
-                        }
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(filteredMembers) { member in
+                        ChannelMemberRow(member: member, state: state, selection: selection)
                     }
+                }
+                .padding(.vertical, textMetrics.spacing(5))
+            }
+        }
+        .frame(
+            minWidth: textMetrics.spacing(210),
+            idealWidth: textMetrics.spacing(238),
+            maxWidth: textMetrics.spacing(310)
+        )
+        .background(.bar)
+    }
+}
+
+private struct ChannelMemberRow: View {
+    let member: ChannelMember
+    @ObservedObject var state: IRCAppState
+    let selection: SidebarItem
+    @State private var isHovered = false
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    private var isMuted: Bool { state.isMuted(member.nickname, from: selection) }
+
+    var body: some View {
+        HStack(spacing: textMetrics.spacing(8)) {
+            Group {
+                if isMuted {
+                    Image(systemName: "speaker.slash.fill")
+                        .font(.system(size: textMetrics.size(10)))
+                } else {
+                    Text(member.prefix.map(String.init) ?? "")
+                        .font(.system(size: textMetrics.size(12), weight: .bold, design: .monospaced))
+                }
+            }
+            .foregroundStyle(member.role == nil || isMuted ? Color.secondary : Color.accentColor)
+            .frame(width: textMetrics.spacing(14), alignment: .center)
+
+            Text(member.nickname)
+                .font(.system(size: textMetrics.size(14)))
+                .foregroundStyle(isMuted ? .secondary : .primary)
+                .lineLimit(1)
+
+            Spacer(minLength: 4)
+
+            if let role = member.role {
+                Text(role)
+                    .font(.system(size: textMetrics.size(10), weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, textMetrics.spacing(6))
+                    .padding(.vertical, textMetrics.spacing(2))
+                    .background(.quaternary, in: Capsule())
+            }
+        }
+        .padding(.horizontal, textMetrics.spacing(12))
+        .padding(.vertical, textMetrics.spacing(6))
+        .background(isHovered ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .padding(.horizontal, textMetrics.spacing(5))
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .onTapGesture(count: 2) {
+            state.startDirectMessage(with: member.nickname, from: selection)
+        }
+        .contextMenu {
+            Button("Message \(member.nickname)", systemImage: "message") {
+                state.startDirectMessage(with: member.nickname, from: selection)
+            }
+            Button("Whois \(member.nickname)", systemImage: "person.text.rectangle") {
+                state.requestWhois(for: member.nickname, from: selection)
+            }
+            Divider()
+            if isMuted {
+                Button("Unmute \(member.nickname)", systemImage: "speaker.wave.2") {
+                    state.unmute(member.nickname, from: selection)
+                }
+            } else {
+                Button("Mute \(member.nickname)", systemImage: "speaker.slash") {
+                    state.mute(member.nickname, from: selection)
                 }
             }
         }
-        .frame(minWidth: 190, idealWidth: 218, maxWidth: 270)
-        .background(.bar)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(member.role.map { "\(member.nickname), \($0)" } ?? member.nickname)
+        .accessibilityHint("Double-click to start a private message")
     }
 }
 
 private struct MessageRow: View {
     let message: IRCMessage
-    let fontSize: Double
+    @Environment(\.ircTextMetrics) private var textMetrics
 
-    private var timestampFontSize: Double { max(fontSize - 4, 10) }
-    private var timestampColumnWidth: Double { max(64, timestampFontSize * 5.2) }
+    private var timestampFontSize: CGFloat { textMetrics.size(11) }
+    private var timestampColumnWidth: CGFloat { textMetrics.spacing(64) }
+    private var senderColumnWidth: CGFloat { textMetrics.spacing(116) }
+
+    private var systemText: String {
+        let genericSenders = ["System", "•"]
+        return genericSenders.contains(message.sender) ? message.text : "\(message.sender) \(message.text)"
+    }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
+        HStack(alignment: .firstTextBaseline, spacing: textMetrics.spacing(10)) {
             Text(message.timestamp, format: .dateTime.hour().minute())
                 .font(.system(size: timestampFontSize, design: .monospaced)).foregroundStyle(.tertiary)
                 .lineLimit(1).fixedSize(horizontal: true, vertical: false)
                 .frame(width: timestampColumnWidth, alignment: .trailing)
-            Text(message.sender).font(.system(size: max(fontSize - 1, 11), weight: .semibold))
-                .foregroundStyle(message.isSystem ? Color.secondary : Color.accentColor).frame(minWidth: 64, alignment: .leading)
-            Text(linkifiedText)
-                .font(.system(size: fontSize))
-                .textSelection(.enabled)
-                .foregroundStyle(message.isSystem ? .secondary : .primary)
+
+            if message.isSystem {
+                Image(systemName: "circle.fill")
+                    .font(.system(size: textMetrics.size(5)))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: textMetrics.spacing(10))
+                Text(linkified(systemText))
+                    .font(.system(size: textMetrics.size(14)))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                Text(message.sender)
+                    .font(.system(size: textMetrics.size(15), weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(width: senderColumnWidth, alignment: .leading)
+                    .help(message.sender)
+                Text(linkifiedText)
+                    .font(.system(size: textMetrics.bodySize))
+                    .textSelection(.enabled)
+                    .foregroundStyle(.primary)
+            }
         }
+        .padding(.vertical, textMetrics.spacing(message.isSystem ? 1 : 2))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(message.timestamp.formatted(date: .omitted, time: .shortened)), \(message.sender): \(message.text)")
     }
 
-    private var linkifiedText: AttributedString {
-        var attributedText = AttributedString(message.text)
+    private var linkifiedText: AttributedString { linkified(message.text) }
+
+    private func linkified(_ text: String) -> AttributedString {
+        var attributedText = AttributedString(text)
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
             return attributedText
         }
 
-        let fullRange = NSRange(message.text.startIndex..., in: message.text)
-        for match in detector.matches(in: message.text, range: fullRange) {
+        let fullRange = NSRange(text.startIndex..., in: text)
+        for match in detector.matches(in: text, range: fullRange) {
             guard let url = match.url,
                   let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https",
-                  let stringRange = Range(match.range, in: message.text),
+                  let stringRange = Range(match.range, in: text),
                   let attributedRange = Range(stringRange, in: attributedText) else { continue }
             attributedText[attributedRange].link = url
         }
