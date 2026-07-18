@@ -118,7 +118,8 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         .init(name: "QuakeNet", hostname: "irc.quakenet.org", port: 6667, useTLS: false, isBuiltIn: true, presetID: "quakenet"),
         .init(name: "IRCNet", hostname: "irc.ircnet.com", port: 6667, useTLS: false, isBuiltIn: true, presetID: "ircnet"),
         .init(name: "Rizon", hostname: "irc.rizon.net", port: 6697, useTLS: true, isBuiltIn: true, presetID: "rizon"),
-        .init(name: "HybridIRC", hostname: "irc.hybridirc.com", port: 6697, useTLS: true, isBuiltIn: true, presetID: "hybridirc")
+        .init(name: "HybridIRC", hostname: "irc.hybridirc.com", port: 6697, useTLS: true, isBuiltIn: true, presetID: "hybridirc"),
+        .init(name: "MansionNET", hostname: "irc.inthemansion.com", port: 6697, useTLS: true, isBuiltIn: true, presetID: "mansionnet")
     ]
 }
 
