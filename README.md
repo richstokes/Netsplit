@@ -24,6 +24,18 @@ Netsplit learns the SSH host key on the first connection and pins it to that
 server profile. A changed key is rejected until you explicitly forget the saved
 host identity. IRC TLS, when enabled, remains end-to-end inside the SSH tunnel.
 
+## On-connect commands
+
+Each server profile can run an ordered list of commands after registration. This
+is useful for identifying with NickServ, setting modes, or performing other
+network-specific setup. Client commands such as `/msg NickServ IDENTIFY ...`
+and raw IRC commands are both accepted. The command list is stored in the macOS
+Keychain because it may contain passwords.
+
+Commands are sent 0.5 seconds apart. Netsplit then waits 2 seconds after the
+final command before rejoining retained and favorite channels, giving network
+services time to apply authentication and account changes.
+
 ## Supported commands
 
 Commands are entered in the message field with a leading `/`. Netsplit sends

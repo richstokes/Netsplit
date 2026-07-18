@@ -69,8 +69,11 @@ final class IRCAppState: ObservableObject {
     private var registrationNicknameSuffixes: [UUID: Set<Int>] = [:]
     private var caseMappings: [UUID: IRCCaseMapping] = [:]
     private var sessionIDs: [UUID: UUID] = [:]
+    private var sessionOnConnectCommands: [UUID: [String]] = [:]
     private let channelListCacheLifetime: TimeInterval = 120
     private let favoriteJoinInterval: TimeInterval = 0.45
+    private let onConnectCommandInterval: TimeInterval = 0.5
+    private let favoriteJoinDelayAfterCommands: TimeInterval = 2
     private let initialReconnectDelay: TimeInterval = 2
     private let maximumReconnectDelay: TimeInterval = 60
     private let maximumOutboundIRCLineBytes = 510
@@ -163,6 +166,13 @@ final class IRCAppState: ObservableObject {
 
     func sshPrivateKey(for profile: ServerProfile) -> String {
         KeychainStore.value(for: credentialAccount(profile: profile, kind: "ssh-private-key"))
+    }
+
+    func onConnectCommands(for profile: ServerProfile) -> [String] {
+        let encoded = KeychainStore.value(for: credentialAccount(profile: profile, kind: "on-connect-commands"))
+        guard let data = encoded.data(using: .utf8),
+              let commands = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return commands
     }
 
     func isFavorite(_ channel: Conversation) -> Bool {
@@ -308,6 +318,7 @@ final class IRCAppState: ObservableObject {
         if !isAutomaticRetry { cancelScheduledReconnect(for: profile.id, resetAttempts: true) }
         caseMappings[profile.id] = .rfc1459
         sessionIDs[profile.id] = UUID()
+        sessionOnConnectCommands[profile.id] = onConnectCommands(for: profile)
         prepareChannelsForDisconnectedSession(for: profile.id)
         resetChannelListingRequest(for: profile.id)
         terminalServerErrors.removeValue(forKey: profile.id)
@@ -345,6 +356,7 @@ final class IRCAppState: ObservableObject {
         let transport = connections[profile.id]
         connections.removeValue(forKey: profile.id)
         sessionIDs.removeValue(forKey: profile.id)
+        sessionOnConnectCommands.removeValue(forKey: profile.id)
         activeNicknames.removeValue(forKey: profile.id)
         registeredServerIDs.remove(profile.id)
         connectionStatuses.removeValue(forKey: profile.id)
@@ -366,6 +378,7 @@ final class IRCAppState: ObservableObject {
         cancelAllScheduledReconnects()
         connections.removeAll()
         sessionIDs.removeAll()
+        sessionOnConnectCommands.removeAll()
         activeNicknames.removeAll()
         registeredServerIDs.removeAll()
         connectionStatuses.removeAll()
@@ -391,13 +404,13 @@ final class IRCAppState: ObservableObject {
         selection = .connectionCenter
     }
 
-    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
+    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: [String], useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
         var profile = ServerProfile(name: name, hostname: hostname, port: port, useTLS: useTLS, autoConnect: autoConnect)
         profile.useSASL = useSASL
         profile.saslUsername = saslUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : saslUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         applySSHSettings(to: &profile, enabled: useSSHTunnel, hostname: sshHostname, port: sshPort, username: sshUsername, keyFilename: sshKeyFilename)
         profiles.append(profile)
-        saveCredentials(for: profile, serverPassword: serverPassword, saslPassword: saslPassword, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
+        saveCredentials(for: profile, serverPassword: serverPassword, saslPassword: saslPassword, onConnectCommands: onConnectCommands, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
         saveProfiles()
         selection = .connectionCenter
     }
@@ -408,13 +421,14 @@ final class IRCAppState: ObservableObject {
         removeConversations(for: profile.id)
         KeychainStore.remove(account: credentialAccount(profile: profile, kind: "server-password"))
         KeychainStore.remove(account: credentialAccount(profile: profile, kind: "sasl-password"))
+        KeychainStore.remove(account: credentialAccount(profile: profile, kind: "on-connect-commands"))
         KeychainStore.remove(account: credentialAccount(profile: profile, kind: "ssh-password"))
         KeychainStore.remove(account: credentialAccount(profile: profile, kind: "ssh-private-key"))
         profiles.removeAll { $0.id == profile.id }
         saveProfiles()
     }
 
-    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
+    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: [String], useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         var updated = profile
         updated.name = name
@@ -433,7 +447,7 @@ final class IRCAppState: ObservableObject {
         if oldSSHIdentity != newSSHIdentity || resetSSHHostKey { updated.sshTrustedHostKey = nil }
         if updated.isBuiltIn { updated.isPresetModified = true }
         profiles[index] = updated
-        saveCredentials(for: updated, serverPassword: serverPassword, saslPassword: saslPassword, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
+        saveCredentials(for: updated, serverPassword: serverPassword, saslPassword: saslPassword, onConnectCommands: onConnectCommands, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
         saveProfiles()
     }
 
@@ -526,7 +540,45 @@ final class IRCAppState: ObservableObject {
         join(listing, on: profile, selectConversation: true, destination: selection ?? .server(profile.id))
     }
 
-    private func joinChannelsAfterRegistration(for profile: ServerProfile) {
+    private func runPostRegistrationSequence(for profile: ServerProfile) {
+        guard let sessionID = sessionIDs[profile.id] else { return }
+        let commands = (sessionOnConnectCommands[profile.id] ?? [])
+            .compactMap(onConnectWireCommand(from:))
+
+        if !commands.isEmpty {
+            appendSystem(
+                "Running \(commands.count) on-connect command\(commands.count == 1 ? "" : "s") before joining channels…",
+                for: .server(profile.id)
+            )
+        }
+
+        for (index, command) in commands.enumerated() {
+            let delay = Double(index) * onConnectCommandInterval
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self,
+                      self.sessionIDs[profile.id] == sessionID,
+                      self.registeredServerIDs.contains(profile.id),
+                      let connection = self.connections[profile.id] else { return }
+                connection.send(command: command) { [weak self] sent in
+                    guard !sent,
+                          let self,
+                          self.sessionIDs[profile.id] == sessionID else { return }
+                    self.appendSystem("An on-connect command could not be sent.", for: .server(profile.id))
+                }
+            }
+        }
+
+        let firstJoinDelay: TimeInterval
+        if commands.isEmpty {
+            firstJoinDelay = 0.25
+        } else {
+            let lastCommandDelay = Double(commands.count - 1) * onConnectCommandInterval
+            firstJoinDelay = lastCommandDelay + favoriteJoinDelayAfterCommands
+        }
+        joinChannelsAfterRegistration(for: profile, firstJoinDelay: firstJoinDelay)
+    }
+
+    private func joinChannelsAfterRegistration(for profile: ServerProfile, firstJoinDelay: TimeInterval) {
         guard let sessionID = sessionIDs[profile.id] else { return }
         var seenChannelNames = Set<String>()
         let retainedChannelNames = channels(for: profile).map(\.name)
@@ -536,7 +588,7 @@ final class IRCAppState: ObservableObject {
         }
 
         for (index, channelName) in channelNames.enumerated() {
-            let delay = 0.25 + (Double(index) * favoriteJoinInterval)
+            let delay = firstJoinDelay + (Double(index) * favoriteJoinInterval)
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self,
                       self.sessionIDs[profile.id] == sessionID,
@@ -549,6 +601,45 @@ final class IRCAppState: ObservableObject {
                     self.join(ChannelListing(name: channelName, userCount: 0, topic: ""), on: activeProfile, selectConversation: false, destination: .server(profile.id))
                 }
             }
+        }
+    }
+
+    private func onConnectWireCommand(from input: String) -> String? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard trimmed.hasPrefix("/") else { return trimmed }
+
+        let parts = trimmed.dropFirst().split(separator: " ", maxSplits: 1).map(String.init)
+        guard let command = parts.first?.uppercased() else { return nil }
+        let argument = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+
+        switch command {
+        case "MSG", "QUERY":
+            let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
+            guard fields.count == 2 else { return nil }
+            return "PRIVMSG \(fields[0]) :\(fields[1])"
+        case "NOTICE":
+            let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
+            guard fields.count == 2 else { return nil }
+            return "NOTICE \(fields[0]) :\(fields[1])"
+        case "NS", "NICKSERV":
+            guard !argument.isEmpty else { return nil }
+            return "PRIVMSG NickServ :\(argument)"
+        case "CS", "CHANSERV":
+            guard !argument.isEmpty else { return nil }
+            return "PRIVMSG ChanServ :\(argument)"
+        case "IDENTIFY":
+            guard !argument.isEmpty else { return nil }
+            return "PRIVMSG NickServ :IDENTIFY \(argument)"
+        case "RAW", "QUOTE":
+            return argument.isEmpty ? nil : argument
+        case "JOIN":
+            let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
+            guard let rawChannel = fields.first, !rawChannel.isEmpty else { return nil }
+            let channel = rawChannel.first.map { "#&+!".contains($0) } == true ? rawChannel : "#\(rawChannel)"
+            return fields.count == 2 ? "JOIN \(channel) \(fields[1])" : "JOIN \(channel)"
+        default:
+            return argument.isEmpty ? command : "\(command) \(argument)"
         }
     }
 
@@ -991,7 +1082,7 @@ final class IRCAppState: ObservableObject {
             connectionStatuses[profile.id] = .online
             cancelScheduledReconnect(for: profile.id, resetAttempts: true)
             appendSystem(wire.trailing ?? "Connected.", for: .server(profile.id))
-            joinChannelsAfterRegistration(for: profile)
+            runPostRegistrationSequence(for: profile)
         case "005":
             updateCaseMapping(from: wire, serverID: profile.id)
         case "NOTICE":
@@ -1884,6 +1975,7 @@ final class IRCAppState: ObservableObject {
                   let failedTransport = self.connections.removeValue(forKey: profile.id) else { return }
             self.scheduledReconnects.removeValue(forKey: profile.id)
             self.sessionIDs.removeValue(forKey: profile.id)
+            self.sessionOnConnectCommands.removeValue(forKey: profile.id)
             self.activeNicknames.removeValue(forKey: profile.id)
             self.registeredServerIDs.remove(profile.id)
             self.terminalServerErrors.removeValue(forKey: profile.id)
@@ -2082,9 +2174,15 @@ final class IRCAppState: ObservableObject {
         UserDefaults.standard.set(data, forKey: "profiles")
     }
 
-    private func saveCredentials(for profile: ServerProfile, serverPassword: String, saslPassword: String, sshPassword: String, sshPrivateKey: String) {
+    private func saveCredentials(for profile: ServerProfile, serverPassword: String, saslPassword: String, onConnectCommands: [String], sshPassword: String, sshPrivateKey: String) {
         KeychainStore.set(serverPassword, for: credentialAccount(profile: profile, kind: "server-password"))
         KeychainStore.set(saslPassword, for: credentialAccount(profile: profile, kind: "sasl-password"))
+        let cleanedCommands = onConnectCommands
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let encodedCommands = (try? JSONEncoder().encode(cleanedCommands))
+            .map { String(decoding: $0, as: UTF8.self) } ?? ""
+        KeychainStore.set(cleanedCommands.isEmpty ? "" : encodedCommands, for: credentialAccount(profile: profile, kind: "on-connect-commands"))
         KeychainStore.set(sshPassword, for: credentialAccount(profile: profile, kind: "ssh-password"))
         KeychainStore.set(sshPrivateKey, for: credentialAccount(profile: profile, kind: "ssh-private-key"))
     }
