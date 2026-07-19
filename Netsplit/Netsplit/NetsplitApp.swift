@@ -60,17 +60,22 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
 
         switch event.type {
         case .keyDown:
+            let shortcutModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
             guard !event.isARepeat,
-                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else { return event }
+                  shortcutModifiers == .command else { return event }
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "w" where state?.canCloseActiveSelection == true:
                 state?.closeActiveSelection()
                 return nil
-            case "[" where state?.canNavigateBack == true:
-                state?.navigateBack()
+            case "[":
+                if state?.canNavigateBack == true {
+                    state?.navigateBack()
+                }
                 return nil
-            case "]" where state?.canNavigateForward == true:
-                state?.navigateForward()
+            case "]":
+                if state?.canNavigateForward == true {
+                    state?.navigateForward()
+                }
                 return nil
             default:
                 return event
