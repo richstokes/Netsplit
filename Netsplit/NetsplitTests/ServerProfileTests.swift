@@ -52,6 +52,7 @@ struct ServerProfileTests {
     func validatesRecommendedProfiles() {
         let profiles = ServerProfile.recommended
         let presetIDs = profiles.compactMap(\.presetID)
+        let ircnet = profiles.first { $0.presetID == "ircnet" }
 
         #expect(!profiles.isEmpty)
         #expect(presetIDs.count == profiles.count)
@@ -59,5 +60,8 @@ struct ServerProfileTests {
         #expect(Set(profiles.map(\.id)).count == profiles.count)
         #expect(profiles.allSatisfy { $0.isBuiltIn })
         #expect(profiles.allSatisfy { !$0.name.isEmpty && !$0.hostname.isEmpty && $0.port > 0 })
+        #expect(ircnet?.hostname == "irc.ircnet.com")
+        #expect(ircnet?.port == 6697)
+        #expect(ircnet?.useTLS == true)
     }
 }

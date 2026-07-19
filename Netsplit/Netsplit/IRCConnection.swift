@@ -90,7 +90,10 @@ final class IRCConnection {
     private static let maximumBufferedLineBytes = 64 * 1024
     private static let heartbeatInterval: TimeInterval = 30
     private static let heartbeatTimeout: TimeInterval = 15
-    private static let registrationTimeout: TimeInterval = 30
+    // Some IRC networks perform reverse-DNS and Ident checks before replying
+    // to CAP or completing registration. IRCnet commonly takes about 30
+    // seconds, so leave enough headroom for capability negotiation afterward.
+    private static let registrationTimeout: TimeInterval = 60
     private var connection: NWConnection?
     private var sshTunnel: SSHTunnelConnection?
     private var receiveBuffer = IRCLineBuffer(maximumLineBytes: maximumBufferedLineBytes)
@@ -159,7 +162,6 @@ final class IRCConnection {
                     self.eventHandler?(.status(.online))
                     self.register(nickname: nickname, realName: realName)
                     self.startRegistrationTimeout()
-                    self.startHeartbeat()
                 },
                 onData: { [weak self, weak tunnel] data in
                     guard let self, let tunnel, self.sshTunnel === tunnel else { return }
@@ -219,7 +221,6 @@ final class IRCConnection {
                     self.eventHandler?(.status(.online))
                     self.register(nickname: nickname, realName: realName)
                     self.startRegistrationTimeout()
-                    self.startHeartbeat()
                     self.receiveNext(on: connection)
                 case .failed(let error): self.reportFailure(error.localizedDescription, cancelling: false)
                 case .cancelled:
@@ -382,7 +383,10 @@ final class IRCConnection {
         let output = receiveBuffer.append(data)
         for line in output.lines {
             guard let message = IRCWireMessage(line: line) else { continue }
-            if message.command == "001" { stopRegistrationTimeout() }
+            if message.command == "001" {
+                stopRegistrationTimeout()
+                startHeartbeat()
+            }
             if message.command == "PING" { send(command: "PONG :\(message.trailing ?? message.parameters.first ?? "")") }
             if message.command == "PONG" { handleHeartbeatReply(message) }
             if message.command == "CAP" {
