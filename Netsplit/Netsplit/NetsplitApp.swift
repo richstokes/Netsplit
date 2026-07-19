@@ -192,15 +192,13 @@ struct NetsplitApp: App {
                 .disabled(!state.canCloseActiveSelection)
             }
             CommandMenu("Connection") {
-                Button("Connect") { state.showConnections() }
-                    .keyboardShortcut("k", modifiers: [.command])
                 Button("Browse Channels") {
                     state.requestChannelListing()
                 }
                 .keyboardShortcut("l", modifiers: [.command])
                 .disabled(!state.canBrowseSelectedChannels)
                 Button("Show Connections") { state.showConnections() }
-                    .keyboardShortcut("0", modifiers: [.command, .shift])
+                    .keyboardShortcut("k", modifiers: [.command])
             }
             CommandGroup(after: .toolbar) {
                 Button(state.showsMemberList ? "Hide Members" : "Show Members") {
