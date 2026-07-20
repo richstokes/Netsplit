@@ -36,7 +36,8 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .otherMouseDown, .scrollWheel, .swipe]
         ) { [weak self] event in
-            self?.handleShortcutEvent(event) ?? event
+            guard let self else { return event }
+            return self.handleShortcutEvent(event)
         }
     }
 
