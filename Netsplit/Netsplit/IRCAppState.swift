@@ -7,6 +7,15 @@ import Combine
 import Foundation
 
 @MainActor
+final class IRCRevisionSignal: ObservableObject {
+    @Published private(set) var revision = 0
+
+    func advance() {
+        revision &+= 1
+    }
+}
+
+@MainActor
 final class IRCAppState: ObservableObject {
     @Published private(set) var profiles: [ServerProfile]
     @Published var nickname: String {
@@ -52,8 +61,6 @@ final class IRCAppState: ObservableObject {
     @Published private(set) var channels: [Conversation] = []
     @Published private(set) var directMessages: [Conversation] = []
     @Published private(set) var connectionStatuses: [UUID: ConnectionStatus] = [:]
-    @Published private(set) var messageRevision = 0
-    @Published private(set) var memberRevision = 0
     @Published private var channelTopics: [UUID: String] = [:]
     @Published var isChannelBrowserPresented = false
     @Published private var listedChannelsByServer: [UUID: [ChannelListing]] = [:]
@@ -61,6 +68,10 @@ final class IRCAppState: ObservableObject {
 
     private var conversations: [UUID: [IRCMessage]] = [:]
     private var channelMembers: [UUID: [ChannelMember]] = [:]
+    private var messageUpdateSignals: [UUID: IRCRevisionSignal] = [:]
+    private var memberUpdateSignals: [UUID: IRCRevisionSignal] = [:]
+    private var muteSnapshotsByServer: [UUID: IRCMuteSnapshot] = [:]
+    private let inactiveUpdateSignal = IRCRevisionSignal()
     private var pendingChannelMembers: [UUID: [String: ChannelMember]] = [:]
     private var connections: [UUID: IRCConnection] = [:]
     private var pendingJoins: [String: PendingJoin] = [:]
@@ -304,10 +315,7 @@ final class IRCAppState: ObservableObject {
     }
 
     func isMuted(_ nickname: String, from item: SidebarItem) -> Bool {
-        guard let profile = profile(for: item) else { return false }
-        return profile.mutedNicknames?.contains {
-            identifiersEqual($0, nickname, serverID: profile.id)
-        } ?? false
+        muteSnapshot(for: item)?.contains(nickname) ?? false
     }
 
     func mute(_ nickname: String, from item: SidebarItem) {
@@ -350,10 +358,7 @@ final class IRCAppState: ObservableObject {
     }
 
     private func isMuted(_ nickname: String, on profile: ServerProfile) -> Bool {
-        let currentProfile = profiles.first(where: { $0.id == profile.id }) ?? profile
-        return currentProfile.mutedNicknames?.contains {
-            identifiersEqual($0, nickname, serverID: profile.id)
-        } ?? false
+        muteSnapshot(for: profile).contains(nickname)
     }
 
     func leave(_ channel: Conversation, reason: String? = nil) {
@@ -370,7 +375,8 @@ final class IRCAppState: ObservableObject {
         if selection == .directMessage(directMessage.id) {
             selection = .server(profile.id)
         }
-        messageRevision += 1
+        messagesDidChange(for: directMessage.id)
+        messageUpdateSignals.removeValue(forKey: directMessage.id)
     }
 
     func muteAndClose(_ directMessage: Conversation) {
@@ -647,14 +653,21 @@ final class IRCAppState: ObservableObject {
         UserDefaults.standard.set(resolvedRealName(), forKey: "realName")
     }
 
-    func messages(for item: SidebarItem) -> [IRCMessage] {
+    func messages(
+        for item: SidebarItem,
+        channelEventVisibility visibility: IRCChannelEventVisibility
+    ) -> [IRCMessage] {
         guard let id = conversationID(for: item) else { return [] }
         let messages = conversations[id] ?? []
-        guard case .channel = item else { return messages }
+        guard case .channel = item, visibility != .alwaysShow else { return messages }
         return messages.filter { message in
             guard message.channelEventKind != nil else { return true }
-            return channelEventVisibility.shouldShow(memberCount: message.channelMemberCount ?? 0)
+            return visibility.shouldShow(memberCount: message.channelMemberCount ?? 0)
         }
+    }
+
+    func messageUpdates(for item: SidebarItem) -> IRCRevisionSignal {
+        updateSignal(for: conversationID(for: item), in: &messageUpdateSignals)
     }
 
     func markRead(_ item: SidebarItem) {
@@ -675,6 +688,21 @@ final class IRCAppState: ObservableObject {
         guard case .channel(let id) = item else { return [] }
         let fallbackNickname = profile(for: item).map { nickname(for: $0) } ?? nickname
         return channelMembers[id] ?? [ChannelMember(nickname: fallbackNickname, prefix: nil)]
+    }
+
+    func memberUpdates(for item: SidebarItem) -> IRCRevisionSignal {
+        let channelID: UUID?
+        if case .channel(let id) = item {
+            channelID = id
+        } else {
+            channelID = nil
+        }
+        return updateSignal(for: channelID, in: &memberUpdateSignals)
+    }
+
+    func muteSnapshot(for item: SidebarItem) -> IRCMuteSnapshot? {
+        guard let profile = profile(for: item) else { return nil }
+        return muteSnapshot(for: profile)
     }
 
     func topic(for item: SidebarItem) -> String? {
@@ -816,8 +844,8 @@ final class IRCAppState: ObservableObject {
             preservesConversationOnFailure: true
         )
         connections[profile.id]?.send(command: "JOIN \(channel.name)")
-        messageRevision += 1
-        memberRevision += 1
+        messagesDidChange(for: channel.id)
+        membersDidChange(for: channel.id)
     }
 
     private func join(_ listing: ChannelListing, on profile: ServerProfile, selectConversation: Bool, destination: SidebarItem) {
@@ -848,7 +876,7 @@ final class IRCAppState: ObservableObject {
         )
         connections[profile.id]?.send(command: "JOIN \(listing.name)")
         if selectConversation { selection = .channel(channel.id) }
-        messageRevision += 1
+        messagesDidChange(for: channel.id)
     }
 
     func beginNewConversation() {
@@ -857,7 +885,7 @@ final class IRCAppState: ObservableObject {
         directMessages.append(conversation)
         conversations[conversation.id] = [IRCMessage(sender: "System", text: "Start a private conversation with /msg nickname your message.", isSystem: true)]
         selection = .directMessage(conversation.id)
-        messageRevision += 1
+        messagesDidChange(for: conversation.id)
     }
 
     func startDirectMessage(with nickname: String, from item: SidebarItem) {
@@ -865,7 +893,7 @@ final class IRCAppState: ObservableObject {
         let conversation = directMessage(named: nickname, serverID: profile.id)
         if conversations[conversation.id] == nil {
             conversations[conversation.id] = [IRCMessage(sender: "System", text: "Private conversation with \(nickname).", isSystem: true)]
-            messageRevision += 1
+            messagesDidChange(for: conversation.id)
         }
         selection = .directMessage(conversation.id)
     }
@@ -1932,8 +1960,10 @@ final class IRCAppState: ObservableObject {
         pendingChannelMembers.removeValue(forKey: channel.id)
         pendingJoins.removeValue(forKey: joinKey(serverID: channel.serverID, channel: channel.name))
         if selection == .channel(channel.id) { selection = .server(channel.serverID) }
-        messageRevision += 1
-        memberRevision += 1
+        messagesDidChange(for: channel.id)
+        membersDidChange(for: channel.id)
+        messageUpdateSignals.removeValue(forKey: channel.id)
+        memberUpdateSignals.removeValue(forKey: channel.id)
     }
 
     private func prepareChannelsForDisconnectedSession(for serverID: UUID) {
@@ -1945,7 +1975,7 @@ final class IRCAppState: ObservableObject {
             pendingChannelMembers.removeValue(forKey: channel.id)
         }
         pendingJoins = pendingJoins.filter { $0.value.serverID != serverID }
-        memberRevision += 1
+        membersDidChange(for: retainedChannels.map(\.id))
     }
 
     private func removeConversations(for serverID: UUID) {
@@ -1966,8 +1996,14 @@ final class IRCAppState: ObservableObject {
         if wasShowingRemovedServer {
             selection = .connectionCenter
         }
-        messageRevision += 1
-        memberRevision += 1
+        messagesDidChange(for: removedConversationIDs)
+        membersDidChange(for: removedChannelIDs)
+        for id in removedConversationIDs {
+            messageUpdateSignals.removeValue(forKey: id)
+        }
+        for id in removedChannelIDs {
+            memberUpdateSignals.removeValue(forKey: id)
+        }
     }
 
     private func resetPendingRequests(for serverID: UUID) {
@@ -2041,12 +2077,16 @@ final class IRCAppState: ObservableObject {
         }) else { return }
 
         let oldConversation = directMessages[oldIndex]
+        var affectedConversationIDs = [oldConversation.id]
+        var retiresOldConversation = false
         if let newIndex = directMessages.firstIndex(where: {
             $0.id != oldConversation.id
                 && $0.serverID == serverID
                 && identifiersEqual($0.name, newNickname, serverID: serverID)
         }) {
             let newConversation = directMessages[newIndex]
+            affectedConversationIDs.append(newConversation.id)
+            retiresOldConversation = true
             conversations[newConversation.id] = IRCConversationHistory.merging(
                 conversations[newConversation.id] ?? [],
                 conversations[oldConversation.id] ?? [],
@@ -2061,7 +2101,10 @@ final class IRCAppState: ObservableObject {
         } else {
             directMessages[oldIndex].name = newNickname
         }
-        messageRevision += 1
+        messagesDidChange(for: affectedConversationIDs)
+        if retiresOldConversation {
+            messageUpdateSignals.removeValue(forKey: oldConversation.id)
+        }
     }
 
     private func stageMembers(_ newMembers: [ChannelMember], for channelID: UUID) {
@@ -2076,7 +2119,7 @@ final class IRCAppState: ObservableObject {
     private func finishStagingMembers(for channelID: UUID) {
         guard let pending = pendingChannelMembers.removeValue(forKey: channelID) else { return }
         channelMembers[channelID] = sortedMembers(Array(pending.values))
-        memberRevision += 1
+        membersDidChange(for: channelID)
     }
 
     private func addMember(_ member: ChannelMember, to channelID: UUID) {
@@ -2088,7 +2131,7 @@ final class IRCAppState: ObservableObject {
             pendingChannelMembers[channelID] = pending
         }
         channelMembers[channelID] = sortedMembers(members)
-        memberRevision += 1
+        membersDidChange(for: channelID)
     }
 
     @discardableResult
@@ -2101,7 +2144,7 @@ final class IRCAppState: ObservableObject {
         guard var members = channelMembers[channelID], let index = members.firstIndex(where: { identifiersEqual($0.nickname, nickname, serverID: serverID) }) else { return false }
         members.remove(at: index)
         channelMembers[channelID] = members
-        memberRevision += 1
+        membersDidChange(for: channelID)
         return true
     }
 
@@ -2115,7 +2158,7 @@ final class IRCAppState: ObservableObject {
         guard var members = channelMembers[channelID], let index = members.firstIndex(where: { identifiersEqual($0.nickname, oldNickname, serverID: serverID) }) else { return false }
         members[index].nickname = newNickname
         channelMembers[channelID] = sortedMembers(members)
-        memberRevision += 1
+        membersDidChange(for: channelID)
         return true
     }
 
@@ -2152,7 +2195,7 @@ final class IRCAppState: ObservableObject {
         }
         guard didChange else { return }
         channelMembers[channelID] = sortedMembers(members)
-        memberRevision += 1
+        membersDidChange(for: channelID)
     }
 
     private func upsert(_ member: ChannelMember, into members: inout [ChannelMember], serverID: UUID) {
@@ -2198,6 +2241,48 @@ final class IRCAppState: ObservableObject {
         activeNicknames[profile.id] ?? configuredNickname(for: profile)
     }
 
+    private func updateSignal(
+        for id: UUID?,
+        in signals: inout [UUID: IRCRevisionSignal]
+    ) -> IRCRevisionSignal {
+        guard let id else { return inactiveUpdateSignal }
+        if let signal = signals[id] { return signal }
+        let signal = IRCRevisionSignal()
+        signals[id] = signal
+        return signal
+    }
+
+    private func messagesDidChange(for conversationID: UUID) {
+        messagesDidChange(for: [conversationID])
+    }
+
+    private func messagesDidChange<S: Sequence>(for conversationIDs: S) where S.Element == UUID {
+        for id in Set(conversationIDs) {
+            messageUpdateSignals[id]?.advance()
+        }
+    }
+
+    private func membersDidChange(for channelID: UUID) {
+        membersDidChange(for: [channelID])
+    }
+
+    private func membersDidChange<S: Sequence>(for channelIDs: S) where S.Element == UUID {
+        for id in Set(channelIDs) {
+            memberUpdateSignals[id]?.advance()
+        }
+    }
+
+    private func muteSnapshot(for profile: ServerProfile) -> IRCMuteSnapshot {
+        if let snapshot = muteSnapshotsByServer[profile.id] { return snapshot }
+        let currentProfile = profiles.first(where: { $0.id == profile.id }) ?? profile
+        let snapshot = IRCMuteSnapshot(
+            nicknames: currentProfile.mutedNicknames ?? [],
+            caseMapping: caseMappings[profile.id] ?? .rfc1459
+        )
+        muteSnapshotsByServer[profile.id] = snapshot
+        return snapshot
+    }
+
     private func normalizedIdentifier(_ value: String, serverID: UUID) -> String {
         (caseMappings[serverID] ?? .rfc1459).normalize(value)
     }
@@ -2225,6 +2310,7 @@ final class IRCAppState: ObservableObject {
         case "rfc1459": caseMappings[serverID] = .rfc1459
         default: break
         }
+        muteSnapshotsByServer.removeValue(forKey: serverID)
     }
 
     private func configuredNickname(for profile: ServerProfile) -> String {
@@ -2335,16 +2421,18 @@ final class IRCAppState: ObservableObject {
                 markUnread(item)
             }
         }
-        messageRevision += 1
+        messagesDidChange(for: id)
     }
 
     private func markUnread(_ item: SidebarItem) {
         switch item {
         case .channel(let id):
-            guard let index = channels.firstIndex(where: { $0.id == id }) else { return }
+            guard let index = channels.firstIndex(where: { $0.id == id }),
+                  !channels[index].hasUnread else { return }
             channels[index].hasUnread = true
         case .directMessage(let id):
-            guard let index = directMessages.firstIndex(where: { $0.id == id }) else { return }
+            guard let index = directMessages.firstIndex(where: { $0.id == id }),
+                  !directMessages[index].hasUnread else { return }
             directMessages[index].hasUnread = true
         case .connectionCenter, .server:
             break
@@ -2498,6 +2586,7 @@ final class IRCAppState: ObservableObject {
     }
 
     private func saveProfiles() {
+        muteSnapshotsByServer.removeAll(keepingCapacity: true)
         guard let data = try? JSONEncoder().encode(profiles) else { return }
         UserDefaults.standard.set(data, forKey: "profiles")
     }

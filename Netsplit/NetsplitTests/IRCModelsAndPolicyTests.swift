@@ -29,6 +29,19 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCCaseMapping.ascii.normalize("[Nick]\\^") == "[nick]\\^")
         #expect(IRCCaseMapping.strictRFC1459.normalize("[Nick]\\^") == "{nick}|^")
         #expect(IRCCaseMapping.rfc1459.normalize("[Nick]\\^") == "{nick}|~")
+        #expect(IRCCaseMapping.rfc1459.normalize("ÅLICE 👋") == "Ålice 👋")
+        #expect(IRCCaseMapping.rfc1459.normalize("").isEmpty)
+    }
+
+    @Test("Mute snapshots normalize once and honor the server case mapping")
+    func matchesMutedNicknames() {
+        let rfcSnapshot = IRCMuteSnapshot(nicknames: ["[Nick]", "Alice"], caseMapping: .rfc1459)
+        #expect(rfcSnapshot.contains("{nick}"))
+        #expect(rfcSnapshot.contains("ALICE"))
+        #expect(!rfcSnapshot.contains("Bob"))
+
+        let asciiSnapshot = IRCMuteSnapshot(nicknames: ["[Nick]"], caseMapping: .ascii)
+        #expect(!asciiSnapshot.contains("{nick}"))
     }
 
     @Test("Nickname mentions require IRC nickname boundaries")
@@ -154,6 +167,60 @@ struct IRCModelsAndPolicyTests {
         #expect(notice.resolvedNicknameColorKey == ordinary.resolvedNicknameColorKey)
     }
 
+    @Test("Message rendering links web URLs and every advertised channel occurrence")
+    func rendersMessageLinks() throws {
+        let message = IRCMessage(
+            sender: "Alice",
+            text: "See https://example.com, #swift, and #swift; skip ftp://example.com",
+            channelLinks: ["#swift"]
+        )
+        let rendered = IRCMessageTextRenderer.linkifiedText(for: message)
+
+        #expect(String(rendered.characters) == message.text)
+        #expect(try link(for: "https://example.com", occurrence: 0, in: rendered) == URL(string: "https://example.com"))
+        #expect(try link(for: "#swift", occurrence: 0, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#swift")
+        #expect(try link(for: "#swift", occurrence: 1, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#swift")
+        #expect(try link(for: "ftp://example.com", occurrence: 0, in: rendered) == nil)
+    }
+
+    @Test("System message rendering preserves generic senders and prefixes event senders")
+    func rendersSystemMessages() {
+        let generic = IRCMessage(sender: "System", text: "Connected", isSystem: true)
+        let event = IRCMessage(sender: "→ Alice", text: "joined #swift", isSystem: true)
+
+        #expect(IRCMessageTextRenderer.displayText(for: generic) == "Connected")
+        #expect(IRCMessageTextRenderer.displayText(for: event) == "→ Alice joined #swift")
+    }
+
+    @Test("Message text cache invalidates when mutable render content changes")
+    func invalidatesCachedMessageText() throws {
+        let cache = IRCMessageTextCache(countLimit: 10)
+        var message = IRCMessage(sender: "Alice", text: "Before", channelLinks: ["#one"])
+        let original = cache.attributedText(for: message)
+
+        message.text = "After #two"
+        message.channelLinks = ["#two"]
+        let updated = cache.attributedText(for: message)
+
+        #expect(String(original.characters) == "Before")
+        #expect(String(updated.characters) == "After #two")
+        #expect(try link(for: "#two", occurrence: 0, in: updated).flatMap(IRCInternalLink.channelName(from:)) == "#two")
+    }
+
+    @Test("Transcript scrolling animates at most once per throttle interval")
+    func throttlesTranscriptAnimations() {
+        let previous = Date(timeIntervalSince1970: 1_000)
+
+        #expect(!IRCTranscriptScrollPolicy.shouldAnimate(
+            lastAnimatedScroll: previous,
+            now: previous.addingTimeInterval(IRCTranscriptScrollPolicy.minimumAnimatedScrollInterval - 0.01)
+        ))
+        #expect(IRCTranscriptScrollPolicy.shouldAnimate(
+            lastAnimatedScroll: previous,
+            now: previous.addingTimeInterval(IRCTranscriptScrollPolicy.minimumAnimatedScrollInterval + 0.01)
+        ))
+    }
+
     @Test("Merging renamed conversations preserves time order and retention limits")
     func mergesConversationHistory() {
         let base = Date(timeIntervalSince1970: 1_000)
@@ -185,6 +252,30 @@ struct IRCModelsAndPolicyTests {
 
         #expect(state.directMessages.isEmpty)
         #expect(state.selection == .server(profile.id))
+    }
+
+    @Test("Conversation update signals stay scoped to their conversation")
+    @MainActor
+    func scopesConversationUpdates() throws {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let alice = try #require(state.directMessages.first { $0.name == "Alice" })
+        let aliceUpdates = state.messageUpdates(for: .directMessage(alice.id))
+        #expect(aliceUpdates === state.messageUpdates(for: .directMessage(alice.id)))
+
+        state.startDirectMessage(with: "Bob", from: .server(profile.id))
+        let bob = try #require(state.directMessages.first { $0.name == "Bob" })
+        let bobUpdates = state.messageUpdates(for: .directMessage(bob.id))
+
+        state.close(bob)
+
+        #expect(aliceUpdates.revision == 0)
+        #expect(bobUpdates.revision == 1)
+        let replacementBobUpdates = state.messageUpdates(for: .directMessage(bob.id))
+        #expect(replacementBobUpdates !== bobUpdates)
+        #expect(replacementBobUpdates.revision == 0)
     }
 
     @Test("Member list shortcut only applies to channels")
@@ -247,5 +338,23 @@ struct IRCModelsAndPolicyTests {
         state.navigateBack()
 
         #expect(state.selection == alice)
+    }
+
+    private func link(
+        for substring: String,
+        occurrence: Int,
+        in attributedText: AttributedString
+    ) throws -> URL? {
+        let text = String(attributedText.characters)
+        var searchStart = text.startIndex
+        var match: Range<String.Index>?
+        for _ in 0...occurrence {
+            match = text.range(of: substring, range: searchStart..<text.endIndex)
+            let found = try #require(match)
+            searchStart = found.upperBound
+        }
+        let stringRange = try #require(match)
+        let attributedRange = try #require(Range(stringRange, in: attributedText))
+        return attributedText[attributedRange].link
     }
 }

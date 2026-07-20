@@ -464,7 +464,6 @@ private struct ConversationView: View {
     @State private var draft = ""
     @State private var tabCompletion: RecipientTabCompletion?
     @State private var pendingURL: PendingURL?
-    @State private var hasPositionedInitialMessages = false
     @FocusState private var composerFocused: Bool
     @Environment(\.ircTextMetrics) private var textMetrics
 
@@ -513,48 +512,14 @@ private struct ConversationView: View {
 
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(
-                                alignment: .leading,
-                                spacing: state.messageSpacing == .compact ? 0 : textMetrics.spacing(3)
-                            ) {
-                                ForEach(state.messages(for: selection)) { message in
-                                    MessageRow(
-                                        message: message,
-                                        usesColoredNicknames: state.usesColoredNicknames,
-                                        usesMonospacedServerMessages: state.usesMonospacedServerMessages,
-                                        messageSpacing: state.messageSpacing
-                                    )
-                                    .id(message.id)
-                                }
-                            }
-                            .padding(.horizontal, textMetrics.spacing(24))
-                            .padding(.vertical, textMetrics.spacing(18))
-                            .accessibilityAddTraits(.updatesFrequently)
-                        }
-                        .defaultScrollAnchor(.bottom)
-                        .accessibilityLabel("Conversation messages")
-                        .task(id: state.messages(for: selection).last?.id) {
-                            // Coalesce reconnect bursts and scroll only when the
-                            // visible conversation receives a new final message.
-                            await Task.yield()
-                            guard !Task.isCancelled,
-                                  let id = state.messages(for: selection).last?.id else { return }
-
-                            // The scroll view starts at the bottom when a
-                            // conversation appears. Avoid animating that initial
-                            // position as though a new message had just arrived.
-                            guard hasPositionedInitialMessages else {
-                                hasPositionedInitialMessages = true
-                                return
-                            }
-
-                            withAnimation(.easeOut(duration: 0.16)) {
-                                proxy.scrollTo(id, anchor: .bottom)
-                            }
-                        }
-                    }
+                    ConversationTranscript(
+                        state: state,
+                        selection: selection,
+                        usesColoredNicknames: state.usesColoredNicknames,
+                        usesMonospacedServerMessages: state.usesMonospacedServerMessages,
+                        messageSpacing: state.messageSpacing,
+                        channelEventVisibility: state.channelEventVisibility
+                    )
                     HStack(alignment: .bottom, spacing: 12) {
                         TextField("Message \(title)", text: $draft, axis: .vertical)
                             .font(.system(size: textMetrics.size(15)))
@@ -587,7 +552,7 @@ private struct ConversationView: View {
                 }
                 if isChannel && state.showsMemberList {
                     Divider()
-                    ChannelMemberList(members: state.members(for: selection), state: state, selection: selection)
+                    ChannelMemberList(state: state, selection: selection)
                 }
             }
         }
@@ -721,6 +686,107 @@ private struct ConversationView: View {
     }
 }
 
+private struct ConversationTranscript: View {
+    let state: IRCAppState
+    let selection: SidebarItem
+    let usesColoredNicknames: Bool
+    let usesMonospacedServerMessages: Bool
+    let messageSpacing: IRCMessageSpacing
+    let channelEventVisibility: IRCChannelEventVisibility
+    @ObservedObject private var updates: IRCRevisionSignal
+    @State private var scrollPosition: UUID?
+    @State private var isFollowingTail = true
+    @State private var hasPositionedInitialMessages = false
+    @State private var lastAnimatedScroll = Date.distantPast
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    init(
+        state: IRCAppState,
+        selection: SidebarItem,
+        usesColoredNicknames: Bool,
+        usesMonospacedServerMessages: Bool,
+        messageSpacing: IRCMessageSpacing,
+        channelEventVisibility: IRCChannelEventVisibility
+    ) {
+        self.state = state
+        self.selection = selection
+        self.usesColoredNicknames = usesColoredNicknames
+        self.usesMonospacedServerMessages = usesMonospacedServerMessages
+        self.messageSpacing = messageSpacing
+        self.channelEventVisibility = channelEventVisibility
+        _updates = ObservedObject(wrappedValue: state.messageUpdates(for: selection))
+    }
+
+    var body: some View {
+        let _ = updates.revision
+        let messages = state.messages(
+            for: selection,
+            channelEventVisibility: channelEventVisibility
+        )
+        let lastMessageID = messages.last?.id
+
+        ScrollView {
+            LazyVStack(
+                alignment: .leading,
+                spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
+            ) {
+                ForEach(messages) { message in
+                    MessageRow(
+                        message: message,
+                        usesColoredNicknames: usesColoredNicknames,
+                        usesMonospacedServerMessages: usesMonospacedServerMessages,
+                        messageSpacing: messageSpacing
+                    )
+                    .id(message.id)
+                }
+            }
+            .scrollTargetLayout()
+            .padding(.horizontal, textMetrics.spacing(24))
+            .padding(.vertical, textMetrics.spacing(18))
+            .accessibilityAddTraits(.updatesFrequently)
+        }
+        .defaultScrollAnchor(.bottom)
+        .scrollPosition(id: $scrollPosition, anchor: .bottom)
+        .accessibilityLabel("Conversation messages")
+        .onChange(of: scrollPosition) { _, newPosition in
+            guard hasPositionedInitialMessages, let newPosition else { return }
+            isFollowingTail = newPosition == lastMessageID
+        }
+        .task(id: lastMessageID) {
+            guard let lastMessageID else { return }
+            guard hasPositionedInitialMessages else {
+                hasPositionedInitialMessages = true
+                scrollPosition = lastMessageID
+                return
+            }
+            guard isFollowingTail else { return }
+
+            // Collapse bursts into one tail update after traffic briefly settles.
+            // This avoids overlapping animations and repeated lazy-stack ID scans.
+            do {
+                try await Task.sleep(for: IRCTranscriptScrollPolicy.coalescingDelay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, isFollowingTail else { return }
+
+            let now = Date()
+            if IRCTranscriptScrollPolicy.shouldAnimate(lastAnimatedScroll: lastAnimatedScroll, now: now) {
+                lastAnimatedScroll = now
+                withAnimation(.easeOut(duration: IRCTranscriptScrollPolicy.animationDuration)) {
+                    scrollPosition = lastMessageID
+                }
+            } else {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    scrollPosition = lastMessageID
+                }
+            }
+        }
+    }
+}
+
 private struct RecipientCompletionContext {
     let command: String
     let prefix: String
@@ -735,18 +801,28 @@ private struct RecipientTabCompletion {
 }
 
 private struct ChannelMemberList: View {
-    let members: [ChannelMember]
     @ObservedObject var state: IRCAppState
     let selection: SidebarItem
+    @ObservedObject private var updates: IRCRevisionSignal
     @State private var search = ""
     @Environment(\.ircTextMetrics) private var textMetrics
 
-    private var filteredMembers: [ChannelMember] {
+    init(state: IRCAppState, selection: SidebarItem) {
+        self.state = state
+        self.selection = selection
+        _updates = ObservedObject(wrappedValue: state.memberUpdates(for: selection))
+    }
+
+    private func filteredMembers(from members: [ChannelMember]) -> [ChannelMember] {
         guard !search.isEmpty else { return members }
         return members.filter { $0.nickname.localizedCaseInsensitiveContains(search) }
     }
 
     var body: some View {
+        let _ = updates.revision
+        let members = state.members(for: selection)
+        let muteSnapshot = state.muteSnapshot(for: selection)
+
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Members")
@@ -770,8 +846,13 @@ private struct ChannelMemberList: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {
-                    ForEach(filteredMembers) { member in
-                        ChannelMemberRow(member: member, state: state, selection: selection)
+                    ForEach(filteredMembers(from: members)) { member in
+                        ChannelMemberRow(
+                            member: member,
+                            isMuted: muteSnapshot?.contains(member.nickname) ?? false,
+                            state: state,
+                            selection: selection
+                        )
                     }
                 }
                 .padding(.vertical, textMetrics.spacing(5))
@@ -788,12 +869,11 @@ private struct ChannelMemberList: View {
 
 private struct ChannelMemberRow: View {
     let member: ChannelMember
-    @ObservedObject var state: IRCAppState
+    let isMuted: Bool
+    let state: IRCAppState
     let selection: SidebarItem
     @State private var isHovered = false
     @Environment(\.ircTextMetrics) private var textMetrics
-
-    private var isMuted: Bool { state.isMuted(member.nickname, from: selection) }
 
     var body: some View {
         HStack(spacing: textMetrics.spacing(8)) {
@@ -897,11 +977,6 @@ private struct MessageRow: View {
     private var timestampColumnWidth: CGFloat { textMetrics.spacing(64) }
     private var senderColumnWidth: CGFloat { textMetrics.spacing(116) }
 
-    private var systemText: String {
-        let genericSenders = ["System", "•"]
-        return genericSenders.contains(message.sender) ? message.text : "\(message.sender) \(message.text)"
-    }
-
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: textMetrics.spacing(10)) {
             Text(message.timestamp, format: .dateTime.hour().minute())
@@ -915,7 +990,7 @@ private struct MessageRow: View {
                     .foregroundStyle(.tertiary)
                     .frame(width: textMetrics.spacing(10))
                     .accessibilityHidden(true)
-                Text(linkified(systemText))
+                Text(linkifiedText)
                     .font(.system(
                         size: textMetrics.size(14),
                         design: usesMonospacedServerMessages ? .monospaced : .default
@@ -932,8 +1007,8 @@ private struct MessageRow: View {
                     .help(message.sender)
                 Text(linkifiedText)
                     .font(.system(size: textMetrics.bodySize))
-                    .textSelection(.enabled)
                     .foregroundStyle(.primary)
+                    .textSelection(.enabled)
             }
         }
         .padding(.vertical, verticalPadding)
@@ -941,7 +1016,11 @@ private struct MessageRow: View {
         .accessibilityLabel("\(message.timestamp.formatted(date: .omitted, time: .shortened)), \(message.sender): \(message.text)")
     }
 
-    private var linkifiedText: AttributedString { linkified(message.text) }
+    private static let attributedTextCache = IRCMessageTextCache(countLimit: 5_500)
+
+    private var linkifiedText: AttributedString {
+        Self.attributedTextCache.attributedText(for: message)
+    }
 
     private var verticalPadding: CGFloat {
         guard messageSpacing == .comfortable else { return 0 }
@@ -983,33 +1062,6 @@ private struct MessageRow: View {
         Color(red: 0.988, green: 0.647, blue: 0.647)
     ]
 
-    private func linkified(_ text: String) -> AttributedString {
-        var attributedText = AttributedString(text)
-        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
-            let fullRange = NSRange(text.startIndex..., in: text)
-            for match in detector.matches(in: text, range: fullRange) {
-                guard let url = match.url,
-                      let scheme = url.scheme?.lowercased(),
-                      scheme == "http" || scheme == "https",
-                      let stringRange = Range(match.range, in: text),
-                      let attributedRange = Range(stringRange, in: attributedText) else { continue }
-                attributedText[attributedRange].link = url
-            }
-        }
-
-        for channel in message.channelLinks {
-            guard let url = IRCInternalLink.channelURL(for: channel) else { continue }
-            var searchStart = text.startIndex
-            while searchStart < text.endIndex,
-                  let stringRange = text.range(of: channel, range: searchStart..<text.endIndex) {
-                if let attributedRange = Range(stringRange, in: attributedText) {
-                    attributedText[attributedRange].link = url
-                }
-                searchStart = stringRange.upperBound
-            }
-        }
-        return attributedText
-    }
 }
 
 private struct PendingURL: Identifiable {

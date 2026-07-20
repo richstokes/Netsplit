@@ -205,31 +205,49 @@ enum IRCCaseMapping: String {
     case strictRFC1459 = "strict-rfc1459"
 
     func normalize(_ value: String) -> String {
-        String(value.unicodeScalars.map { scalar -> Character in
+        var result = String()
+        result.reserveCapacity(value.utf8.count)
+        for scalar in value.unicodeScalars {
             let byte = scalar.value
             if byte >= 65, byte <= 90 {
-                return Character(UnicodeScalar(byte + 32)!)
+                result.unicodeScalars.append(UnicodeScalar(byte + 32)!)
+                continue
             }
             switch self {
             case .ascii:
-                return Character(scalar)
+                result.unicodeScalars.append(scalar)
             case .strictRFC1459:
                 switch scalar {
-                case "[", "{": return "{"
-                case "]", "}": return "}"
-                case "\\", "|": return "|"
-                default: return Character(scalar)
+                case "[", "{": result.append("{")
+                case "]", "}": result.append("}")
+                case "\\", "|": result.append("|")
+                default: result.unicodeScalars.append(scalar)
                 }
             case .rfc1459:
                 switch scalar {
-                case "[", "{": return "{"
-                case "]", "}": return "}"
-                case "\\", "|": return "|"
-                case "^", "~": return "~"
-                default: return Character(scalar)
+                case "[", "{": result.append("{")
+                case "]", "}": result.append("}")
+                case "\\", "|": result.append("|")
+                case "^", "~": result.append("~")
+                default: result.unicodeScalars.append(scalar)
                 }
             }
-        })
+        }
+        return result
+    }
+}
+
+struct IRCMuteSnapshot {
+    private let normalizedNicknames: Set<String>
+    private let caseMapping: IRCCaseMapping
+
+    init(nicknames: [String], caseMapping: IRCCaseMapping) {
+        self.caseMapping = caseMapping
+        normalizedNicknames = Set(nicknames.map(caseMapping.normalize))
+    }
+
+    func contains(_ nickname: String) -> Bool {
+        normalizedNicknames.contains(caseMapping.normalize(nickname))
     }
 }
 
@@ -271,6 +289,101 @@ struct IRCMessage: Identifiable, Hashable {
 
     var resolvedNicknameColorKey: String {
         nicknameColorKey ?? sender
+    }
+}
+
+enum IRCMessageTextRenderer {
+    private static let linkDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    )
+
+    static func displayText(for message: IRCMessage) -> String {
+        guard message.isSystem, message.sender != "System", message.sender != "•" else {
+            return message.text
+        }
+        return "\(message.sender) \(message.text)"
+    }
+
+    static func linkifiedText(for message: IRCMessage) -> AttributedString {
+        let text = displayText(for: message)
+        var attributedText = AttributedString(text)
+        if let linkDetector {
+            let fullRange = NSRange(text.startIndex..., in: text)
+            for match in linkDetector.matches(in: text, range: fullRange) {
+                guard let url = match.url,
+                      let scheme = url.scheme?.lowercased(),
+                      scheme == "http" || scheme == "https",
+                      let stringRange = Range(match.range, in: text),
+                      let attributedRange = Range(stringRange, in: attributedText) else { continue }
+                attributedText[attributedRange].link = url
+            }
+        }
+
+        for channel in message.channelLinks {
+            guard let url = IRCInternalLink.channelURL(for: channel) else { continue }
+            var searchStart = text.startIndex
+            while searchStart < text.endIndex,
+                  let stringRange = text.range(of: channel, range: searchStart..<text.endIndex) {
+                if let attributedRange = Range(stringRange, in: attributedText) {
+                    attributedText[attributedRange].link = url
+                }
+                searchStart = stringRange.upperBound
+            }
+        }
+        return attributedText
+    }
+}
+
+final class IRCMessageTextCache {
+    private struct Signature: Equatable {
+        let sender: String
+        let text: String
+        let isSystem: Bool
+        let channelLinks: [String]
+
+        init(message: IRCMessage) {
+            sender = message.sender
+            text = message.text
+            isSystem = message.isSystem
+            channelLinks = message.channelLinks
+        }
+    }
+
+    private final class Entry {
+        let signature: Signature
+        let value: AttributedString
+
+        init(signature: Signature, value: AttributedString) {
+            self.signature = signature
+            self.value = value
+        }
+    }
+
+    private let cache = NSCache<NSUUID, Entry>()
+
+    init(countLimit: Int) {
+        cache.countLimit = countLimit
+    }
+
+    func attributedText(for message: IRCMessage) -> AttributedString {
+        let key = message.id as NSUUID
+        let signature = Signature(message: message)
+        if let cached = cache.object(forKey: key), cached.signature == signature {
+            return cached.value
+        }
+        let value = IRCMessageTextRenderer.linkifiedText(for: message)
+        cache.setObject(Entry(signature: signature, value: value), forKey: key)
+        return value
+    }
+}
+
+enum IRCTranscriptScrollPolicy {
+    static let coalescingDelay: Duration = .milliseconds(60)
+    static let minimumAnimatedScrollInterval: TimeInterval = 0.35
+    static let animationDuration: TimeInterval = 0.12
+
+    static func shouldAnimate(lastAnimatedScroll: Date, now: Date) -> Bool {
+        now.timeIntervalSince(lastAnimatedScroll) >= minimumAnimatedScrollInterval
     }
 }
 
