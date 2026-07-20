@@ -134,6 +134,26 @@ struct IRCModelsAndPolicyTests {
         #expect(delays == [0, 2, 4, 8, 16, 32, 60, 60, 60])
     }
 
+    @Test("Channel event visibility treats 100 members as busy")
+    func filtersBusyChannelEvents() {
+        #expect(IRCChannelEventVisibility.alwaysShow.shouldShow(memberCount: 1_000))
+        #expect(!IRCChannelEventVisibility.alwaysHide.shouldShow(memberCount: 1))
+        #expect(IRCChannelEventVisibility.hideInBusyChannels.shouldShow(memberCount: 99))
+        #expect(!IRCChannelEventVisibility.hideInBusyChannels.shouldShow(memberCount: 100))
+        #expect(!IRCChannelEventVisibility.hideInBusyChannels.shouldShow(memberCount: 1_000))
+    }
+
+    @Test("Decorated messages retain the nickname used for color selection")
+    func preservesNicknameColorIdentity() {
+        let ordinary = IRCMessage(sender: "Alice", text: "Hello")
+        let action = IRCMessage(sender: "* Alice", text: "waves", nicknameColorKey: "Alice")
+        let notice = IRCMessage(sender: "Alice (notice)", text: "Hello", nicknameColorKey: "Alice")
+
+        #expect(ordinary.resolvedNicknameColorKey == "Alice")
+        #expect(action.resolvedNicknameColorKey == ordinary.resolvedNicknameColorKey)
+        #expect(notice.resolvedNicknameColorKey == ordinary.resolvedNicknameColorKey)
+    }
+
     @Test("Merging renamed conversations preserves time order and retention limits")
     func mergesConversationHistory() {
         let base = Date(timeIntervalSince1970: 1_000)

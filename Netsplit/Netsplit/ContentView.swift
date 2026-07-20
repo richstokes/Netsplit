@@ -515,9 +515,18 @@ private struct ConversationView: View {
                 VStack(spacing: 0) {
                     ScrollViewReader { proxy in
                         ScrollView {
-                            LazyVStack(alignment: .leading, spacing: textMetrics.spacing(3)) {
+                            LazyVStack(
+                                alignment: .leading,
+                                spacing: state.messageSpacing == .compact ? 0 : textMetrics.spacing(3)
+                            ) {
                                 ForEach(state.messages(for: selection)) { message in
-                                    MessageRow(message: message).id(message.id)
+                                    MessageRow(
+                                        message: message,
+                                        usesColoredNicknames: state.usesColoredNicknames,
+                                        usesMonospacedServerMessages: state.usesMonospacedServerMessages,
+                                        messageSpacing: state.messageSpacing
+                                    )
+                                    .id(message.id)
                                 }
                             }
                             .padding(.horizontal, textMetrics.spacing(24))
@@ -878,7 +887,11 @@ private struct ChannelMemberRow: View {
 
 private struct MessageRow: View {
     let message: IRCMessage
+    let usesColoredNicknames: Bool
+    let usesMonospacedServerMessages: Bool
+    let messageSpacing: IRCMessageSpacing
     @Environment(\.ircTextMetrics) private var textMetrics
+    @Environment(\.colorScheme) private var colorScheme
 
     private var timestampFontSize: CGFloat { textMetrics.size(11) }
     private var timestampColumnWidth: CGFloat { textMetrics.spacing(64) }
@@ -903,13 +916,16 @@ private struct MessageRow: View {
                     .frame(width: textMetrics.spacing(10))
                     .accessibilityHidden(true)
                 Text(linkified(systemText))
-                    .font(.system(size: textMetrics.size(14)))
+                    .font(.system(
+                        size: textMetrics.size(14),
+                        design: usesMonospacedServerMessages ? .monospaced : .default
+                    ))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             } else {
                 Text(message.sender)
                     .font(.system(size: textMetrics.size(15), weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(nicknameColor)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .frame(minWidth: senderColumnWidth, alignment: .leading)
@@ -920,12 +936,52 @@ private struct MessageRow: View {
                     .foregroundStyle(.primary)
             }
         }
-        .padding(.vertical, textMetrics.spacing(message.isSystem ? 1 : 2))
+        .padding(.vertical, verticalPadding)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(message.timestamp.formatted(date: .omitted, time: .shortened)), \(message.sender): \(message.text)")
     }
 
     private var linkifiedText: AttributedString { linkified(message.text) }
+
+    private var verticalPadding: CGFloat {
+        guard messageSpacing == .comfortable else { return 0 }
+        return textMetrics.spacing(message.isSystem ? 1 : 2)
+    }
+
+    private var nicknameColor: Color {
+        guard usesColoredNicknames else { return .accentColor }
+        let palette = colorScheme == .dark ? Self.darkNicknamePalette : Self.lightNicknamePalette
+        var hash: UInt64 = 1_469_598_103_934_665_603
+        for scalar in message.resolvedNicknameColorKey.lowercased().unicodeScalars {
+            hash ^= UInt64(scalar.value)
+            hash &*= 1_099_511_628_211
+        }
+        return palette[Int(hash % UInt64(palette.count))]
+    }
+
+    // Tailwind's 700/800 shades remain readable on light backgrounds, while
+    // the corresponding 300 shades preserve contrast in dark appearance.
+    private static let lightNicknamePalette: [Color] = [
+        Color(red: 0.114, green: 0.306, blue: 0.847),
+        Color(red: 0.494, green: 0.133, blue: 0.808),
+        Color(red: 0.604, green: 0.204, blue: 0.071),
+        Color(red: 0.745, green: 0.094, blue: 0.365),
+        Color(red: 0.086, green: 0.396, blue: 0.204),
+        Color(red: 0.263, green: 0.220, blue: 0.792),
+        Color(red: 0.067, green: 0.369, blue: 0.349),
+        Color(red: 0.725, green: 0.110, blue: 0.110)
+    ]
+
+    private static let darkNicknamePalette: [Color] = [
+        Color(red: 0.576, green: 0.773, blue: 0.992),
+        Color(red: 0.847, green: 0.706, blue: 0.996),
+        Color(red: 0.992, green: 0.729, blue: 0.455),
+        Color(red: 0.976, green: 0.659, blue: 0.831),
+        Color(red: 0.525, green: 0.937, blue: 0.675),
+        Color(red: 0.647, green: 0.706, blue: 0.988),
+        Color(red: 0.369, green: 0.918, blue: 0.831),
+        Color(red: 0.988, green: 0.647, blue: 0.647)
+    ]
 
     private func linkified(_ text: String) -> AttributedString {
         var attributedText = AttributedString(text)

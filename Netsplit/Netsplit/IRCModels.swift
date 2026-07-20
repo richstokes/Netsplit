@@ -6,6 +6,82 @@
 import Foundation
 import SwiftUI
 
+enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
+enum IRCMessageSpacing: String, CaseIterable, Identifiable {
+    case compact
+    case comfortable
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .compact: return "Compact"
+        case .comfortable: return "Comfortable"
+        }
+    }
+}
+
+enum IRCChannelEventVisibility: String, CaseIterable, Identifiable {
+    case alwaysShow
+    case hideInBusyChannels
+    case alwaysHide
+
+    static let busyChannelMemberThreshold = 100
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .alwaysShow: return "Always Show"
+        case .hideInBusyChannels: return "Hide in Busy Channels"
+        case .alwaysHide: return "Always Hide"
+        }
+    }
+
+    func shouldShow(memberCount: Int) -> Bool {
+        switch self {
+        case .alwaysShow:
+            return true
+        case .hideInBusyChannels:
+            return memberCount < Self.busyChannelMemberThreshold
+        case .alwaysHide:
+            return false
+        }
+    }
+}
+
+enum IRCChannelEventKind: Hashable {
+    case join
+    case part
+    case quit
+    case nickname
+    case topic
+    case mode
+}
+
 struct ServerProfile: Identifiable, Codable, Hashable {
     var id = UUID()
     var name: String
@@ -189,6 +265,13 @@ struct IRCMessage: Identifiable, Hashable {
     var timestamp = Date()
     var isSystem = false
     var channelLinks: [String] = []
+    var channelEventKind: IRCChannelEventKind?
+    var channelMemberCount: Int?
+    var nicknameColorKey: String?
+
+    var resolvedNicknameColorKey: String {
+        nicknameColorKey ?? sender
+    }
 }
 
 struct Conversation: Identifiable, Hashable {

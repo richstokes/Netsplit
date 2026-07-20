@@ -27,11 +27,28 @@ final class IRCAppState: ObservableObject {
     @Published var warnBeforeOpeningLinks: Bool {
         didSet { UserDefaults.standard.set(warnBeforeOpeningLinks, forKey: "warnBeforeOpeningLinks") }
     }
+    @Published var applicationAppearance: IRCApplicationAppearance {
+        didSet { UserDefaults.standard.set(applicationAppearance.rawValue, forKey: "applicationAppearance") }
+    }
+    @Published var messageSpacing: IRCMessageSpacing {
+        didSet { UserDefaults.standard.set(messageSpacing.rawValue, forKey: "messageSpacing") }
+    }
+    @Published var usesColoredNicknames: Bool {
+        didSet { UserDefaults.standard.set(usesColoredNicknames, forKey: "usesColoredNicknames") }
+    }
+    @Published var usesMonospacedServerMessages: Bool {
+        didSet { UserDefaults.standard.set(usesMonospacedServerMessages, forKey: "usesMonospacedServerMessages") }
+    }
+    @Published var channelEventVisibility: IRCChannelEventVisibility {
+        didSet { UserDefaults.standard.set(channelEventVisibility.rawValue, forKey: "channelEventVisibility") }
+    }
     @Published var transcriptFontSize: Double
     @Published var selection: SidebarItem? {
         didSet { recordSelectionChange(from: oldValue) }
     }
-    @Published var showsMemberList = true
+    @Published var showsMemberList: Bool {
+        didSet { UserDefaults.standard.set(showsMemberList, forKey: "showsMemberList") }
+    }
     @Published private(set) var channels: [Conversation] = []
     @Published private(set) var directMessages: [Conversation] = []
     @Published private(set) var connectionStatuses: [UUID: ConnectionStatus] = [:]
@@ -119,6 +136,12 @@ final class IRCAppState: ObservableObject {
         quitMessage = savedQuitMessage.isEmpty ? Self.defaultQuitMessage : savedQuitMessage
         reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
+        applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
+        messageSpacing = defaults.string(forKey: "messageSpacing").flatMap(IRCMessageSpacing.init(rawValue:)) ?? .comfortable
+        usesColoredNicknames = defaults.object(forKey: "usesColoredNicknames") as? Bool ?? false
+        usesMonospacedServerMessages = defaults.object(forKey: "usesMonospacedServerMessages") as? Bool ?? true
+        channelEventVisibility = defaults.string(forKey: "channelEventVisibility").flatMap(IRCChannelEventVisibility.init(rawValue:)) ?? .alwaysShow
+        showsMemberList = defaults.object(forKey: "showsMemberList") as? Bool ?? true
         let savedTranscriptFontSize = defaults.object(forKey: "transcriptFontSize") as? Double ?? 16
         transcriptFontSize = min(max(savedTranscriptFontSize, 12), 24)
 
@@ -626,7 +649,12 @@ final class IRCAppState: ObservableObject {
 
     func messages(for item: SidebarItem) -> [IRCMessage] {
         guard let id = conversationID(for: item) else { return [] }
-        return conversations[id] ?? []
+        let messages = conversations[id] ?? []
+        guard case .channel = item else { return messages }
+        return messages.filter { message in
+            guard message.channelEventKind != nil else { return true }
+            return channelEventVisibility.shouldShow(memberCount: message.channelMemberCount ?? 0)
+        }
     }
 
     func markRead(_ item: SidebarItem) {
@@ -963,7 +991,11 @@ final class IRCAppState: ObservableObject {
                           self.sessionIDs[profile.id] == sessionID,
                           self.registeredServerIDs.contains(profile.id) else { return }
                     self.rememberOutgoingEcho(serverID: profile.id, target: target, text: action)
-                    self.append(IRCMessage(sender: "* \(sender)", text: chunk), for: item, markUnread: false)
+                    self.append(
+                        IRCMessage(sender: "* \(sender)", text: chunk, nicknameColorKey: sender),
+                        for: item,
+                        markUnread: false
+                    )
                 }
             }
         case "SLAP":
@@ -986,7 +1018,11 @@ final class IRCAppState: ObservableObject {
                           self.sessionIDs[profile.id] == sessionID,
                           self.registeredServerIDs.contains(profile.id) else { return }
                     self.rememberOutgoingEcho(serverID: profile.id, target: target, text: action)
-                    self.append(IRCMessage(sender: "* \(sender)", text: chunk), for: item, markUnread: false)
+                    self.append(
+                        IRCMessage(sender: "* \(sender)", text: chunk, nicknameColorKey: sender),
+                        for: item,
+                        markUnread: false
+                    )
                 }
             }
         case "VERSION":
@@ -1230,21 +1266,24 @@ final class IRCAppState: ObservableObject {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 let channel = channel(named: target, serverID: profile.id)
                 append(
-                    IRCMessage(sender: "\(sender) (notice)", text: text),
+                    IRCMessage(sender: "\(sender) (notice)", text: text, nicknameColorKey: sender),
                     for: .channel(channel.id),
                     markMention: messageMentionsLocalNickname(text, on: profile)
                 )
             } else if let channel = channelReferencedByNotice(text, serverID: profile.id) {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 append(
-                    IRCMessage(sender: "\(sender) (notice)", text: text),
+                    IRCMessage(sender: "\(sender) (notice)", text: text, nicknameColorKey: sender),
                     for: .channel(channel.id),
                     markMention: messageMentionsLocalNickname(text, on: profile)
                 )
             } else if wire.prefix?.contains("!") == true,
                       !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
-                append(IRCMessage(sender: "\(sender) (notice)", text: text), for: .directMessage(conversation.id))
+                append(
+                    IRCMessage(sender: "\(sender) (notice)", text: text, nicknameColorKey: sender),
+                    for: .directMessage(conversation.id)
+                )
             } else {
                 appendSystem(text, for: .server(profile.id))
             }
@@ -1283,26 +1322,39 @@ final class IRCAppState: ObservableObject {
                     }
                     let topic = pendingJoin?.topic.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let topicSuffix = topic.isEmpty ? "" : " Topic: \(topic)"
-                    appendChannelEvent("Joined \(channelName).\(topicSuffix)", channelID: channel.id)
+                    appendChannelEvent("Joined \(channelName).\(topicSuffix)", kind: .join, channelID: channel.id)
                 } else {
-                    appendChannelEvent("\(sender) joined \(channelName).", channelID: channel.id)
+                    appendChannelEvent("\(sender) joined \(channelName).", kind: .join, channelID: channel.id)
                 }
             }
         case "PART":
             guard let channelName = wire.parameters.first,
                   let channel = existingChannel(named: channelName, serverID: profile.id) else { return }
+            let memberCountBeforePart = channelMembers[channel.id]?.count ?? 0
             guard removeMember(named: sender, from: channel.id) else { return }
             let reason = wire.trailing.map { " — \($0)" } ?? ""
             let subject = identifiersEqual(sender, nickname(for: profile), serverID: profile.id) ? "You" : sender
-            appendChannelEvent("\(subject) left \(channelName)\(reason).", channelID: channel.id)
+            appendChannelEvent(
+                "\(subject) left \(channelName)\(reason).",
+                kind: .part,
+                channelID: channel.id,
+                memberCount: memberCountBeforePart
+            )
         case "QUIT":
             let reason = wire.trailing.map { " — \($0)" } ?? ""
             let pendingKillKey = killKey(serverID: profile.id, nickname: sender)
             if let pendingKill = pendingKills.removeValue(forKey: pendingKillKey) {
                 appendSystem("Disconnected \(pendingKill.nickname) from the network\(reason).", for: pendingKill.destination)
             }
-            for channel in channels(for: profile) where removeMember(named: sender, from: channel.id) {
-                appendChannelEvent("\(sender) disconnected\(reason).", channelID: channel.id)
+            for channel in channels(for: profile) {
+                let memberCountBeforeQuit = channelMembers[channel.id]?.count ?? 0
+                guard removeMember(named: sender, from: channel.id) else { continue }
+                appendChannelEvent(
+                    "\(sender) disconnected\(reason).",
+                    kind: .quit,
+                    channelID: channel.id,
+                    memberCount: memberCountBeforeQuit
+                )
             }
         case "KICK":
             guard wire.parameters.count >= 2,
@@ -1339,10 +1391,10 @@ final class IRCAppState: ObservableObject {
             var deliveredConfirmation = false
             for channel in channels(for: profile) where renameMember(sender, to: newNickname, in: channel.id) {
                 if isLocalNicknameChange {
-                    appendChannelEvent("You are now known as \(newNickname).", channelID: channel.id)
+                    appendChannelEvent("You are now known as \(newNickname).", kind: .nickname, channelID: channel.id)
                     if requestedDestination == .channel(channel.id) { deliveredConfirmation = true }
                 } else {
-                    appendChannelEvent("\(sender) is now known as \(newNickname).", channelID: channel.id)
+                    appendChannelEvent("\(sender) is now known as \(newNickname).", kind: .nickname, channelID: channel.id)
                 }
             }
             if isLocalNicknameChange, !deliveredConfirmation {
@@ -1360,7 +1412,7 @@ final class IRCAppState: ObservableObject {
             }
             let key = topicKey(serverID: profile.id, channel: channelName)
             let destination = pendingTopicDestinations.removeValue(forKey: key)
-            appendChannelEvent("\(sender) changed the topic to: \(topic)", channelID: channel.id)
+            appendChannelEvent("\(sender) changed the topic to: \(topic)", kind: .topic, channelID: channel.id)
             if let destination, destination != .channel(channel.id) {
                 appendSystem("Topic for \(channel.name): \(topic)", for: destination)
             }
@@ -1374,7 +1426,7 @@ final class IRCAppState: ObservableObject {
             let destination = pendingModeDestinations.removeValue(forKey: key)
             if let channel = existingChannel(named: target, serverID: profile.id) {
                 applyMembershipModes(modeString, arguments: modeArguments, to: channel.id)
-                appendChannelEvent("\(sender) set mode \(changes) on \(target).", channelID: channel.id)
+                appendChannelEvent("\(sender) set mode \(changes) on \(target).", kind: .mode, channelID: channel.id)
                 if let destination, destination != .channel(channel.id) {
                     appendSystem("Modes for \(target) changed: \(changes)", for: destination)
                 }
@@ -1765,7 +1817,7 @@ final class IRCAppState: ObservableObject {
                consumeOutgoingEcho(serverID: profile.id, target: target, text: text) {
                 return true
             }
-            let message = IRCMessage(sender: "* \(sender)", text: command[1])
+            let message = IRCMessage(sender: "* \(sender)", text: command[1], nicknameColorKey: sender)
             if let first = target.first, "#&+!".contains(first) {
                 let channel = channel(named: target, serverID: profile.id)
                 let isOwnAction = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
@@ -2243,8 +2295,24 @@ final class IRCAppState: ObservableObject {
         append(IRCMessage(sender: "System", text: text, isSystem: true), for: item)
     }
 
-    private func appendChannelEvent(_ text: String, channelID: UUID) {
-        append(IRCMessage(sender: "•", text: text, isSystem: true), for: .channel(channelID))
+    private func appendChannelEvent(
+        _ text: String,
+        kind: IRCChannelEventKind? = nil,
+        channelID: UUID,
+        memberCount: Int? = nil
+    ) {
+        let resolvedMemberCount = memberCount ?? channelMembers[channelID]?.count ?? 0
+        guard kind == nil || channelEventVisibility.shouldShow(memberCount: resolvedMemberCount) else { return }
+        append(
+            IRCMessage(
+                sender: "•",
+                text: text,
+                isSystem: true,
+                channelEventKind: kind,
+                channelMemberCount: resolvedMemberCount
+            ),
+            for: .channel(channelID)
+        )
     }
 
     private func append(

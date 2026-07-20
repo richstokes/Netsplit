@@ -179,6 +179,7 @@ struct NetsplitApp: App {
         WindowGroup {
             ContentView(state: state)
                 .frame(minWidth: 920, minHeight: 620)
+                .preferredColorScheme(state.applicationAppearance.colorScheme)
                 .onAppear {
                     appDelegate.state = state
                     DispatchQueue.main.async {

@@ -711,6 +711,20 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Chat Appearance") {
+                Picker("Theme", selection: $state.applicationAppearance) {
+                    ForEach(IRCApplicationAppearance.allCases) { appearance in
+                        Text(appearance.label).tag(appearance)
+                    }
+                }
+                Picker("Message spacing", selection: $state.messageSpacing) {
+                    ForEach(IRCMessageSpacing.allCases) { spacing in
+                        Text(spacing.label).tag(spacing)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Toggle("Use distinct nickname colors", isOn: $state.usesColoredNicknames)
+                Toggle("Use monospace for server messages", isOn: $state.usesMonospacedServerMessages)
+
                 HStack {
                     Text("Interface text size")
                     Spacer()
@@ -734,6 +748,22 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Channel Layout") {
+                Toggle("Show member list by default", isOn: $state.showsMemberList)
+                Text("This also remembers changes made with the toolbar button or Command-B.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Channel Events") {
+                Picker("Show joins, parts, quits, nickname, topic, and mode changes", selection: $state.channelEventVisibility) {
+                    ForEach(IRCChannelEventVisibility.allCases) { visibility in
+                        Text(visibility.label).tag(visibility)
+                    }
+                }
+                Text(channelEventHelpText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Links") {
                 Toggle("Warn before opening links", isOn: $state.warnBeforeOpeningLinks)
                 Text("Links open in your default browser. The warning can help protect you from deceptive or malicious content shared in chat.")
@@ -742,7 +772,19 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 450)
+        .frame(width: 520, height: 680)
         .padding()
+        .preferredColorScheme(state.applicationAppearance.colorScheme)
+    }
+
+    private var channelEventHelpText: String {
+        switch state.channelEventVisibility {
+        case .alwaysShow:
+            return "Shows routine activity in every channel. Failed joins and moderation events are always shown."
+        case .hideInBusyChannels:
+            return "Hides routine activity in channels with \(IRCChannelEventVisibility.busyChannelMemberThreshold) or more members. Failed joins and moderation events are always shown."
+        case .alwaysHide:
+            return "Hides routine activity in every channel. Failed joins and moderation events are always shown."
+        }
     }
 }
