@@ -304,9 +304,23 @@ enum IRCMessageTextRenderer {
         return "\(message.sender) \(message.text)"
     }
 
-    static func linkifiedText(for message: IRCMessage) -> AttributedString {
-        let text = displayText(for: message)
-        var attributedText = AttributedString(text)
+    static func plainText(_ text: String) -> String {
+        IRCFormattingParser.parse(text).plainText
+    }
+
+    static func plainDisplayText(for message: IRCMessage) -> String {
+        plainText(displayText(for: message))
+    }
+
+    static func linkifiedText(
+        for message: IRCMessage,
+        rendersIRCFormatting: Bool = false
+    ) -> AttributedString {
+        let parsed = IRCFormattingParser.parse(displayText(for: message))
+        let text = parsed.plainText
+        var attributedText = rendersIRCFormatting
+            ? parsed.attributedText
+            : AttributedString(text)
         if let linkDetector {
             let fullRange = NSRange(text.startIndex..., in: text)
             for match in linkDetector.matches(in: text, range: fullRange) {
@@ -334,18 +348,225 @@ enum IRCMessageTextRenderer {
     }
 }
 
+private enum IRCFormattingParser {
+    struct Result {
+        let plainText: String
+        let attributedText: AttributedString
+    }
+
+    private struct Style: Equatable {
+        var isBold = false
+        var isItalic = false
+        var isUnderlined = false
+        var isStruckThrough = false
+        var isMonospaced = false
+        var isReversed = false
+        var foregroundRGB: UInt32?
+        var backgroundRGB: UInt32?
+    }
+
+    private struct Segment {
+        var text: String
+        let style: Style
+    }
+
+    private static let bold: Unicode.Scalar = "\u{02}"
+    private static let color: Unicode.Scalar = "\u{03}"
+    private static let hexadecimalColor: Unicode.Scalar = "\u{04}"
+    private static let monospace: Unicode.Scalar = "\u{11}"
+    private static let reset: Unicode.Scalar = "\u{0F}"
+    private static let reverse: Unicode.Scalar = "\u{16}"
+    private static let italic: Unicode.Scalar = "\u{1D}"
+    private static let strikethrough: Unicode.Scalar = "\u{1E}"
+    private static let underline: Unicode.Scalar = "\u{1F}"
+
+    static func parse(_ rawText: String) -> Result {
+        let scalars = Array(rawText.unicodeScalars)
+        var style = Style()
+        var segments: [Segment] = []
+        var index = 0
+
+        func append(_ scalar: Unicode.Scalar) {
+            let value = String(scalar)
+            if segments.last?.style == style {
+                segments[segments.count - 1].text.append(value)
+            } else {
+                segments.append(Segment(text: value, style: style))
+            }
+        }
+
+        while index < scalars.count {
+            let scalar = scalars[index]
+            switch scalar {
+            case bold:
+                style.isBold.toggle()
+                index += 1
+            case color:
+                index += 1
+                let foreground = parseDecimalColor(in: scalars, index: &index)
+                if let foreground {
+                    style.foregroundRGB = paletteRGB(for: foreground)
+                    if index < scalars.count, scalars[index] == "," {
+                        var backgroundIndex = index + 1
+                        if let background = parseDecimalColor(in: scalars, index: &backgroundIndex) {
+                            index = backgroundIndex
+                            style.backgroundRGB = paletteRGB(for: background)
+                        }
+                    }
+                } else {
+                    style.foregroundRGB = nil
+                    style.backgroundRGB = nil
+                }
+            case hexadecimalColor:
+                index += 1
+                let foreground = parseHexColor(in: scalars, index: &index)
+                if let foreground {
+                    style.foregroundRGB = foreground
+                    if index < scalars.count, scalars[index] == "," {
+                        var backgroundIndex = index + 1
+                        if let background = parseHexColor(in: scalars, index: &backgroundIndex) {
+                            index = backgroundIndex
+                            style.backgroundRGB = background
+                        }
+                    }
+                } else {
+                    style.foregroundRGB = nil
+                    style.backgroundRGB = nil
+                }
+            case monospace:
+                style.isMonospaced.toggle()
+                index += 1
+            case reset:
+                style = Style()
+                index += 1
+            case reverse:
+                style.isReversed.toggle()
+                index += 1
+            case italic:
+                style.isItalic.toggle()
+                index += 1
+            case strikethrough:
+                style.isStruckThrough.toggle()
+                index += 1
+            case underline:
+                style.isUnderlined.toggle()
+                index += 1
+            default:
+                // IRC cannot carry embedded newlines. Strip the remaining C0
+                // controls (including CTCP delimiters and bell) rather than
+                // exposing their placeholder glyphs in the transcript.
+                if scalar.value < 0x20, scalar != "\t" {
+                    index += 1
+                } else {
+                    append(scalar)
+                    index += 1
+                }
+            }
+        }
+
+        let plainText = segments.map(\.text).joined()
+        var attributedText = AttributedString()
+        for segment in segments {
+            var attributedSegment = AttributedString(segment.text)
+            apply(segment.style, to: &attributedSegment)
+            attributedText.append(attributedSegment)
+        }
+        return Result(plainText: plainText, attributedText: attributedText)
+    }
+
+    private static func parseDecimalColor(
+        in scalars: [Unicode.Scalar],
+        index: inout Int
+    ) -> Int? {
+        let start = index
+        var digits = ""
+        while index < scalars.count, index - start < 2, (48...57).contains(scalars[index].value) {
+            digits.append(String(scalars[index]))
+            index += 1
+        }
+        return digits.isEmpty ? nil : Int(digits)
+    }
+
+    private static func parseHexColor(
+        in scalars: [Unicode.Scalar],
+        index: inout Int
+    ) -> UInt32? {
+        guard index + 6 <= scalars.count else { return nil }
+        let digits = scalars[index..<(index + 6)].map(String.init).joined()
+        guard digits.allSatisfy(\.isHexDigit), let value = UInt32(digits, radix: 16) else { return nil }
+        index += 6
+        return value
+    }
+
+    private static func apply(_ style: Style, to text: inout AttributedString) {
+        var intents: InlinePresentationIntent = []
+        if style.isBold { intents.insert(.stronglyEmphasized) }
+        if style.isItalic { intents.insert(.emphasized) }
+        if style.isMonospaced { intents.insert(.code) }
+        if !intents.isEmpty { text.inlinePresentationIntent = intents }
+        if style.isUnderlined { text.underlineStyle = .single }
+        if style.isStruckThrough { text.strikethroughStyle = .single }
+
+        var foreground = style.foregroundRGB.map(color(for:))
+        var background = style.backgroundRGB.map(color(for:))
+        if style.isReversed {
+            if foreground == nil, background == nil {
+                foreground = Color(nsColor: .textBackgroundColor)
+                background = .primary
+            } else {
+                swap(&foreground, &background)
+            }
+        }
+        if let foreground { text.foregroundColor = foreground }
+        if let background { text.backgroundColor = background }
+    }
+
+    nonisolated private static func color(for rgb: UInt32) -> Color {
+        Color(
+            red: Double((rgb >> 16) & 0xFF) / 255,
+            green: Double((rgb >> 8) & 0xFF) / 255,
+            blue: Double(rgb & 0xFF) / 255
+        )
+    }
+
+    private static func paletteRGB(for code: Int) -> UInt32? {
+        guard palette.indices.contains(code) else { return nil }
+        return palette[code]
+    }
+
+    // mIRC's 0–98 palette. Values remain data rather than fixed SwiftUI
+    // Colors so reverse-video formatting can swap foreground/background.
+    private static let palette: [UInt32] = [
+        0xFFFFFF, 0x000000, 0x00007F, 0x009300, 0xFF0000, 0x7F0000, 0x9C009C, 0xFC7F00,
+        0xFFFF00, 0x00FC00, 0x009393, 0x00FFFF, 0x0000FC, 0xFF00FF, 0x7F7F7F, 0xD2D2D2,
+        0x470000, 0x472100, 0x474700, 0x324700, 0x004700, 0x00472C, 0x004747, 0x002747,
+        0x000047, 0x2E0047, 0x470047, 0x47002A, 0x740000, 0x743A00, 0x747400, 0x517400,
+        0x007400, 0x007449, 0x007474, 0x004074, 0x000074, 0x4B0074, 0x740074, 0x740045,
+        0xB50000, 0xB56300, 0xB5B500, 0x7DB500, 0x00B500, 0x00B571, 0x00B5B5, 0x0063B5,
+        0x0000B5, 0x7500B5, 0xB500B5, 0xB5006B, 0xFF0000, 0xFF8C00, 0xFFFF00, 0xB2FF00,
+        0x00FF00, 0x00FFA0, 0x00FFFF, 0x008CFF, 0x0000FF, 0xA500FF, 0xFF00FF, 0xFF0098,
+        0xFF5959, 0xFFB459, 0xFFFF71, 0xCFFF60, 0x6FFF6F, 0x65FFC9, 0x6DFFFF, 0x59B4FF,
+        0x5959FF, 0xC459FF, 0xFF66FF, 0xFF59BC, 0xFF9C9C, 0xFFD39C, 0xFFFF9C, 0xE2FF9C,
+        0x9CFF9C, 0x9CFFDB, 0x9CFFFF, 0x9CD3FF, 0x9C9CFF, 0xDC9CFF, 0xFF9CFF, 0xFF94D3,
+        0x000000, 0x131313, 0x282828, 0x363636, 0x4D4D4D, 0x656565, 0x818181, 0x9F9F9F,
+        0xBCBCBC, 0xE2E2E2, 0xFFFFFF
+    ]
+}
+
 final class IRCMessageTextCache {
     private struct Signature: Equatable {
         let sender: String
         let text: String
         let isSystem: Bool
         let channelLinks: [String]
+        let rendersIRCFormatting: Bool
 
-        init(message: IRCMessage) {
+        init(message: IRCMessage, rendersIRCFormatting: Bool) {
             sender = message.sender
             text = message.text
             isSystem = message.isSystem
             channelLinks = message.channelLinks
+            self.rendersIRCFormatting = rendersIRCFormatting
         }
     }
 
@@ -365,13 +586,19 @@ final class IRCMessageTextCache {
         cache.countLimit = countLimit
     }
 
-    func attributedText(for message: IRCMessage) -> AttributedString {
+    func attributedText(
+        for message: IRCMessage,
+        rendersIRCFormatting: Bool = false
+    ) -> AttributedString {
         let key = message.id as NSUUID
-        let signature = Signature(message: message)
+        let signature = Signature(message: message, rendersIRCFormatting: rendersIRCFormatting)
         if let cached = cache.object(forKey: key), cached.signature == signature {
             return cached.value
         }
-        let value = IRCMessageTextRenderer.linkifiedText(for: message)
+        let value = IRCMessageTextRenderer.linkifiedText(
+            for: message,
+            rendersIRCFormatting: rendersIRCFormatting
+        )
         cache.setObject(Entry(signature: signature, value: value), forKey: key)
         return value
     }
@@ -394,6 +621,47 @@ struct Conversation: Identifiable, Hashable {
     var hasUnread = false
     var hasMention = false
     var mentionRevision = 0
+}
+
+struct IRCServerActivity: Equatable {
+    enum Indicator: Equatable {
+        case unread
+        case mention
+    }
+
+    let unreadConversationCount: Int
+    let mentionConversationCount: Int
+
+    init<S: Sequence>(serverID: UUID, conversations: S) where S.Element == Conversation {
+        var unreadConversationCount = 0
+        var mentionConversationCount = 0
+        for conversation in conversations where conversation.serverID == serverID {
+            if conversation.hasUnread { unreadConversationCount += 1 }
+            if conversation.hasMention { mentionConversationCount += 1 }
+        }
+        self.unreadConversationCount = unreadConversationCount
+        self.mentionConversationCount = mentionConversationCount
+    }
+
+    var hasUnread: Bool { unreadConversationCount > 0 }
+    var hasMention: Bool { mentionConversationCount > 0 }
+
+    var indicator: Indicator? {
+        if hasMention { return .mention }
+        if hasUnread { return .unread }
+        return nil
+    }
+
+    var accessibilityDescription: String? {
+        var values: [String] = []
+        if mentionConversationCount > 0 {
+            values.append("\(mentionConversationCount) \(mentionConversationCount == 1 ? "mention" : "mentions")")
+        }
+        if unreadConversationCount > 0 {
+            values.append("\(unreadConversationCount) unread \(unreadConversationCount == 1 ? "conversation" : "conversations")")
+        }
+        return values.isEmpty ? nil : values.joined(separator: ", ")
+    }
 }
 
 enum IRCMentionPolicy {

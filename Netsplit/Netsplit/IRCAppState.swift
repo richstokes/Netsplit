@@ -48,6 +48,9 @@ final class IRCAppState: ObservableObject {
     @Published var usesMonospacedServerMessages: Bool {
         didSet { UserDefaults.standard.set(usesMonospacedServerMessages, forKey: "usesMonospacedServerMessages") }
     }
+    @Published var rendersIRCFormatting: Bool {
+        didSet { UserDefaults.standard.set(rendersIRCFormatting, forKey: "rendersIRCFormatting") }
+    }
     @Published var channelEventVisibility: IRCChannelEventVisibility {
         didSet { UserDefaults.standard.set(channelEventVisibility.rawValue, forKey: "channelEventVisibility") }
     }
@@ -58,6 +61,7 @@ final class IRCAppState: ObservableObject {
     @Published var showsMemberList: Bool {
         didSet { UserDefaults.standard.set(showsMemberList, forKey: "showsMemberList") }
     }
+    @Published var showsServerChannelPane = true
     @Published private(set) var channels: [Conversation] = []
     @Published private(set) var directMessages: [Conversation] = []
     @Published private(set) var connectionStatuses: [UUID: ConnectionStatus] = [:]
@@ -67,6 +71,7 @@ final class IRCAppState: ObservableObject {
     @Published private var channelListsInProgress: Set<UUID> = []
 
     private var conversations: [UUID: [IRCMessage]] = [:]
+    private var conversationDrafts: [SidebarItem: String] = [:]
     private var channelMembers: [UUID: [ChannelMember]] = [:]
     private var messageUpdateSignals: [UUID: IRCRevisionSignal] = [:]
     private var memberUpdateSignals: [UUID: IRCRevisionSignal] = [:]
@@ -151,6 +156,7 @@ final class IRCAppState: ObservableObject {
         messageSpacing = defaults.string(forKey: "messageSpacing").flatMap(IRCMessageSpacing.init(rawValue:)) ?? .comfortable
         usesColoredNicknames = defaults.object(forKey: "usesColoredNicknames") as? Bool ?? false
         usesMonospacedServerMessages = defaults.object(forKey: "usesMonospacedServerMessages") as? Bool ?? true
+        rendersIRCFormatting = defaults.object(forKey: "rendersIRCFormatting") as? Bool ?? false
         channelEventVisibility = defaults.string(forKey: "channelEventVisibility").flatMap(IRCChannelEventVisibility.init(rawValue:)) ?? .alwaysShow
         showsMemberList = defaults.object(forKey: "showsMemberList") as? Bool ?? true
         let savedTranscriptFontSize = defaults.object(forKey: "transcriptFontSize") as? Double ?? 16
@@ -208,6 +214,10 @@ final class IRCAppState: ObservableObject {
     func toggleMemberList() {
         guard canToggleMemberList else { return }
         showsMemberList.toggle()
+    }
+
+    func toggleServerChannelPane() {
+        showsServerChannelPane.toggle()
     }
 
     func closeActiveSelection() {
@@ -270,6 +280,25 @@ final class IRCAppState: ObservableObject {
 
     func directMessages(for profile: ServerProfile) -> [Conversation] {
         directMessages.filter { $0.serverID == profile.id }
+    }
+
+    func activity(for profile: ServerProfile) -> IRCServerActivity {
+        IRCServerActivity(
+            serverID: profile.id,
+            conversations: channels + directMessages
+        )
+    }
+
+    func draft(for item: SidebarItem) -> String {
+        conversationDrafts[item] ?? ""
+    }
+
+    func setDraft(_ draft: String, for item: SidebarItem) {
+        if draft.isEmpty {
+            conversationDrafts.removeValue(forKey: item)
+        } else {
+            conversationDrafts[item] = draft
+        }
     }
 
     func serverPassword(for profile: ServerProfile) -> String {
@@ -372,6 +401,7 @@ final class IRCAppState: ObservableObject {
         guard let profile = profiles.first(where: { $0.id == directMessage.serverID }) else { return }
         directMessages.removeAll { $0.id == directMessage.id }
         conversations.removeValue(forKey: directMessage.id)
+        conversationDrafts.removeValue(forKey: .directMessage(directMessage.id))
         if selection == .directMessage(directMessage.id) {
             selection = .server(profile.id)
         }
@@ -1955,6 +1985,7 @@ final class IRCAppState: ObservableObject {
     private func removeChannelConversation(_ channel: Conversation) {
         channels.removeAll { $0.id == channel.id }
         conversations.removeValue(forKey: channel.id)
+        conversationDrafts.removeValue(forKey: .channel(channel.id))
         channelTopics.removeValue(forKey: channel.id)
         channelMembers.removeValue(forKey: channel.id)
         pendingChannelMembers.removeValue(forKey: channel.id)
@@ -1991,6 +2022,10 @@ final class IRCAppState: ObservableObject {
             channelTopics.removeValue(forKey: conversationID)
             channelMembers.removeValue(forKey: conversationID)
             pendingChannelMembers.removeValue(forKey: conversationID)
+        }
+        conversationDrafts = conversationDrafts.filter { item, _ in
+            guard let conversationID = conversationID(for: item) else { return true }
+            return !removedConversationIDs.contains(conversationID) && conversationID != serverID
         }
         pendingJoins = pendingJoins.filter { $0.value.serverID != serverID }
         if wasShowingRemovedServer {
@@ -2093,6 +2128,13 @@ final class IRCAppState: ObservableObject {
                 limit: maximumRetainedMessagesPerConversation
             )
             conversations.removeValue(forKey: oldConversation.id)
+            let oldDraftKey = SidebarItem.directMessage(oldConversation.id)
+            let newDraftKey = SidebarItem.directMessage(newConversation.id)
+            if conversationDrafts[newDraftKey]?.isEmpty != false,
+               let oldDraft = conversationDrafts[oldDraftKey] {
+                conversationDrafts[newDraftKey] = oldDraft
+            }
+            conversationDrafts.removeValue(forKey: oldDraftKey)
             directMessages[newIndex].hasUnread = directMessages[newIndex].hasUnread || oldConversation.hasUnread
             directMessages.removeAll { $0.id == oldConversation.id }
             if selection == .directMessage(oldConversation.id) {

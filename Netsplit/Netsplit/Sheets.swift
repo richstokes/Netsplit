@@ -680,6 +680,19 @@ struct SettingsView: View {
     @ObservedObject var state: IRCAppState
 
     var body: some View {
+        TabView {
+            generalSettings
+                .tabItem { Label("General", systemImage: "gearshape") }
+            appearanceSettings
+                .tabItem { Label("Appearance", systemImage: "paintbrush") }
+            safetySettings
+                .tabItem { Label("Safety", systemImage: "shield") }
+        }
+        .frame(width: 560, height: 560)
+        .preferredColorScheme(state.applicationAppearance.colorScheme)
+    }
+
+    private var generalSettings: some View {
         Form {
             Section("Identity") {
                 TextField("Nickname", text: $state.nickname)
@@ -710,6 +723,13 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+        .formStyle(.grouped)
+        .padding(16)
+    }
+
+    private var appearanceSettings: some View {
+        Form {
             Section("Chat Appearance") {
                 Picker("Theme", selection: $state.applicationAppearance) {
                     ForEach(IRCApplicationAppearance.allCases) { appearance in
@@ -748,6 +768,12 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Message Formatting") {
+                Toggle("Render IRC colors and text styles", isOn: $state.rendersIRCFormatting)
+                Text("Off by default. Netsplit always removes raw IRC control codes; turn this on to display sender-provided colors, bold, italics, underlining, and other supported styles.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Channel Layout") {
                 Toggle("Show member list by default", isOn: $state.showsMemberList)
                 Text("This also remembers changes made with the toolbar button or Command-B.")
@@ -764,6 +790,13 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+        .formStyle(.grouped)
+        .padding(16)
+    }
+
+    private var safetySettings: some View {
+        Form {
             Section("Links") {
                 Toggle("Warn before opening links", isOn: $state.warnBeforeOpeningLinks)
                 Text("Links open in your default browser. The warning can help protect you from deceptive or malicious content shared in chat.")
@@ -772,9 +805,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 680)
-        .padding()
-        .preferredColorScheme(state.applicationAppearance.colorScheme)
+        .padding(16)
     }
 
     private var channelEventHelpText: String {

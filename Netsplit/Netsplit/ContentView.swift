@@ -49,7 +49,10 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: Binding(
+            get: { state.showsServerChannelPane ? .all : .detailOnly },
+            set: { state.showsServerChannelPane = $0 != .detailOnly }
+        )) {
             SidebarView(state: state, showAddServer: $showAddServer, editingProfile: $editingProfile)
                 .navigationSplitViewColumnWidth(
                     min: textMetrics.spacing(218),
@@ -66,10 +69,25 @@ struct ContentView: View {
                 }
             }
             .toolbar {
+                ToolbarItemGroup(placement: .navigation) {
+                    Button { state.navigateBack() } label: {
+                        Label("Back", systemImage: "chevron.left")
+                    }
+                    .disabled(!state.canNavigateBack)
+                    .help("Back (⌘[)")
+                    .accessibilityHint("Returns to the previously viewed conversation")
+
+                    Button { state.navigateForward() } label: {
+                        Label("Forward", systemImage: "chevron.right")
+                    }
+                    .disabled(!state.canNavigateForward)
+                    .help("Forward (⌘])")
+                    .accessibilityHint("Moves to the next conversation in navigation history")
+                }
                 ToolbarItemGroup(placement: .primaryAction) {
                     if state.selectedProfile != nil {
                         Button { state.requestChannelListing() } label: {
-                            Label("Browse channels", systemImage: "list.bullet.rectangle")
+                            Label("Browse Channels…", systemImage: "list.bullet.rectangle")
                         }
                         .disabled(!state.canBrowseSelectedChannels)
                         .accessibilityHint("Shows the channel list for the selected server")
@@ -106,6 +124,7 @@ private struct SidebarView: View {
     @Binding var showAddServer: Bool
     @Binding var editingProfile: ServerProfile?
     @State private var listSelection: SidebarItem?
+    @State private var collapsedProfileIDs: Set<UUID> = []
     @Environment(\.ircTextMetrics) private var textMetrics
 
     var body: some View {
@@ -136,47 +155,62 @@ private struct SidebarView: View {
                             }
                     }
 
-                    ForEach(state.channels(for: profile)) { channel in
-                        SidebarChannelLabel(
-                            channel: channel,
-                            isFavorite: state.isFavorite(channel)
-                        )
-                            .accessibilityElement(children: .combine)
-                            .accessibilityLabel(channel.name)
-                            .accessibilityValue(channelAccessibilityValue(channel))
-                            .tag(SidebarItem.channel(channel.id))
-                            .contextMenu {
-                                Button(state.isFavorite(channel) ? "Unfavorite" : "Favorite", systemImage: state.isFavorite(channel) ? "star.slash" : "star") {
-                                    state.toggleFavorite(channel)
+                    if !collapsedProfileIDs.contains(profile.id) {
+                        ForEach(state.channels(for: profile)) { channel in
+                            SidebarChannelLabel(
+                                channel: channel,
+                                isFavorite: state.isFavorite(channel)
+                            )
+                                .accessibilityElement(children: .combine)
+                                .accessibilityLabel(channel.name)
+                                .accessibilityValue(channelAccessibilityValue(channel))
+                                .tag(SidebarItem.channel(channel.id))
+                                .contextMenu {
+                                    Button(state.isFavorite(channel) ? "Unfavorite" : "Favorite", systemImage: state.isFavorite(channel) ? "star.slash" : "star") {
+                                        state.toggleFavorite(channel)
+                                    }
+                                    Divider()
+                                    Button("Leave Channel", systemImage: "rectangle.portrait.and.arrow.right") {
+                                        state.leave(channel)
+                                    }
                                 }
-                                Divider()
-                                Button("Leave Channel", systemImage: "rectangle.portrait.and.arrow.right") {
-                                    state.leave(channel)
-                                }
-                            }
-                    }
+                        }
 
-                    ForEach(state.directMessages(for: profile)) { message in
-                        Label(message.name, systemImage: "person.crop.circle")
-                            .foregroundStyle(message.hasUnread ? .primary : .secondary)
-                            .font(.system(size: textMetrics.size(15), weight: message.hasUnread ? .semibold : .regular))
-                            .padding(.vertical, textMetrics.spacing(1.5))
-                            .tag(SidebarItem.directMessage(message.id))
-                            .accessibilityValue(message.hasUnread ? "Unread messages" : "No unread messages")
-                            .contextMenu {
-                                Button("Mute and Close", systemImage: "speaker.slash") {
-                                    state.muteAndClose(message)
+                        ForEach(state.directMessages(for: profile)) { message in
+                            Label(message.name, systemImage: "person.crop.circle")
+                                .foregroundStyle(message.hasUnread ? .primary : .secondary)
+                                .font(.system(size: textMetrics.size(15), weight: message.hasUnread ? .semibold : .regular))
+                                .padding(.vertical, textMetrics.spacing(1.5))
+                                .tag(SidebarItem.directMessage(message.id))
+                                .accessibilityValue(message.hasUnread ? "Unread messages" : "No unread messages")
+                                .contextMenu {
+                                    Button("Mute and Close", systemImage: "speaker.slash") {
+                                        state.muteAndClose(message)
+                                    }
+                                    Divider()
+                                    Button("Close Conversation", systemImage: "xmark") {
+                                        state.close(message)
+                                    }
                                 }
-                                Divider()
-                                Button("Close Conversation", systemImage: "xmark") {
-                                    state.close(message)
-                                }
-                            }
+                        }
                     }
                 } header: {
-                    Text(profile.name)
-                        .font(.system(size: textMetrics.size(11), weight: .semibold))
-                        .textCase(nil)
+                    SidebarServerHeader(
+                        name: profile.name,
+                        isCollapsible: state.activeProfiles.count > 1,
+                        isCollapsed: collapsedProfileIDs.contains(profile.id),
+                        activity: state.activity(for: profile)
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            if collapsedProfileIDs.contains(profile.id) {
+                                collapsedProfileIDs.remove(profile.id)
+                            } else {
+                                collapsedProfileIDs.insert(profile.id)
+                            }
+                        }
+                    }
+                    .font(.system(size: textMetrics.size(11), weight: .semibold))
+                    .textCase(nil)
                 }
             }
         }
@@ -187,13 +221,23 @@ private struct SidebarView: View {
         }
         .onChange(of: state.selection) { _, newSelection in
             if listSelection != newSelection { listSelection = newSelection }
+            if let selectedProfileID = state.selectedProfile?.id {
+                collapsedProfileIDs.remove(selectedProfileID)
+            }
+        }
+        .onChange(of: state.activeProfiles.map(\.id)) { _, activeProfileIDs in
+            if activeProfileIDs.count <= 1 {
+                collapsedProfileIDs.removeAll()
+            } else {
+                collapsedProfileIDs.formIntersection(activeProfileIDs)
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack(spacing: 10) {
                 Button { showAddServer = true } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless)
-                    .help("Add server")
-                    .accessibilityLabel("Add server")
+                    .help("Add Server…")
+                    .accessibilityLabel("Add Server")
                     .accessibilityHint("Opens the new server profile form")
                 Button { state.showConnections() } label: { Image(systemName: "bolt.horizontal.circle") }
                     .buttonStyle(.borderless)
@@ -219,6 +263,50 @@ private struct SidebarView: View {
         if channel.hasMention { values.append("Mentioned you") }
         if state.isFavorite(channel) { values.append("Favorite") }
         return values.joined(separator: ", ")
+    }
+}
+
+private struct SidebarServerHeader: View {
+    let name: String
+    let isCollapsible: Bool
+    let isCollapsed: Bool
+    let activity: IRCServerActivity
+    let onToggle: () -> Void
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    var body: some View {
+        if isCollapsible {
+            Button(action: onToggle) {
+                HStack(spacing: 5) {
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: textMetrics.size(9), weight: .semibold))
+                        .frame(width: textMetrics.spacing(10))
+                    Text(name)
+                    Spacer(minLength: 0)
+                    if isCollapsed, let indicator = activity.indicator {
+                        Image(systemName: indicator == .mention ? "at.circle.fill" : "circle.fill")
+                            .font(.system(size: textMetrics.size(indicator == .mention ? 10 : 7), weight: .semibold))
+                            .foregroundStyle(indicator == .mention ? Color.accentColor : Color.primary)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(name) server")
+            .accessibilityValue(accessibilityValue)
+            .accessibilityHint(isCollapsed ? "Shows this server's conversations" : "Hides this server's conversations")
+        } else {
+            Text(name)
+        }
+    }
+
+    private var accessibilityValue: String {
+        let disclosureState = isCollapsed ? "Collapsed" : "Expanded"
+        guard isCollapsed, let activityDescription = activity.accessibilityDescription else {
+            return disclosureState
+        }
+        return "\(disclosureState), \(activityDescription)"
     }
 }
 
@@ -335,7 +423,7 @@ private struct ConnectionCenterView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
-                    Button("Add Server", systemImage: "plus") { showAddServer = true }
+                    Button("Add Server…", systemImage: "plus") { showAddServer = true }
                         .buttonStyle(.borderedProminent)
                         .controlSize(textMetrics.scale > 1.15 ? .large : .regular)
                 }
@@ -418,7 +506,7 @@ private struct ServerProfileCard: View {
 
             HStack {
                 Spacer()
-                Button("Edit") { editingProfile = profile }
+                Button("Edit…") { editingProfile = profile }
                     .buttonStyle(.bordered)
                 if state.isActive(profile) {
                     if case .failed = state.status(for: profile) {
@@ -463,7 +551,9 @@ private struct ConversationView: View {
     let selection: SidebarItem
     @State private var draft = ""
     @State private var tabCompletion: RecipientTabCompletion?
+    @State private var commandCompletion: CommandTabCompletion?
     @State private var pendingURL: PendingURL?
+    @State private var showsTopic = false
     @FocusState private var composerFocused: Bool
     @Environment(\.ircTextMetrics) private var textMetrics
 
@@ -487,15 +577,32 @@ private struct ConversationView: View {
                     HStack(spacing: textMetrics.spacing(5)) {
                         Text(subtitle)
                             .fontWeight(.medium)
-                            .fixedSize(horizontal: true, vertical: false)
+                            .lineLimit(1)
                         if let channelTopic {
                             Text("·")
                                 .foregroundStyle(.tertiary)
-                            Text(channelTopic)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                                .layoutPriority(-1)
-                                .help(channelTopic)
+                            Button {
+                                showsTopic.toggle()
+                            } label: {
+                                HStack(spacing: textMetrics.spacing(4)) {
+                                    Text(IRCMessageTextRenderer.plainText(channelTopic))
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                    Image(systemName: "chevron.down")
+                                        .font(.system(size: textMetrics.size(8), weight: .semibold))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .layoutPriority(-1)
+                            .help("View the full channel topic")
+                            .accessibilityLabel("View channel topic")
+                            .accessibilityValue(IRCMessageTextRenderer.plainText(channelTopic))
+                            .popover(isPresented: $showsTopic, arrowEdge: .bottom) {
+                                ChannelTopicPopover(
+                                    topic: channelTopic,
+                                    rendersIRCFormatting: state.rendersIRCFormatting
+                                )
+                            }
                         }
                     }
                     .font(.system(size: textMetrics.size(12)))
@@ -517,6 +624,7 @@ private struct ConversationView: View {
                         selection: selection,
                         usesColoredNicknames: state.usesColoredNicknames,
                         usesMonospacedServerMessages: state.usesMonospacedServerMessages,
+                        rendersIRCFormatting: state.rendersIRCFormatting,
                         messageSpacing: state.messageSpacing,
                         channelEventVisibility: state.channelEventVisibility
                     )
@@ -529,10 +637,10 @@ private struct ConversationView: View {
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .focused($composerFocused)
                             .accessibilityLabel("Message to \(title)")
-                            .accessibilityHint("Type a message. Press Return to send. In commands with a nickname, press Tab to complete the nickname.")
+                            .accessibilityHint("Type one IRC message. Press Return to send or Tab to complete a command or nickname.")
                             .onSubmit(send)
                             .onKeyPress(.tab) {
-                                completeRecipient()
+                                completeComposer()
                                     ? .handled
                                     : .ignored
                             }
@@ -558,15 +666,21 @@ private struct ConversationView: View {
         }
         .onAppear {
             state.markRead(selection)
+            draft = state.draft(for: selection)
             composerFocused = true
         }
         .onChange(of: selection) { _, newSelection in
             state.markRead(newSelection)
             tabCompletion = nil
+            commandCompletion = nil
         }
         .onChange(of: draft) { _, newDraft in
+            state.setDraft(newDraft, for: selection)
             if tabCompletion?.completedDraft != newDraft {
                 tabCompletion = nil
+            }
+            if commandCompletion?.completedDraft != newDraft {
+                commandCompletion = nil
             }
         }
         .environment(\.openURL, OpenURLAction { url in
@@ -612,6 +726,46 @@ private struct ConversationView: View {
         state.send(text, to: selection)
         draft = ""
     }
+
+    private func completeComposer() -> Bool {
+        completeCommand() || completeRecipient()
+    }
+
+    private func completeCommand() -> Bool {
+        guard draft.first == "/" else { return false }
+        let commandStart = draft.index(after: draft.startIndex)
+        guard commandStart <= draft.endIndex,
+              !draft[commandStart...].contains(where: { $0.isWhitespace }) else { return false }
+
+        let commandRange = commandStart..<draft.endIndex
+        if var completion = commandCompletion,
+           completion.completedDraft == draft,
+           !completion.candidates.isEmpty {
+            completion.index = (completion.index + 1) % completion.candidates.count
+            draft.replaceSubrange(commandRange, with: completion.candidates[completion.index].lowercased())
+            completion.completedDraft = draft
+            commandCompletion = completion
+            return true
+        }
+
+        let prefix = draft[commandRange].uppercased()
+        let candidates = Self.supportedCommands.filter { $0.hasPrefix(prefix) }
+        guard let firstCandidate = candidates.first else { return false }
+        draft.replaceSubrange(commandRange, with: firstCandidate.lowercased())
+        commandCompletion = CommandTabCompletion(
+            candidates: candidates,
+            index: 0,
+            completedDraft: draft
+        )
+        return true
+    }
+
+    private static let supportedCommands = [
+        "AWAY", "CTCP", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
+        "MODE", "MOTD", "MSG", "MUTE", "NAMES", "NICK", "NOTICE", "PART",
+        "QUERY", "QUIT", "SHOWMUTES", "SLAP", "TOPIC", "UNMUTE", "VERSION",
+        "WHO", "WHOIS"
+    ]
 
     private func completeRecipient() -> Bool {
         guard isChannel, let context = recipientCompletionContext(in: draft) else { return false }
@@ -686,11 +840,47 @@ private struct ConversationView: View {
     }
 }
 
+private struct ChannelTopicPopover: View {
+    let topic: String
+    let rendersIRCFormatting: Bool
+
+    private var renderedTopic: AttributedString {
+        IRCMessageTextRenderer.linkifiedText(
+            for: IRCMessage(sender: "", text: topic),
+            rendersIRCFormatting: rendersIRCFormatting
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Channel Topic", systemImage: "text.quote")
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+            Text(renderedTopic)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Copy Topic", systemImage: "doc.on.doc") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        IRCMessageTextRenderer.plainText(topic),
+                        forType: .string
+                    )
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 440, alignment: .leading)
+    }
+}
+
 private struct ConversationTranscript: View {
     let state: IRCAppState
     let selection: SidebarItem
     let usesColoredNicknames: Bool
     let usesMonospacedServerMessages: Bool
+    let rendersIRCFormatting: Bool
     let messageSpacing: IRCMessageSpacing
     let channelEventVisibility: IRCChannelEventVisibility
     @ObservedObject private var updates: IRCRevisionSignal
@@ -705,6 +895,7 @@ private struct ConversationTranscript: View {
         selection: SidebarItem,
         usesColoredNicknames: Bool,
         usesMonospacedServerMessages: Bool,
+        rendersIRCFormatting: Bool,
         messageSpacing: IRCMessageSpacing,
         channelEventVisibility: IRCChannelEventVisibility
     ) {
@@ -712,6 +903,7 @@ private struct ConversationTranscript: View {
         self.selection = selection
         self.usesColoredNicknames = usesColoredNicknames
         self.usesMonospacedServerMessages = usesMonospacedServerMessages
+        self.rendersIRCFormatting = rendersIRCFormatting
         self.messageSpacing = messageSpacing
         self.channelEventVisibility = channelEventVisibility
         _updates = ObservedObject(wrappedValue: state.messageUpdates(for: selection))
@@ -735,6 +927,7 @@ private struct ConversationTranscript: View {
                         message: message,
                         usesColoredNicknames: usesColoredNicknames,
                         usesMonospacedServerMessages: usesMonospacedServerMessages,
+                        rendersIRCFormatting: rendersIRCFormatting,
                         messageSpacing: messageSpacing
                     )
                     .id(message.id)
@@ -795,6 +988,12 @@ private struct RecipientCompletionContext {
 
 private struct RecipientTabCompletion {
     let command: String
+    let candidates: [String]
+    var index: Int
+    var completedDraft: String
+}
+
+private struct CommandTabCompletion {
     let candidates: [String]
     var index: Int
     var completedDraft: String
@@ -969,6 +1168,7 @@ private struct MessageRow: View {
     let message: IRCMessage
     let usesColoredNicknames: Bool
     let usesMonospacedServerMessages: Bool
+    let rendersIRCFormatting: Bool
     let messageSpacing: IRCMessageSpacing
     @Environment(\.ircTextMetrics) private var textMetrics
     @Environment(\.colorScheme) private var colorScheme
@@ -1002,8 +1202,8 @@ private struct MessageRow: View {
                     .font(.system(size: textMetrics.size(15), weight: .semibold))
                     .foregroundStyle(nicknameColor)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .frame(minWidth: senderColumnWidth, alignment: .leading)
+                    .truncationMode(.middle)
+                    .frame(width: senderColumnWidth, alignment: .leading)
                     .help(message.sender)
                 Text(linkifiedText)
                     .font(.system(size: textMetrics.bodySize))
@@ -1013,13 +1213,23 @@ private struct MessageRow: View {
         }
         .padding(.vertical, verticalPadding)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(message.timestamp.formatted(date: .omitted, time: .shortened)), \(message.sender): \(message.text)")
+        .accessibilityLabel(accessibilityText)
     }
 
     private static let attributedTextCache = IRCMessageTextCache(countLimit: 5_500)
 
     private var linkifiedText: AttributedString {
-        Self.attributedTextCache.attributedText(for: message)
+        Self.attributedTextCache.attributedText(
+            for: message,
+            rendersIRCFormatting: rendersIRCFormatting
+        )
+    }
+
+    private var accessibilityText: String {
+        let time = message.timestamp.formatted(date: .omitted, time: .shortened)
+        let sender = IRCMessageTextRenderer.plainText(message.sender)
+        let text = IRCMessageTextRenderer.plainText(message.text)
+        return "\(time), \(sender): \(text)"
     }
 
     private var verticalPadding: CGFloat {

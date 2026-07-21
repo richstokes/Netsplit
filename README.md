@@ -1,26 +1,29 @@
 # Overview
 
-During an uncontrolled bout of nostalgia, I thought it might be fun to see what the state of IRC is these days.
+During an _uncontrolled bout of nostalgia_, I thought it might be fun to see what the state of IRC is these days.
 
 I couldn't find a macOS client that I liked, so I built this one.
 
 [<img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83" alt="Download Netsplit on the App Store" height="50">](https://apps.apple.com/us/app/netsplit/id6792029007)
 
-It's 100% free and open source. Contributions welcome, throw me a PR. If changing something graphical, include a screenshot showing what the change is/does.
+It's 100% free and open source. Contributions welcome, throw up a PR. If changing something graphical, include a screenshot showing what the change is/does. Similarly, feel free to open an issue here for bug reports/feature requests.
 
 If you enjoy using Netsplit and want to show your appreciation, [feel free to buy me a coffee](https://buymeacoffee.com/richstokes)!
 
-Open an issue here for bug reports/feature requests.
+## Design Principals
 
-Navigate backward and forward through recently viewed servers, channels, and direct messages with Command-[ and Command-], mouse back/forward buttons, or horizontal trackpad swipes. Closed conversations are skipped automatically.
+Some thoughts/goals I had while making this.
 
-## Development and tests
-
-Open `Netsplit/Netsplit.xcodeproj` and use the shared **Netsplit** scheme. Its
-normal Debug Build action compiles and runs the focused regression suite
-automatically, so no separate test command is required. **Test**
-(Command-U) uses the shared `NetsplitCore` test plan when you want the standard
-Xcode test report. Release archives omit the test bundle.
+- macOS Native app - easily installable via the App Store
+- Tasteful (but opinionated) UI, following modern SwiftUI UI/UX guidelines
+- Accessibility baked in from day one - the app should work well with Voiceover, etc
+- Profiled and Optimized for low resource use
+  - While connected to 7 active servers / 25 channels, memory footprint remained <150MB
+- No telemetry, no phone-home, no ads, no in-app-purchases, no junk
+- Secure-by-default, where possible. Prefer TLS. Option to easily connect via an SSH tunnel
+  - SSH is nice, as many IRC servers reveal the IP address you're connecting from
+- No DCC/filesharing features. I'm just not interested in it, but maybe will add support for it at some point
+- Client-side muting, easily filter out folks you'd rather not see messages from
 
 ## SSH tunneling
 
@@ -47,6 +50,14 @@ Keychain because it may contain passwords.
 Commands are sent 0.5 seconds apart. Netsplit then waits 2 seconds after the
 final command before rejoining retained and favorite channels, giving network
 services time to apply authentication and account changes.
+
+## Development and tests
+
+Open `Netsplit/Netsplit.xcodeproj` and use the shared **Netsplit** scheme. Its
+normal Debug Build action compiles and runs the focused regression suite
+automatically, so no separate test command is required. **Test**
+(Command-U) uses the shared `NetsplitCore` test plan when you want the standard
+Xcode test report. Release archives omit the test bundle.
 
 ## Supported commands
 

@@ -31,8 +31,8 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        // Handle conversation and history shortcuts before AppKit turns
-        // Command-W into Close Window or delivers navigation input elsewhere.
+        // Handle conversation, pane, and history shortcuts before AppKit turns
+        // Command-W into Close Window or delivers shortcut input elsewhere.
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .otherMouseDown, .scrollWheel, .swipe]
         ) { [weak self] event in
@@ -67,6 +67,9 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "w" where state?.canCloseActiveSelection == true:
                 state?.closeActiveSelection()
+                return nil
+            case "e":
+                state?.toggleServerChannelPane()
                 return nil
             case "[":
                 if state?.canNavigateBack == true {
@@ -199,7 +202,7 @@ struct NetsplitApp: App {
                 .disabled(!state.canCloseActiveSelection)
             }
             CommandMenu("Connection") {
-                Button("Browse Channels") {
+                Button("Browse Channels…") {
                     state.requestChannelListing()
                 }
                 .keyboardShortcut("l", modifiers: [.command])
@@ -207,7 +210,20 @@ struct NetsplitApp: App {
                 Button("Show Connections") { state.showConnections() }
                     .keyboardShortcut("k", modifiers: [.command])
             }
+            CommandMenu("Navigate") {
+                Button("Back") { state.navigateBack() }
+                    .keyboardShortcut("[", modifiers: [.command])
+                    .disabled(!state.canNavigateBack)
+                Button("Forward") { state.navigateForward() }
+                    .keyboardShortcut("]", modifiers: [.command])
+                    .disabled(!state.canNavigateForward)
+            }
             CommandGroup(after: .toolbar) {
+                Button(state.showsServerChannelPane ? "Hide Server/Channel Pane" : "Show Server/Channel Pane") {
+                    state.toggleServerChannelPane()
+                }
+                .keyboardShortcut("e", modifiers: [.command])
+                Divider()
                 Button(state.showsMemberList ? "Hide Members" : "Show Members") {
                     state.toggleMemberList()
                 }

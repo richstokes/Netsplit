@@ -192,6 +192,80 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCMessageTextRenderer.displayText(for: event) == "→ Alice joined #swift")
     }
 
+    @Test("IRC formatting codes are stripped by default and rendered only when enabled")
+    func handlesIRCFormattingCodes() throws {
+        let message = IRCMessage(
+            sender: "Alice",
+            text: "\u{03}04red\u{03} plain \u{02}bold\u{02} \u{1D}italic\u{1D} \u{1F}underlined\u{1F}"
+        )
+        let stripped = IRCMessageTextRenderer.linkifiedText(for: message)
+        let rendered = IRCMessageTextRenderer.linkifiedText(for: message, rendersIRCFormatting: true)
+        let expected = "red plain bold italic underlined"
+
+        #expect(String(stripped.characters) == expected)
+        #expect(String(rendered.characters) == expected)
+        #expect(try attributes(for: "red", in: stripped).foregroundColor == nil)
+        #expect(try attributes(for: "red", in: rendered).foregroundColor != nil)
+        #expect(try attributes(for: "bold", in: rendered).inlinePresentationIntent?.contains(.stronglyEmphasized) == true)
+        #expect(try attributes(for: "italic", in: rendered).inlinePresentationIntent?.contains(.emphasized) == true)
+        #expect(try attributes(for: "underlined", in: rendered).underlineStyle != nil)
+    }
+
+    @Test("IRC rendering removes non-formatting control characters")
+    func stripsIRCControlCharacters() {
+        #expect(IRCMessageTextRenderer.plainText("hello\u{07}\u{01}world\u{0F}") == "helloworld")
+    }
+
+    @Test("IRC color formatting preserves commas that do not introduce a background color")
+    func preservesLiteralCommasAfterIRCColors() {
+        #expect(IRCMessageTextRenderer.plainText("\u{03}04, decimal") == ", decimal")
+        #expect(IRCMessageTextRenderer.plainText("\u{04}FF0000, hexadecimal") == ", hexadecimal")
+        #expect(IRCMessageTextRenderer.plainText("\u{03}04,12decimal") == "decimal")
+        #expect(IRCMessageTextRenderer.plainText("\u{04}FF0000,00FF00hexadecimal") == "hexadecimal")
+    }
+
+    @Test("Server activity aggregates unread conversations and mentions")
+    func aggregatesServerActivity() {
+        let serverID = UUID()
+        let activity = IRCServerActivity(serverID: serverID, conversations: [
+            Conversation(name: "#quiet", serverID: serverID),
+            Conversation(name: "#unread", serverID: serverID, hasUnread: true),
+            Conversation(name: "#mention", serverID: serverID, hasUnread: true, hasMention: true),
+            Conversation(name: "#other-server", serverID: UUID(), hasUnread: true, hasMention: true)
+        ])
+
+        #expect(activity.unreadConversationCount == 2)
+        #expect(activity.mentionConversationCount == 1)
+        #expect(activity.hasUnread)
+        #expect(activity.hasMention)
+        #expect(activity.indicator == .mention)
+        #expect(activity.accessibilityDescription == "1 mention, 2 unread conversations")
+    }
+
+    @Test("Server activity uses an unread indicator when there are no mentions")
+    func prioritizesServerActivityIndicators() {
+        let serverID = UUID()
+        let activity = IRCServerActivity(serverID: serverID, conversations: [
+            Conversation(name: "#unread", serverID: serverID, hasUnread: true)
+        ])
+
+        #expect(activity.indicator == .unread)
+        #expect(activity.accessibilityDescription == "1 unread conversation")
+    }
+
+    @Test("Server activity has no summary when every conversation is read")
+    func omitsEmptyServerActivity() {
+        let serverID = UUID()
+        let activity = IRCServerActivity(serverID: serverID, conversations: [
+            Conversation(name: "#quiet", serverID: serverID)
+        ])
+
+        #expect(!activity.hasUnread)
+        #expect(!activity.hasMention)
+        #expect(activity.indicator == nil)
+        #expect(activity.accessibilityDescription == nil)
+    }
+
     @Test("Message text cache invalidates when mutable render content changes")
     func invalidatesCachedMessageText() throws {
         let cache = IRCMessageTextCache(countLimit: 10)
@@ -289,6 +363,23 @@ struct IRCModelsAndPolicyTests {
         #expect(state.showsMemberList == initialValue)
     }
 
+    @Test("Conversation drafts remain separate and clear when emptied")
+    @MainActor
+    func preservesConversationDrafts() {
+        let state = IRCAppState()
+        let first = SidebarItem.server(state.profiles[0].id)
+        let second = SidebarItem.directMessage(UUID())
+
+        state.setDraft("first draft", for: first)
+        state.setDraft("second draft", for: second)
+        #expect(state.draft(for: first) == "first draft")
+        #expect(state.draft(for: second) == "second draft")
+
+        state.setDraft("", for: first)
+        #expect(state.draft(for: first).isEmpty)
+        #expect(state.draft(for: second) == "second draft")
+    }
+
     @Test("Selection history navigates backward, forward, and clears forward branches")
     @MainActor
     func navigatesSelectionHistory() {
@@ -356,5 +447,15 @@ struct IRCModelsAndPolicyTests {
         let stringRange = try #require(match)
         let attributedRange = try #require(Range(stringRange, in: attributedText))
         return attributedText[attributedRange].link
+    }
+
+    private func attributes(
+        for substring: String,
+        in attributedText: AttributedString
+    ) throws -> AttributeContainer {
+        let text = String(attributedText.characters)
+        let stringRange = try #require(text.range(of: substring))
+        let attributedRange = try #require(Range(stringRange, in: attributedText))
+        return attributedText[attributedRange].runs.first?.attributes ?? AttributeContainer()
     }
 }
