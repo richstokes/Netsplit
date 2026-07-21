@@ -932,6 +932,8 @@ private struct ConversationTranscript: View {
                 ForEach(messages) { message in
                     MessageRow(
                         message: message,
+                        state: state,
+                        selection: selection,
                         usesColoredNicknames: usesColoredNicknames,
                         usesMonospacedServerMessages: usesMonospacedServerMessages,
                         rendersIRCFormatting: rendersIRCFormatting,
@@ -1130,22 +1132,12 @@ private struct ChannelMemberRow: View {
             return .handled
         }
         .contextMenu {
-            Button("Message \(member.nickname)", systemImage: "message") {
-                state.startDirectMessage(with: member.nickname, from: selection)
-            }
-            Button("Whois \(member.nickname)", systemImage: "person.text.rectangle") {
-                state.requestWhois(for: member.nickname, from: selection)
-            }
-            Divider()
-            if isMuted {
-                Button("Unmute \(member.nickname)", systemImage: "speaker.wave.2") {
-                    state.unmute(member.nickname, from: selection)
-                }
-            } else {
-                Button("Mute \(member.nickname)", systemImage: "speaker.slash") {
-                    state.mute(member.nickname, from: selection)
-                }
-            }
+            NicknameContextMenu(
+                nickname: member.nickname,
+                isMuted: isMuted,
+                state: state,
+                selection: selection
+            )
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(member.role.map { "\(member.nickname), \($0)" } ?? member.nickname)
@@ -1171,8 +1163,36 @@ private struct ChannelMemberRow: View {
     }
 }
 
+private struct NicknameContextMenu: View {
+    let nickname: String
+    let isMuted: Bool
+    let state: IRCAppState
+    let selection: SidebarItem
+
+    var body: some View {
+        Button("Message \(nickname)", systemImage: "message") {
+            state.startDirectMessage(with: nickname, from: selection)
+        }
+        Button("Whois \(nickname)", systemImage: "person.text.rectangle") {
+            state.requestWhois(for: nickname, from: selection)
+        }
+        Divider()
+        if isMuted {
+            Button("Unmute \(nickname)", systemImage: "speaker.wave.2") {
+                state.unmute(nickname, from: selection)
+            }
+        } else {
+            Button("Mute \(nickname)", systemImage: "speaker.slash") {
+                state.mute(nickname, from: selection)
+            }
+        }
+    }
+}
+
 private struct MessageRow: View {
     let message: IRCMessage
+    let state: IRCAppState
+    let selection: SidebarItem
     let usesColoredNicknames: Bool
     let usesMonospacedServerMessages: Bool
     let rendersIRCFormatting: Bool
@@ -1208,12 +1228,7 @@ private struct MessageRow: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             } else {
-                Text(message.sender)
-                    .font(.system(size: textMetrics.size(15), weight: .semibold))
-                    .foregroundStyle(nicknameColor)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(width: senderColumnWidth, alignment: .leading)
+                interactiveSenderText
                     .onHover { isHovered in
                         isSenderHovered = isHovered
                         if !isHovered { showsFullSender = false }
@@ -1243,6 +1258,31 @@ private struct MessageRow: View {
     }
 
     private static let attributedTextCache = IRCMessageTextCache(countLimit: 5_500)
+
+    @ViewBuilder
+    private var interactiveSenderText: some View {
+        if let nickname = message.interactiveNickname {
+            senderText.contextMenu {
+                NicknameContextMenu(
+                    nickname: nickname,
+                    isMuted: state.isMuted(nickname, from: selection),
+                    state: state,
+                    selection: selection
+                )
+            }
+        } else {
+            senderText
+        }
+    }
+
+    private var senderText: some View {
+        Text(message.sender)
+            .font(.system(size: textMetrics.size(15), weight: .semibold))
+            .foregroundStyle(nicknameColor)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(width: senderColumnWidth, alignment: .leading)
+    }
 
     private var isSenderTruncated: Bool {
         IRCNicknameTruncationPolicy.isTruncated(

@@ -326,6 +326,7 @@ struct IRCMessage: Identifiable, Hashable {
     var text: String
     var timestamp = Date()
     var isSystem = false
+    var isNotice = false
     var channelLinks: [String] = []
     var channelEventKind: IRCChannelEventKind?
     var channelMemberCount: Int?
@@ -333,6 +334,11 @@ struct IRCMessage: Identifiable, Hashable {
 
     var resolvedNicknameColorKey: String {
         nicknameColorKey ?? sender
+    }
+
+    var interactiveNickname: String? {
+        guard !isSystem, !isNotice else { return nil }
+        return nicknameColorKey ?? sender
     }
 }
 

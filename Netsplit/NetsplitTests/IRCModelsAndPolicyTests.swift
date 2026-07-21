@@ -270,11 +270,14 @@ struct IRCModelsAndPolicyTests {
     func preservesNicknameColorIdentity() {
         let ordinary = IRCMessage(sender: "Alice", text: "Hello")
         let action = IRCMessage(sender: "* Alice", text: "waves", nicknameColorKey: "Alice")
-        let notice = IRCMessage(sender: "Alice (notice)", text: "Hello", nicknameColorKey: "Alice")
+        let notice = IRCMessage(sender: "Alice (notice)", text: "Hello", isNotice: true, nicknameColorKey: "Alice")
 
         #expect(ordinary.resolvedNicknameColorKey == "Alice")
         #expect(action.resolvedNicknameColorKey == ordinary.resolvedNicknameColorKey)
         #expect(notice.resolvedNicknameColorKey == ordinary.resolvedNicknameColorKey)
+        #expect(ordinary.interactiveNickname == "Alice")
+        #expect(action.interactiveNickname == "Alice")
+        #expect(notice.interactiveNickname == nil)
     }
 
     @Test("Message rendering links web URLs and every channel occurrence")

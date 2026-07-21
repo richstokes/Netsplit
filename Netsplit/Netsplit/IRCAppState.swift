@@ -1331,14 +1331,14 @@ final class IRCAppState: ObservableObject {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 let channel = channel(named: target, serverID: profile.id)
                 append(
-                    IRCMessage(sender: "\(sender) (notice)", text: text, nicknameColorKey: sender),
+                    IRCMessage(sender: "\(sender) (notice)", text: text, isNotice: true, nicknameColorKey: sender),
                     for: .channel(channel.id),
                     markMention: messageMentionsLocalNickname(text, on: profile)
                 )
             } else if let channel = channelReferencedByNotice(text, serverID: profile.id) {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 append(
-                    IRCMessage(sender: "\(sender) (notice)", text: text, nicknameColorKey: sender),
+                    IRCMessage(sender: "\(sender) (notice)", text: text, isNotice: true, nicknameColorKey: sender),
                     for: .channel(channel.id),
                     markMention: messageMentionsLocalNickname(text, on: profile)
                 )
@@ -1355,6 +1355,7 @@ final class IRCAppState: ObservableObject {
                                 sender: "\(sender) (notice)",
                                 text: text,
                                 isSystem: true,
+                                isNotice: true,
                                 nicknameColorKey: sender
                             ),
                             for: .server(profile.id)
@@ -1366,7 +1367,7 @@ final class IRCAppState: ObservableObject {
                     guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                     let conversation = directMessage(named: sender, serverID: profile.id)
                     append(
-                        IRCMessage(sender: "\(sender) (notice)", text: text, nicknameColorKey: sender),
+                        IRCMessage(sender: "\(sender) (notice)", text: text, isNotice: true, nicknameColorKey: sender),
                         for: .directMessage(conversation.id)
                     )
                 }
