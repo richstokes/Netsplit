@@ -632,7 +632,9 @@ struct ChannelBrowser: View {
                             Button("Join") { join(channel) }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(textMetrics.scale > 1.15 ? .large : .small)
+                                .help("Join channel. Command-click to keep browsing.")
                                 .accessibilityLabel("Join \(channel.name)")
+                                .accessibilityHint("Hold Command while activating to join without closing the channel browser")
                         }
                         .padding(.vertical, textMetrics.spacing(7))
                         .contentShape(Rectangle())
@@ -671,9 +673,26 @@ struct ChannelBrowser: View {
     }
 
     private func join(_ channel: ChannelListing) {
-        state.join(channel)
-        dismiss()
+        let behavior = IRCChannelBrowserJoinBehavior(
+            modifierFlags: NSApp.currentEvent?.modifierFlags ?? []
+        )
+        state.join(channel, selectConversation: behavior.selectsConversation)
+        if !behavior.keepsBrowserOpen {
+            dismiss()
+        }
     }
+}
+
+enum IRCChannelBrowserJoinBehavior: Equatable {
+    case joinAndClose
+    case joinAndKeepBrowsing
+
+    init(modifierFlags: NSEvent.ModifierFlags) {
+        self = modifierFlags.contains(.command) ? .joinAndKeepBrowsing : .joinAndClose
+    }
+
+    var keepsBrowserOpen: Bool { self == .joinAndKeepBrowsing }
+    var selectsConversation: Bool { self == .joinAndClose }
 }
 
 struct SettingsView: View {

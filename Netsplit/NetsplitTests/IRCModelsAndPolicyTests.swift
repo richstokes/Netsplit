@@ -1,9 +1,25 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Netsplit
 
 @Suite("IRC models and state policies")
 struct IRCModelsAndPolicyTests {
+    @Test("Command-click joins channels without closing the channel browser")
+    func choosesChannelBrowserJoinBehavior() {
+        let ordinaryClick = IRCChannelBrowserJoinBehavior(modifierFlags: [])
+        #expect(ordinaryClick == .joinAndClose)
+        #expect(!ordinaryClick.keepsBrowserOpen)
+        #expect(ordinaryClick.selectsConversation)
+
+        let commandClick = IRCChannelBrowserJoinBehavior(modifierFlags: [.command, .shift])
+        #expect(commandClick == .joinAndKeepBrowsing)
+        #expect(commandClick.keepsBrowserOpen)
+        #expect(!commandClick.selectsConversation)
+
+        #expect(IRCChannelBrowserJoinBehavior(modifierFlags: [.option]) == .joinAndClose)
+    }
+
     @Test("System wake restores only active or already-reconnecting sessions")
     func selectsConnectionsToRestoreAfterSleep() {
         #expect(IRCSystemSleepPolicy.shouldRestoreConnection(status: .online, reconnectWasScheduled: false))
@@ -167,12 +183,11 @@ struct IRCModelsAndPolicyTests {
         #expect(notice.resolvedNicknameColorKey == ordinary.resolvedNicknameColorKey)
     }
 
-    @Test("Message rendering links web URLs and every advertised channel occurrence")
+    @Test("Message rendering links web URLs and every channel occurrence")
     func rendersMessageLinks() throws {
         let message = IRCMessage(
             sender: "Alice",
-            text: "See https://example.com, #swift, and #swift; skip ftp://example.com",
-            channelLinks: ["#swift"]
+            text: "See https://example.com, #swift, and #swift; skip ftp://example.com"
         )
         let rendered = IRCMessageTextRenderer.linkifiedText(for: message)
 
@@ -181,6 +196,36 @@ struct IRCModelsAndPolicyTests {
         #expect(try link(for: "#swift", occurrence: 0, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#swift")
         #expect(try link(for: "#swift", occurrence: 1, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#swift")
         #expect(try link(for: "ftp://example.com", occurrence: 0, in: rendered) == nil)
+    }
+
+    @Test("Message rendering recognizes IRC channel types and trims surrounding punctuation")
+    func detectsChannelReferencesInMessages() throws {
+        let message = IRCMessage(
+            sender: "Alice",
+            text: "Try (#swift), &local; +modeless or !safe. Not C++, word#tag, or https://example.com/#fragment"
+        )
+        let rendered = IRCMessageTextRenderer.linkifiedText(for: message)
+
+        for channel in ["#swift", "&local", "+modeless", "!safe"] {
+            #expect(try link(for: channel, occurrence: 0, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == channel)
+        }
+        #expect(try link(for: "word#tag", occurrence: 0, in: rendered) == nil)
+        #expect(try link(for: "C++", occurrence: 0, in: rendered) == nil)
+        #expect(try link(for: "https://example.com/#fragment", occurrence: 0, in: rendered) == URL(string: "https://example.com/#fragment"))
+    }
+
+    @Test("Advertised channel links still handle membership-prefixed WHOIS output")
+    func rendersAdvertisedChannelLinks() throws {
+        let message = IRCMessage(
+            sender: "System",
+            text: "Alice is on: @#operators +#voiced",
+            isSystem: true,
+            channelLinks: ["#operators", "#voiced"]
+        )
+        let rendered = IRCMessageTextRenderer.linkifiedText(for: message)
+
+        #expect(try link(for: "#operators", occurrence: 0, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#operators")
+        #expect(try link(for: "#voiced", occurrence: 0, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#voiced")
     }
 
     @Test("System message rendering preserves generic senders and prefixes event senders")

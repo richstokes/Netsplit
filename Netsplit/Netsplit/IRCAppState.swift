@@ -776,9 +776,14 @@ final class IRCAppState: ObservableObject {
         }
     }
 
-    func join(_ listing: ChannelListing) {
+    func join(_ listing: ChannelListing, selectConversation: Bool = true) {
         guard let profile = selectedProfile else { return }
-        join(listing, on: profile, selectConversation: true, destination: selection ?? .server(profile.id))
+        join(
+            listing,
+            on: profile,
+            selectConversation: selectConversation,
+            destination: selection ?? .server(profile.id)
+        )
     }
 
     func joinChannel(named channelName: String, from item: SidebarItem) {

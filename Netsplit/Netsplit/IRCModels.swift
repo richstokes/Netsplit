@@ -334,17 +334,29 @@ enum IRCMessageTextRenderer {
         }
 
         for channel in message.channelLinks {
-            guard let url = IRCInternalLink.channelURL(for: channel) else { continue }
             var searchStart = text.startIndex
             while searchStart < text.endIndex,
                   let stringRange = text.range(of: channel, range: searchStart..<text.endIndex) {
-                if let attributedRange = Range(stringRange, in: attributedText) {
-                    attributedText[attributedRange].link = url
-                }
+                applyChannelLink(channel, range: stringRange, to: &attributedText)
                 searchStart = stringRange.upperBound
             }
         }
+
+        for reference in IRCChannelReferenceParser.references(in: text) {
+            applyChannelLink(reference.name, range: reference.range, to: &attributedText)
+        }
         return attributedText
+    }
+
+    private static func applyChannelLink(
+        _ channel: String,
+        range stringRange: Range<String.Index>,
+        to attributedText: inout AttributedString
+    ) {
+        guard let url = IRCInternalLink.channelURL(for: channel),
+              let attributedRange = Range(stringRange, in: attributedText),
+              !attributedText[attributedRange].runs.contains(where: { $0.link != nil }) else { return }
+        attributedText[attributedRange].link = url
     }
 }
 
@@ -716,6 +728,63 @@ enum IRCWhoisChannelParser {
         }
         guard let first = channel.first, "#&+!".contains(first) else { return nil }
         return channel
+    }
+}
+
+struct IRCChannelReference {
+    let name: String
+    let range: Range<String.Index>
+}
+
+enum IRCChannelReferenceParser {
+    private static let prefixes = "#&+!"
+    private static let trailingPunctuation = ".;:!?)]}>\"'”’"
+    private static let disallowedLeadingNeighbors = "-_[]\\`^{|}/@#&+!"
+
+    static func references(in text: String) -> [IRCChannelReference] {
+        var references: [IRCChannelReference] = []
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            guard prefixes.contains(text[index]), hasLeadingBoundary(at: index, in: text) else {
+                index = text.index(after: index)
+                continue
+            }
+
+            let contentStart = text.index(after: index)
+            var rawEnd = contentStart
+            while rawEnd < text.endIndex, isChannelCharacter(text[rawEnd]) {
+                rawEnd = text.index(after: rawEnd)
+            }
+
+            var channelEnd = rawEnd
+            while channelEnd > contentStart {
+                let previous = text.index(before: channelEnd)
+                guard trailingPunctuation.contains(text[previous]) else { break }
+                channelEnd = previous
+            }
+
+            if channelEnd > contentStart {
+                let range = index..<channelEnd
+                references.append(IRCChannelReference(name: String(text[range]), range: range))
+            }
+            index = rawEnd > index ? rawEnd : text.index(after: index)
+        }
+        return references
+    }
+
+    private static func hasLeadingBoundary(at index: String.Index, in text: String) -> Bool {
+        guard index > text.startIndex else { return true }
+        let previous = text[text.index(before: index)]
+        return !previous.isLetter
+            && !previous.isNumber
+            && !disallowedLeadingNeighbors.contains(previous)
+    }
+
+    private static func isChannelCharacter(_ character: Character) -> Bool {
+        !character.isWhitespace
+            && character != ","
+            && !character.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
     }
 }
 
