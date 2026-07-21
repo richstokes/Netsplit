@@ -5,6 +5,32 @@ import Testing
 
 @Suite("IRC models and state policies")
 struct IRCModelsAndPolicyTests {
+    @Test("Global service notices route to the server transcript")
+    func routesGlobalNotices() {
+        let mapping = IRCCaseMapping.rfc1459
+
+        #expect(IRCNoticeRoutingPolicy.fallbackDestination(
+            sender: "Global",
+            prefix: "Global!service@irc.example.org",
+            caseMapping: mapping
+        ) == .server)
+        #expect(IRCNoticeRoutingPolicy.fallbackDestination(
+            sender: "global",
+            prefix: "global!service@irc.example.org",
+            caseMapping: mapping
+        ) == .server)
+        #expect(IRCNoticeRoutingPolicy.fallbackDestination(
+            sender: "Alice",
+            prefix: "Alice!user@example.org",
+            caseMapping: mapping
+        ) == .directMessage)
+        #expect(IRCNoticeRoutingPolicy.fallbackDestination(
+            sender: "irc.example.org",
+            prefix: "irc.example.org",
+            caseMapping: mapping
+        ) == .server)
+    }
+
     @Test("Command-click joins channels without closing the channel browser")
     func choosesChannelBrowserJoinBehavior() {
         let ordinaryClick = IRCChannelBrowserJoinBehavior(modifierFlags: [])

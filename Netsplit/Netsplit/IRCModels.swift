@@ -82,6 +82,24 @@ enum IRCChannelEventKind: Hashable {
     case mode
 }
 
+enum IRCNoticeRoutingPolicy {
+    enum Destination: Equatable {
+        case server
+        case directMessage
+    }
+
+    static func fallbackDestination(
+        sender: String,
+        prefix: String?,
+        caseMapping: IRCCaseMapping
+    ) -> Destination {
+        guard prefix?.contains("!") == true else { return .server }
+        return caseMapping.normalize(sender) == caseMapping.normalize("Global")
+            ? .server
+            : .directMessage
+    }
+}
+
 struct ServerProfile: Identifiable, Codable, Hashable {
     var id = UUID()
     var name: String

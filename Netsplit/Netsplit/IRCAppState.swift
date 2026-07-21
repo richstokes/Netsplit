@@ -1340,15 +1340,34 @@ final class IRCAppState: ObservableObject {
                     for: .channel(channel.id),
                     markMention: messageMentionsLocalNickname(text, on: profile)
                 )
-            } else if wire.prefix?.contains("!") == true,
-                      !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
-                let conversation = directMessage(named: sender, serverID: profile.id)
-                append(
-                    IRCMessage(sender: "\(sender) (notice)", text: text, nicknameColorKey: sender),
-                    for: .directMessage(conversation.id)
-                )
             } else {
-                appendSystem(text, for: .server(profile.id))
+                switch IRCNoticeRoutingPolicy.fallbackDestination(
+                    sender: sender,
+                    prefix: wire.prefix,
+                    caseMapping: caseMappings[profile.id] ?? .rfc1459
+                ) {
+                case .server:
+                    if wire.prefix?.contains("!") == true {
+                        append(
+                            IRCMessage(
+                                sender: "\(sender) (notice)",
+                                text: text,
+                                isSystem: true,
+                                nicknameColorKey: sender
+                            ),
+                            for: .server(profile.id)
+                        )
+                    } else {
+                        appendSystem(text, for: .server(profile.id))
+                    }
+                case .directMessage:
+                    guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
+                    let conversation = directMessage(named: sender, serverID: profile.id)
+                    append(
+                        IRCMessage(sender: "\(sender) (notice)", text: text, nicknameColorKey: sender),
+                        for: .directMessage(conversation.id)
+                    )
+                }
             }
         case "PRIVMSG":
             guard let target = wire.parameters.first, let text = wire.trailing else { return }
