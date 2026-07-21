@@ -1170,6 +1170,8 @@ private struct MessageRow: View {
     let usesMonospacedServerMessages: Bool
     let rendersIRCFormatting: Bool
     let messageSpacing: IRCMessageSpacing
+    @State private var isSenderHovered = false
+    @State private var showsFullSender = false
     @Environment(\.ircTextMetrics) private var textMetrics
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1204,7 +1206,23 @@ private struct MessageRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(width: senderColumnWidth, alignment: .leading)
-                    .help(message.sender)
+                    .onHover { isHovered in
+                        isSenderHovered = isHovered
+                        if !isHovered { showsFullSender = false }
+                    }
+                    .task(id: isSenderHovered) {
+                        guard isSenderHovered, isSenderTruncated else { return }
+                        try? await Task.sleep(for: .milliseconds(400))
+                        guard !Task.isCancelled, isSenderHovered else { return }
+                        showsFullSender = true
+                    }
+                    .popover(isPresented: $showsFullSender, arrowEdge: .bottom) {
+                        Text(message.sender)
+                            .font(.system(size: textMetrics.size(13), weight: .medium))
+                            .textSelection(.enabled)
+                            .padding(.horizontal, textMetrics.spacing(11))
+                            .padding(.vertical, textMetrics.spacing(7))
+                    }
                 Text(linkifiedText)
                     .font(.system(size: textMetrics.bodySize))
                     .foregroundStyle(.primary)
@@ -1217,6 +1235,14 @@ private struct MessageRow: View {
     }
 
     private static let attributedTextCache = IRCMessageTextCache(countLimit: 5_500)
+
+    private var isSenderTruncated: Bool {
+        IRCNicknameTruncationPolicy.isTruncated(
+            message.sender,
+            availableWidth: senderColumnWidth,
+            fontSize: textMetrics.size(15)
+        )
+    }
 
     private var linkifiedText: AttributedString {
         Self.attributedTextCache.attributedText(
@@ -1272,6 +1298,19 @@ private struct MessageRow: View {
         Color(red: 0.988, green: 0.647, blue: 0.647)
     ]
 
+}
+
+enum IRCNicknameTruncationPolicy {
+    static func isTruncated(
+        _ nickname: String,
+        availableWidth: CGFloat,
+        fontSize: CGFloat
+    ) -> Bool {
+        guard availableWidth > 0, !nickname.isEmpty else { return false }
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let renderedWidth = (nickname as NSString).size(withAttributes: [.font: font]).width
+        return renderedWidth.rounded(.up) > availableWidth.rounded(.down)
+    }
 }
 
 private struct PendingURL: Identifiable {

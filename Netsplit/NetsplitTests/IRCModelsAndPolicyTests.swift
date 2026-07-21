@@ -5,6 +5,25 @@ import Testing
 
 @Suite("IRC models and state policies")
 struct IRCModelsAndPolicyTests {
+    @Test("Nickname hover details appear only when the sender column truncates")
+    func detectsTruncatedNicknames() {
+        #expect(!IRCNicknameTruncationPolicy.isTruncated(
+            "windoxDCC",
+            availableWidth: 116,
+            fontSize: 15
+        ))
+        #expect(IRCNicknameTruncationPolicy.isTruncated(
+            "[EWG]-B-MONTY",
+            availableWidth: 116,
+            fontSize: 15
+        ))
+        #expect(!IRCNicknameTruncationPolicy.isTruncated(
+            "[EWG]-B-MONTY",
+            availableWidth: 160,
+            fontSize: 15
+        ))
+    }
+
     @Test("Global service notices route to the server transcript")
     func routesGlobalNotices() {
         let mapping = IRCCaseMapping.rfc1459
