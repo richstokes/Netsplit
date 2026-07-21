@@ -217,6 +217,24 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     ]
 }
 
+enum IRCServerOrdering {
+    static func alphabetically(_ profiles: [ServerProfile]) -> [ServerProfile] {
+        profiles.sorted { lhs, rhs in
+            let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+
+            let hostnameOrder = lhs.hostname.localizedStandardCompare(rhs.hostname)
+            if hostnameOrder != .orderedSame {
+                return hostnameOrder == .orderedAscending
+            }
+
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
+}
+
 enum IRCCaseMapping: String {
     case ascii
     case rfc1459

@@ -4,6 +4,18 @@ import Testing
 
 @Suite("Server profile persistence")
 struct ServerProfileTests {
+    @Test("Servers are ordered alphabetically for the sidebar")
+    func ordersServersForSidebar() {
+        let names = ["Rizon", "ircNet", "Freenode", "Libera.Chat", "Server 10", "server 2", "alpha"]
+        let profiles = names.map {
+            ServerProfile(name: $0, hostname: "irc.\($0).example", port: 6697, useTLS: true)
+        }
+
+        #expect(IRCServerOrdering.alphabetically(profiles).map(\.name) == [
+            "alpha", "Freenode", "ircNet", "Libera.Chat", "Rizon", "server 2", "Server 10"
+        ])
+    }
+
     @Test("Decodes legacy profiles with safe defaults for newer fields")
     func decodesLegacyProfile() throws {
         let json = Data(#"{"name":"Legacy","hostname":"irc.example.com","port":6697,"useTLS":true}"#.utf8)

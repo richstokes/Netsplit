@@ -171,7 +171,9 @@ final class IRCAppState: ObservableObject {
     }
 
     var activeProfiles: [ServerProfile] {
-        profiles.filter { connections[$0.id] != nil }
+        IRCServerOrdering.alphabetically(
+            profiles.filter { connections[$0.id] != nil }
+        )
     }
 
     var selectedProfile: ServerProfile? {
