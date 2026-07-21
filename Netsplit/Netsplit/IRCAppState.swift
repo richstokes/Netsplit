@@ -1324,7 +1324,7 @@ final class IRCAppState: ObservableObject {
 
             // IRC notices are delivered as a distinct message type, but they
             // still belong beside the conversation they address. Server notices
-            // have no user mask and remain in the server log.
+            // and recognized network service broadcasts remain in the server log.
             if isChannelName(target) {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 let channel = channel(named: target, serverID: profile.id)
