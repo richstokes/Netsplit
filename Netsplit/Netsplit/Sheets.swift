@@ -102,6 +102,7 @@ struct ServerProfileEditor: View {
             .padding(.vertical, 22)
 
             Divider()
+                .ircDivider()
 
             ScrollView {
                 VStack(spacing: 18) {
@@ -116,6 +117,7 @@ struct ServerProfileEditor: View {
             .accessibilityLabel("Server profile settings")
 
             Divider()
+                .ircDivider()
 
             HStack {
                 if let profileToEdit, profileToEdit.isBuiltIn, profileToEdit.isPresetModified == true {
@@ -551,7 +553,7 @@ struct ChannelBrowser: View {
                             .accessibilityAddTraits(.isHeader)
                         Text(profile?.name ?? "IRC network")
                             .font(.system(size: textMetrics.size(13)))
-                            .foregroundStyle(.secondary)
+                            .ircSecondaryText()
                     }
                     Spacer()
                     Button("Done") { dismiss() }
@@ -561,7 +563,7 @@ struct ChannelBrowser: View {
 
                 HStack(spacing: textMetrics.spacing(12)) {
                     Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
+                        .ircSecondaryText()
                         .accessibilityHidden(true)
                     TextField("Search channel names and topics", text: $search)
                         .font(.system(size: textMetrics.size(14)))
@@ -572,7 +574,7 @@ struct ChannelBrowser: View {
                             search = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
+                                .ircSecondaryText()
                         }
                         .buttonStyle(.plain)
                         .help("Clear search")
@@ -581,7 +583,7 @@ struct ChannelBrowser: View {
                 }
                 .padding(.horizontal, textMetrics.spacing(11))
                 .padding(.vertical, textMetrics.spacing(8))
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .ircFieldBackground(in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(isLoading
@@ -590,13 +592,14 @@ struct ChannelBrowser: View {
                             ? "\(availableChannels.count) live channels"
                             : "\(results.count) of \(availableChannels.count) channels"))
                         .font(.system(size: textMetrics.size(12), weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .ircSecondaryText()
                         .accessibilityAddTraits(.updatesFrequently)
                 }
             }
             .padding(textMetrics.spacing(20))
 
             Divider()
+                .ircDivider()
 
             Group {
                 if !results.isEmpty {
@@ -614,7 +617,7 @@ struct ChannelBrowser: View {
                                     .font(.system(size: textMetrics.size(16), weight: .semibold))
                                 Text(channel.topic.isEmpty ? "No topic" : channel.topic)
                                     .font(.system(size: textMetrics.size(12)))
-                                    .foregroundStyle(.secondary)
+                                    .ircSecondaryText()
                                     .lineLimit(2)
                                     .help(channel.topic)
                             }
@@ -623,10 +626,9 @@ struct ChannelBrowser: View {
 
                             Label("\(channel.userCount)", systemImage: "person.2")
                                 .font(.system(size: textMetrics.size(11), design: .monospaced))
-                                .foregroundStyle(.secondary)
                                 .padding(.horizontal, textMetrics.spacing(8))
                                 .padding(.vertical, textMetrics.spacing(5))
-                                .background(.quaternary, in: Capsule())
+                                .ircBadgeStyle()
                                 .accessibilityLabel("\(channel.userCount) users")
 
                             Button("Join") { join(channel) }

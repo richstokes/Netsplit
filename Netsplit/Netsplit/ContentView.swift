@@ -505,6 +505,7 @@ private struct ServerProfileCard: View {
             .foregroundStyle(.secondary)
 
             Divider()
+                .ircDivider()
 
             HStack {
                 Spacer()
@@ -623,6 +624,7 @@ private struct ConversationView: View {
             .ircBarBackground()
 
             Divider()
+                .ircDivider()
 
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
@@ -667,6 +669,7 @@ private struct ConversationView: View {
                 }
                 if isChannel && state.showsMemberList {
                     Divider()
+                        .ircDivider()
                     ChannelMemberList(state: state, selection: selection)
                 }
             }
@@ -1052,6 +1055,7 @@ private struct ChannelMemberList: View {
                 .padding(.bottom, textMetrics.spacing(10))
 
             Divider()
+                .ircDivider()
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {

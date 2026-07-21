@@ -250,6 +250,34 @@ private struct IRCBadgeStyleModifier: ViewModifier {
     }
 }
 
+private struct IRCSecondaryTextModifier: ViewModifier {
+    @Environment(\.ircThemePalette) private var palette
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let palette {
+            content.foregroundStyle(palette.secondaryText)
+        } else {
+            content.foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct IRCDividerModifier: ViewModifier {
+    @Environment(\.ircThemePalette) private var palette
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let palette {
+            content
+                .overlay(palette.border)
+                .opacity(0.65)
+        } else {
+            content
+        }
+    }
+}
+
 private struct IRCEmphasizedCalloutModifier<S: InsettableShape>: ViewModifier {
     @Environment(\.ircThemePalette) private var palette
     let shape: S
@@ -319,6 +347,14 @@ extension View {
 
     func ircBadgeStyle() -> some View {
         modifier(IRCBadgeStyleModifier())
+    }
+
+    func ircSecondaryText() -> some View {
+        modifier(IRCSecondaryTextModifier())
+    }
+
+    func ircDivider() -> some View {
+        modifier(IRCDividerModifier())
     }
 
     func ircEmphasizedCallout<S: InsettableShape>(in shape: S) -> some View {

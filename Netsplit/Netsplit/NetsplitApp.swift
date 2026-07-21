@@ -8,6 +8,11 @@
 import AppKit
 import SwiftUI
 
+private enum AppSceneID {
+    // SwiftUI uses this identity for persisted window state. Keep it stable.
+    static let mainWindow = "main"
+}
+
 final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
     weak var state: IRCAppState?
     weak var mainWindow: NSWindow?
@@ -179,7 +184,7 @@ struct NetsplitApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: AppSceneID.mainWindow) {
             ContentView(state: state)
                 .frame(minWidth: 920, minHeight: 620)
                 .ircApplicationTheme(state.applicationAppearance)
