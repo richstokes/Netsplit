@@ -708,7 +708,7 @@ struct SettingsView: View {
                 .tabItem { Label("Safety", systemImage: "shield") }
         }
         .frame(width: 560, height: 560)
-        .preferredColorScheme(state.applicationAppearance.colorScheme)
+        .ircApplicationTheme(state.applicationAppearance)
     }
 
     private var generalSettings: some View {
@@ -752,7 +752,19 @@ struct SettingsView: View {
             Section("Chat Appearance") {
                 Picker("Theme", selection: $state.applicationAppearance) {
                     ForEach(IRCApplicationAppearance.allCases) { appearance in
-                        Text(appearance.label).tag(appearance)
+                        Group {
+                            if appearance.palette == nil {
+                                Text(appearance.label)
+                            } else {
+                                Label {
+                                    Text(appearance.label)
+                                } icon: {
+                                    Image(systemName: "circle.fill")
+                                        .foregroundStyle(appearance.previewColor)
+                                }
+                            }
+                        }
+                        .tag(appearance)
                     }
                 }
                 Picker("Message spacing", selection: $state.messageSpacing) {

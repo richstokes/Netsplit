@@ -215,6 +215,7 @@ private struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .ircSidebarBackground()
         .onAppear { listSelection = state.selection }
         .onChange(of: listSelection) { _, newSelection in
             DispatchQueue.main.async { state.selection = newSelection }
@@ -253,7 +254,7 @@ private struct SidebarView: View {
             .font(.system(size: textMetrics.size(13)))
             .padding(.horizontal, textMetrics.spacing(13))
             .frame(height: textMetrics.spacing(38))
-            .background(.bar)
+            .ircBarBackground()
         }
     }
 
@@ -441,7 +442,7 @@ private struct ConnectionCenterView: View {
             .padding(textMetrics.spacing(32))
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .ircWindowBackground()
     }
 }
 
@@ -450,6 +451,7 @@ private struct ServerProfileCard: View {
     @ObservedObject var state: IRCAppState
     @Binding var editingProfile: ServerProfile?
     @Environment(\.ircTextMetrics) private var textMetrics
+    @Environment(\.ircThemePalette) private var themePalette
 
     private var statusText: String {
         if state.isWaitingToReconnect(profile) { return "Reconnecting" }
@@ -527,10 +529,15 @@ private struct ServerProfileCard: View {
         }
         .padding(textMetrics.spacing(18))
         .frame(maxWidth: .infinity, minHeight: textMetrics.spacing(168), alignment: .topLeading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .ircControlBackground(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            if let themePalette {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(themePalette.border, lineWidth: 1)
+            } else {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            }
         }
         .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
         .contextMenu {
@@ -613,7 +620,7 @@ private struct ConversationView: View {
             }
             .padding(.horizontal, textMetrics.spacing(22))
             .padding(.vertical, textMetrics.spacing(13))
-            .background(.bar)
+            .ircBarBackground()
 
             Divider()
 
@@ -634,7 +641,7 @@ private struct ConversationView: View {
                             .textFieldStyle(.plain).lineLimit(1...5)
                             .padding(.horizontal, textMetrics.spacing(12))
                             .padding(.vertical, textMetrics.spacing(9))
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .ircFieldBackground(in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .focused($composerFocused)
                             .accessibilityLabel("Message to \(title)")
                             .accessibilityHint("Type one IRC message. Press Return to send or Tab to complete a command or nickname.")
@@ -656,7 +663,7 @@ private struct ConversationView: View {
                     }
                     .padding(.horizontal, textMetrics.spacing(20))
                     .padding(.vertical, textMetrics.spacing(14))
-                    .background(.bar)
+                    .ircBarBackground()
                 }
                 if isChannel && state.showsMemberList {
                     Divider()
@@ -939,6 +946,7 @@ private struct ConversationTranscript: View {
             .accessibilityAddTraits(.updatesFrequently)
         }
         .defaultScrollAnchor(.bottom)
+        .ircCustomWindowBackground()
         .scrollPosition(id: $scrollPosition, anchor: .bottom)
         .accessibilityLabel("Conversation messages")
         .onChange(of: scrollPosition) { _, newPosition in
@@ -1062,7 +1070,7 @@ private struct ChannelMemberList: View {
             idealWidth: textMetrics.spacing(238),
             maxWidth: textMetrics.spacing(310)
         )
-        .background(.bar)
+        .ircBarBackground()
     }
 }
 
@@ -1098,10 +1106,9 @@ private struct ChannelMemberRow: View {
             if let role = member.role {
                 Text(role)
                     .font(.system(size: textMetrics.size(10), weight: .medium))
-                    .foregroundStyle(.secondary)
                     .padding(.horizontal, textMetrics.spacing(6))
                     .padding(.vertical, textMetrics.spacing(2))
-                    .background(.quaternary, in: Capsule())
+                    .ircBadgeStyle()
             }
         }
         .padding(.horizontal, textMetrics.spacing(12))
@@ -1174,6 +1181,7 @@ private struct MessageRow: View {
     @State private var showsFullSender = false
     @Environment(\.ircTextMetrics) private var textMetrics
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.ircThemePalette) private var themePalette
 
     private var timestampFontSize: CGFloat { textMetrics.size(11) }
     private var timestampColumnWidth: CGFloat { textMetrics.spacing(64) }
@@ -1265,7 +1273,8 @@ private struct MessageRow: View {
 
     private var nicknameColor: Color {
         guard usesColoredNicknames else { return .accentColor }
-        let palette = colorScheme == .dark ? Self.darkNicknamePalette : Self.lightNicknamePalette
+        let palette = themePalette?.nicknameColors
+            ?? (colorScheme == .dark ? Self.darkNicknamePalette : Self.lightNicknamePalette)
         var hash: UInt64 = 1_469_598_103_934_665_603
         for scalar in message.resolvedNicknameColorKey.lowercased().unicodeScalars {
             hash ^= UInt64(scalar.value)
@@ -1323,6 +1332,7 @@ private struct LinkWarningView: View {
     let onCancel: () -> Void
     let onOpen: (Bool) -> Void
     @State private var dontShowAgain = false
+    @Environment(\.ircThemePalette) private var themePalette
 
     private var destination: String {
         url.host(percentEncoded: false) ?? url.absoluteString
@@ -1340,7 +1350,7 @@ private struct LinkWarningView: View {
                         .font(.title2.weight(.semibold))
                         .accessibilityAddTraits(.isHeader)
                     Text("Links in IRC messages can lead to deceptive or malicious content. Only continue if you trust the sender and destination.")
-                        .foregroundStyle(.secondary)
+                        .ircWarningSecondaryText()
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1350,13 +1360,13 @@ private struct LinkWarningView: View {
                     .font(.headline)
                 Text(url.absoluteString)
                     .font(.callout.monospaced())
-                    .foregroundStyle(.secondary)
+                    .modifier(LinkWarningURLTextModifier())
                     .textSelection(.enabled)
                     .lineLimit(3)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .ircEmphasizedCallout(in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             Toggle("Don’t show this warning again", isOn: $dontShowAgain)
 
@@ -1364,13 +1374,36 @@ private struct LinkWarningView: View {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel)
                     .keyboardShortcut(.cancelAction)
-                Button("Open Link") { onOpen(dontShowAgain) }
+                if let themePalette {
+                    Button { onOpen(dontShowAgain) } label: {
+                        Text("Open Link")
+                            .foregroundStyle(themePalette.prominentButtonText)
+                    }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                } else {
+                    Button("Open Link") { onOpen(dontShowAgain) }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                }
             }
         }
         .padding(22)
         .frame(width: 490)
+        .ircCustomWindowBackground()
+    }
+}
+
+private struct LinkWarningURLTextModifier: ViewModifier {
+    @Environment(\.ircThemePalette) private var palette
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let palette {
+            content.foregroundStyle(palette.emphasizedText)
+        } else {
+            content.foregroundStyle(.secondary)
+        }
     }
 }
 
