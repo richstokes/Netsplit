@@ -19,6 +19,41 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.system.palette == nil)
     }
 
+    @Test("Catppuccin Latte text colors meet normal-text contrast")
+    func validatesCatppuccinLatteTextContrast() {
+        for color in IRCThemePalette.catppuccinLatteNicknameHexValues {
+            #expect(Self.contrastRatio(
+                foreground: color,
+                background: IRCThemePalette.catppuccinLatteBackgroundHex
+            ) >= 4.5)
+        }
+        #expect(Self.contrastRatio(
+            foreground: IRCThemePalette.catppuccinLatteSecondaryTextHex,
+            background: IRCThemePalette.catppuccinLatteBarHex
+        ) >= 4.5)
+    }
+
+    private static func contrastRatio(foreground: UInt32, background: UInt32) -> Double {
+        let foregroundLuminance = relativeLuminance(of: foreground)
+        let backgroundLuminance = relativeLuminance(of: background)
+        let lighter = max(foregroundLuminance, backgroundLuminance)
+        let darker = min(foregroundLuminance, backgroundLuminance)
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    private static func relativeLuminance(of hex: UInt32) -> Double {
+        let components = [
+            Double((hex >> 16) & 0xFF) / 255,
+            Double((hex >> 8) & 0xFF) / 255,
+            Double(hex & 0xFF) / 255
+        ].map { component in
+            component <= 0.04045
+                ? component / 12.92
+                : pow((component + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * components[0] + 0.7152 * components[1] + 0.0722 * components[2]
+    }
+
     @Test("Nickname hover details appear only when the sender column truncates")
     func detectsTruncatedNicknames() {
         #expect(!IRCNicknameTruncationPolicy.isTruncated(
