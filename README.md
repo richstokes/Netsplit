@@ -53,6 +53,30 @@ Commands are sent 0.5 seconds apart. Netsplit then waits 2 seconds after the
 final command before rejoining retained and favorite channels, giving network
 services time to apply authentication and account changes.
 
+## Keyboard shortcuts
+
+Netsplit is designed to be usable without a mouse. These shortcuts are also
+listed in the app menus where applicable.
+
+| Shortcut | Action |
+| --- | --- |
+| `⌘K` | Open the jump palette to search active servers, channels, and direct messages. |
+| `⌘1`–`⌘9` | Switch to an active server in sidebar order, restoring its last-open conversation. |
+| `⌘[` | Navigate back through recently viewed conversations. |
+| `⌘]` | Navigate forward through recently viewed conversations. |
+| `⌃⌘S` | Move keyboard focus to the server and channel sidebar. |
+| `⌃⌘M` | Move keyboard focus to the message field. |
+| `⌘L` | Browse channels on the selected server. |
+| `⌘W` | Close the current conversation, leave the current channel, or disconnect the selected server. |
+| `⌘E` | Show or hide the server and channel sidebar. |
+| `⌘B` | Show or hide the channel member list. |
+| `⌘+` / `⌘-` | Increase or decrease transcript text size. |
+| `⌘0` | Restore the default transcript text size. |
+
+While the jump palette is open, type any part of a server, channel, or nickname;
+use `↑` and `↓` to choose a result, `Return` to open it, or `Escape` to close the
+palette.
+
 ## Development and tests
 
 Open `Netsplit/Netsplit.xcodeproj` and use the shared **Netsplit** scheme. Its
