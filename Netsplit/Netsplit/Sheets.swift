@@ -709,7 +709,7 @@ struct SettingsView: View {
             safetySettings
                 .tabItem { Label("Safety", systemImage: "shield") }
         }
-        .frame(width: 560, height: 560)
+        .frame(width: 580, height: 620)
         .ircApplicationTheme(state.applicationAppearance)
     }
 
@@ -775,6 +775,13 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                Picker("Chat font", selection: $state.chatFont) {
+                    ForEach(IRCChatFont.allCases) { chatFont in
+                        Text(chatFont.label)
+                            .font(chatFont.font(size: 13))
+                            .tag(chatFont)
+                    }
+                }
                 Toggle("Use distinct nickname colors", isOn: $state.usesColoredNicknames)
                 Toggle("Use monospace for server messages", isOn: $state.usesMonospacedServerMessages)
 
@@ -833,6 +840,13 @@ struct SettingsView: View {
             Section("Links") {
                 Toggle("Warn before opening links", isOn: $state.warnBeforeOpeningLinks)
                 Text("Links open in your default browser. The warning can help protect you from deceptive or malicious content shared in chat.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Automatic Previews") {
+                Toggle("Preview web links", isOn: $state.automaticallyPreviewsLinks)
+                Toggle("Preview direct image links", isOn: $state.automaticallyPreviewsImages)
+                Text("Off by default. Previewing contacts sites shared by other people and can reveal your IP address. Netsplit previews HTTPS links only, sends no cookies or saved credentials, rejects local and private network destinations, and shows at most two bounded previews per message.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

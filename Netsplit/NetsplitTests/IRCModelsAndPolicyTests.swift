@@ -295,6 +295,252 @@ struct IRCModelsAndPolicyTests {
         #expect(try link(for: "ftp://example.com", occurrence: 0, in: rendered) == nil)
     }
 
+    @Test("Message previews classify image links, deduplicate URLs, and cap each message")
+    func classifiesMessagePreviews() {
+        let destination = SidebarItem.channel(UUID())
+        let message = IRCMessage(
+            sender: "Alice",
+            text: "https://example.com/photo.JPG?large=1 https://swift.org https://swift.org https://example.net https://ignored.example"
+        )
+
+        #expect(IRCMessageTextRenderer.webURLs(for: message).count == 4)
+        #expect(IRCMessagePreviewPolicy.previews(
+            for: message,
+            in: destination,
+            showsLinkPreviews: false,
+            showsImagePreviews: false
+        ).isEmpty)
+        #expect(IRCMessagePreviewPolicy.previews(
+            for: message,
+            in: destination,
+            showsLinkPreviews: true,
+            showsImagePreviews: true
+        ) == [
+            .image(URL(string: "https://example.com/photo.JPG?large=1")!),
+            .link(URL(string: "https://swift.org")!)
+        ])
+        #expect(IRCMessagePreviewPolicy.previews(
+            for: message,
+            in: destination,
+            showsLinkPreviews: false,
+            showsImagePreviews: true
+        ) == [
+            .image(URL(string: "https://example.com/photo.JPG?large=1")!)
+        ])
+    }
+
+    @Test("Automatic previews only appear for regular channel and direct messages")
+    func limitsAutomaticPreviewsToRegularConversationMessages() {
+        let notice = IRCMessage(
+            sender: "Alice (notice)",
+            text: "https://example.com/photo.jpg https://example.com/article",
+            isNotice: true,
+            nicknameColorKey: "Alice"
+        )
+        let systemMessage = IRCMessage(
+            sender: "System",
+            text: "https://example.com/photo.jpg",
+            isSystem: true
+        )
+        let regularMessage = IRCMessage(
+            sender: "Alice",
+            text: "https://example.com/photo.jpg"
+        )
+        let conversationDestinations: [SidebarItem] = [
+            .channel(UUID()),
+            .directMessage(UUID())
+        ]
+
+        for destination in conversationDestinations {
+            #expect(IRCMessagePreviewPolicy.previews(
+                for: notice,
+                in: destination,
+                showsLinkPreviews: true,
+                showsImagePreviews: true
+            ).isEmpty)
+            #expect(IRCMessagePreviewPolicy.previews(
+                for: systemMessage,
+                in: destination,
+                showsLinkPreviews: true,
+                showsImagePreviews: true
+            ).isEmpty)
+            #expect(!IRCMessagePreviewPolicy.previews(
+                for: regularMessage,
+                in: destination,
+                showsLinkPreviews: true,
+                showsImagePreviews: true
+            ).isEmpty)
+        }
+
+        #expect(IRCMessagePreviewPolicy.previews(
+            for: regularMessage,
+            in: .server(UUID()),
+            showsLinkPreviews: true,
+            showsImagePreviews: true
+        ).isEmpty)
+    }
+
+    @Test("Automatic previews reject local and private network targets")
+    func protectsLocalAddressesFromAutomaticPreviews() {
+        for address in [
+            "https://localhost/image.png",
+            "https://router.local/image.png",
+            "https://0.0.0.0/image.png",
+            "https://127.0.0.1/image.png",
+            "https://0177.0.0.1/image.png",
+            "https://10.0.0.1/image.png",
+            "https://100.64.0.1/image.png",
+            "https://169.254.169.254/latest/meta-data",
+            "https://172.16.10.2/image.png",
+            "https://192.168.1.1/image.png",
+            "https://198.18.0.1/image.png",
+            "https://224.0.0.1/image.png",
+            "https://[::1]/image.png",
+            "https://[::ffff:192.168.1.1]/image.png",
+            "https://[fc00::1]/image.png",
+            "https://[fe80::1]/image.png",
+            "https://[ff02::1]/image.png",
+            "https://[2001:db8::1]/image.png",
+            "https://[2002:0a00:0001::1]/image.png",
+            "https://[2001:2::1]/image.png",
+            "https://[2620:4f:8000::1]/image.png",
+            "https://[3fff::1]/image.png",
+            "https://example.com:8443/image.png",
+            "https://user:password@example.com/image.png"
+        ] {
+            #expect(!IRCRemotePreviewPolicy.isPermitted(URL(string: address)!))
+        }
+        #expect(IRCRemotePreviewPolicy.isPermitted(URL(string: "https://example.com/image.png")!))
+        #expect(IRCRemotePreviewPolicy.isPermitted(URL(string: "https://1.1.1.1/image.png")!))
+        #expect(IRCRemotePreviewPolicy.isPermitted(URL(string: "https://[2606:4700:4700::1111]/image.png")!))
+        #expect(!IRCRemotePreviewPolicy.isPermitted(URL(string: "http://example.com/image.png")!))
+    }
+
+    @Test("Preview redirects remain on-host and never downgrade HTTPS")
+    func validatesPreviewRedirects() {
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "http://example.com/article")!,
+            to: URL(string: "https://example.com/article")!
+        ))
+        #expect(IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://example.com/old")!,
+            to: URL(string: "https://example.com/new")!
+        ))
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://example.com/article")!,
+            to: URL(string: "http://example.com/article")!
+        ))
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://example.com/article")!,
+            to: URL(string: "https://cdn.example.com/article")!
+        ))
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://example.com/article")!,
+            to: URL(string: "http://127.0.0.1/admin")!
+        ))
+    }
+
+    @Test("Preview resources deduplicate URL fragments")
+    func deduplicatesPreviewFragments() {
+        let message = IRCMessage(
+            sender: "Alice",
+            text: "https://example.com/article#first https://example.com/article#second"
+        )
+        #expect(IRCMessagePreviewPolicy.previews(
+            for: message,
+            in: .channel(UUID()),
+            showsLinkPreviews: true,
+            showsImagePreviews: false
+        ).count == 1)
+    }
+
+    @Test("HTML metadata is converted to bounded inert plain text")
+    func sanitizesLinkPreviewMetadata() {
+        let html = """
+        <html><head>
+        <title>Ignored fallback</title>
+        <meta content="Description &amp; details" name="description">
+        <meta content="&#x202E;&lt;script&gt;alert(1)&lt;/script&gt; Safe &amp; Sound" property="og:title">
+        </head></html>
+        """
+        let metadata = IRCLinkPreviewMetadataParser.parse(
+            data: Data(html.utf8),
+            responseURL: URL(string: "https://example.com/article")!
+        )
+
+        #expect(metadata.title == "alert(1) Safe & Sound")
+        #expect(metadata.summary == "Description & details")
+        #expect(metadata.title?.contains("<script>") == false)
+        #expect(metadata.title?.unicodeScalars.contains(where: { $0.value == 0x202E }) == false)
+    }
+
+    @Test("HTML metadata falls back to the title element and limits output length")
+    func boundsLinkPreviewMetadata() {
+        let oversizedTitle = String(repeating: "A", count: 500)
+        let html = "<title>\(oversizedTitle)</title>"
+        let metadata = IRCLinkPreviewMetadataParser.parse(
+            data: Data(html.utf8),
+            responseURL: URL(string: "https://example.com")!
+        )
+
+        #expect(metadata.title?.count == 200)
+        #expect(metadata.summary == nil)
+
+        let combiningTitle = "A" + String(repeating: "\u{0301}", count: 500)
+        let combiningMetadata = IRCLinkPreviewMetadataParser.parse(
+            data: Data("<title>\(combiningTitle)</title>".utf8),
+            responseURL: URL(string: "https://example.com")!
+        )
+        #expect(combiningMetadata.title?.unicodeScalars.count == 200)
+    }
+
+    @Test("Image previews accept bounded raster data and reject malformed data")
+    func validatesImagePreviewData() throws {
+        let bitmap = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 1,
+            pixelsHigh: 1,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        let pngData = try #require(bitmap.representation(using: .png, properties: [:]))
+
+        #expect(IRCBoundedImageLoader.thumbnail(from: pngData) != nil)
+        #expect(IRCBoundedImageLoader.thumbnail(from: Data("<script>alert(1)</script>".utf8)) == nil)
+    }
+
+    @Test("Image previews report their aspect-fitted size without blank framing")
+    func sizesImagePreviews() {
+        #expect(IRCBoundedImageLayout.fittedSize(
+            aspectRatio: 1,
+            within: CGSize(width: 520, height: 280)
+        ) == CGSize(width: 280, height: 280))
+        #expect(IRCBoundedImageLayout.fittedSize(
+            aspectRatio: 2,
+            within: CGSize(width: 520, height: 280)
+        ) == CGSize(width: 520, height: 260))
+        #expect(IRCBoundedImageLayout.fittedSize(
+            aspectRatio: 0.5,
+            within: CGSize(width: 520, height: 280)
+        ) == CGSize(width: 140, height: 280))
+        #expect(IRCBoundedImageLayout.fittedSize(
+            aspectRatio: 2,
+            within: CGSize(width: 300, height: 280)
+        ) == CGSize(width: 300, height: 150))
+    }
+
+    @Test("Chat typography keeps the system face as the first default choice")
+    func exposesChatFonts() {
+        #expect(IRCChatFont.allCases == [.system, .rounded, .monospaced])
+        #expect(IRCChatFont.system.label == "System (SF Pro)")
+        #expect(IRCChatFont.monospaced.label == "SF Mono")
+    }
+
     @Test("Message rendering recognizes IRC channel types and trims surrounding punctuation")
     func detectsChannelReferencesInMessages() throws {
         let message = IRCMessage(

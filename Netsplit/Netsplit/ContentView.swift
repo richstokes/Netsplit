@@ -631,15 +631,18 @@ private struct ConversationView: View {
                     ConversationTranscript(
                         state: state,
                         selection: selection,
+                        chatFont: state.chatFont,
                         usesColoredNicknames: state.usesColoredNicknames,
                         usesMonospacedServerMessages: state.usesMonospacedServerMessages,
                         rendersIRCFormatting: state.rendersIRCFormatting,
+                        automaticallyPreviewsLinks: state.automaticallyPreviewsLinks,
+                        automaticallyPreviewsImages: state.automaticallyPreviewsImages,
                         messageSpacing: state.messageSpacing,
                         channelEventVisibility: state.channelEventVisibility
                     )
                     HStack(alignment: .bottom, spacing: 12) {
                         TextField("Message \(title)", text: $draft, axis: .vertical)
-                            .font(.system(size: textMetrics.size(15)))
+                            .font(state.chatFont.font(size: textMetrics.size(15)))
                             .textFieldStyle(.plain).lineLimit(1...5)
                             .padding(.horizontal, textMetrics.spacing(12))
                             .padding(.vertical, textMetrics.spacing(9))
@@ -888,9 +891,12 @@ private struct ChannelTopicPopover: View {
 private struct ConversationTranscript: View {
     let state: IRCAppState
     let selection: SidebarItem
+    let chatFont: IRCChatFont
     let usesColoredNicknames: Bool
     let usesMonospacedServerMessages: Bool
     let rendersIRCFormatting: Bool
+    let automaticallyPreviewsLinks: Bool
+    let automaticallyPreviewsImages: Bool
     let messageSpacing: IRCMessageSpacing
     let channelEventVisibility: IRCChannelEventVisibility
     @ObservedObject private var updates: IRCRevisionSignal
@@ -906,17 +912,23 @@ private struct ConversationTranscript: View {
     init(
         state: IRCAppState,
         selection: SidebarItem,
+        chatFont: IRCChatFont,
         usesColoredNicknames: Bool,
         usesMonospacedServerMessages: Bool,
         rendersIRCFormatting: Bool,
+        automaticallyPreviewsLinks: Bool,
+        automaticallyPreviewsImages: Bool,
         messageSpacing: IRCMessageSpacing,
         channelEventVisibility: IRCChannelEventVisibility
     ) {
         self.state = state
         self.selection = selection
+        self.chatFont = chatFont
         self.usesColoredNicknames = usesColoredNicknames
         self.usesMonospacedServerMessages = usesMonospacedServerMessages
         self.rendersIRCFormatting = rendersIRCFormatting
+        self.automaticallyPreviewsLinks = automaticallyPreviewsLinks
+        self.automaticallyPreviewsImages = automaticallyPreviewsImages
         self.messageSpacing = messageSpacing
         self.channelEventVisibility = channelEventVisibility
         _updates = ObservedObject(wrappedValue: state.messageUpdates(for: selection))
@@ -941,9 +953,12 @@ private struct ConversationTranscript: View {
                             message: message,
                             state: state,
                             selection: selection,
+                            chatFont: chatFont,
                             usesColoredNicknames: usesColoredNicknames,
                             usesMonospacedServerMessages: usesMonospacedServerMessages,
                             rendersIRCFormatting: rendersIRCFormatting,
+                            automaticallyPreviewsLinks: automaticallyPreviewsLinks,
+                            automaticallyPreviewsImages: automaticallyPreviewsImages,
                             messageSpacing: messageSpacing
                         )
                         .id(message.id)
@@ -1299,9 +1314,12 @@ private struct MessageRow: View {
     let message: IRCMessage
     let state: IRCAppState
     let selection: SidebarItem
+    let chatFont: IRCChatFont
     let usesColoredNicknames: Bool
     let usesMonospacedServerMessages: Bool
     let rendersIRCFormatting: Bool
+    let automaticallyPreviewsLinks: Bool
+    let automaticallyPreviewsImages: Bool
     let messageSpacing: IRCMessageSpacing
     @State private var isSenderHovered = false
     @State private var showsFullSender = false
@@ -1314,6 +1332,13 @@ private struct MessageRow: View {
     private var senderColumnWidth: CGFloat { textMetrics.spacing(116) }
 
     var body: some View {
+        let previews = IRCMessagePreviewPolicy.previews(
+            for: message,
+            in: selection,
+            showsLinkPreviews: automaticallyPreviewsLinks,
+            showsImagePreviews: automaticallyPreviewsImages
+        )
+
         HStack(alignment: .firstTextBaseline, spacing: textMetrics.spacing(10)) {
             Text(message.timestamp, format: .dateTime.hour().minute())
                 .font(.system(size: timestampFontSize, design: .monospaced)).foregroundStyle(.tertiary)
@@ -1321,49 +1346,63 @@ private struct MessageRow: View {
                 .frame(width: timestampColumnWidth, alignment: .trailing)
 
             if message.isSystem {
-                Image(systemName: "circle.fill")
-                    .font(.system(size: textMetrics.size(5)))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: textMetrics.spacing(10))
-                    .accessibilityHidden(true)
-                Text(linkifiedText)
-                    .font(.system(
-                        size: textMetrics.size(14),
-                        design: usesMonospacedServerMessages ? .monospaced : .default
-                    ))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            } else {
-                interactiveSenderText
-                    .onHover { isHovered in
-                        isSenderHovered = isHovered
-                        if !isHovered { showsFullSender = false }
-                    }
-                    .task(id: isSenderHovered) {
-                        guard isSenderHovered, isSenderTruncated else { return }
-                        try? await Task.sleep(for: .milliseconds(400))
-                        guard !Task.isCancelled, isSenderHovered else { return }
-                        showsFullSender = true
-                    }
-                    .popover(isPresented: $showsFullSender, arrowEdge: .bottom) {
-                        Text(message.sender)
-                            .font(.system(size: textMetrics.size(13), weight: .medium))
+                VStack(alignment: .leading, spacing: textMetrics.spacing(8)) {
+                    HStack(alignment: .firstTextBaseline, spacing: textMetrics.spacing(10)) {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: textMetrics.size(5)))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: textMetrics.spacing(10))
+                            .accessibilityHidden(true)
+                        Text(linkifiedText)
+                            .font(serverMessageFont)
+                            .foregroundStyle(.secondary)
                             .textSelection(.enabled)
-                            .padding(.horizontal, textMetrics.spacing(11))
-                            .padding(.vertical, textMetrics.spacing(7))
                     }
-                Text(linkifiedText)
-                    .font(.system(size: textMetrics.bodySize))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
+                    MessagePreviewStack(previews: previews)
+                        .padding(.leading, textMetrics.spacing(20))
+                }
+            } else {
+                VStack(alignment: .leading, spacing: textMetrics.spacing(8)) {
+                    HStack(alignment: .firstTextBaseline, spacing: textMetrics.spacing(10)) {
+                        interactiveSenderText
+                            .onHover { isHovered in
+                                isSenderHovered = isHovered
+                                if !isHovered { showsFullSender = false }
+                            }
+                            .task(id: isSenderHovered) {
+                                guard isSenderHovered, isSenderTruncated else { return }
+                                try? await Task.sleep(for: .milliseconds(400))
+                                guard !Task.isCancelled, isSenderHovered else { return }
+                                showsFullSender = true
+                            }
+                            .popover(isPresented: $showsFullSender, arrowEdge: .bottom) {
+                                Text(message.sender)
+                                    .font(chatFont.font(size: textMetrics.size(13), weight: .medium))
+                                    .textSelection(.enabled)
+                                    .padding(.horizontal, textMetrics.spacing(11))
+                                    .padding(.vertical, textMetrics.spacing(7))
+                            }
+                        Text(linkifiedText)
+                            .font(chatFont.font(size: textMetrics.bodySize))
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                    }
+                    MessagePreviewStack(previews: previews)
+                        .padding(.leading, senderColumnWidth + textMetrics.spacing(10))
+                }
             }
         }
         .padding(.vertical, verticalPadding)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: previews.isEmpty ? .combine : .contain)
         .accessibilityLabel(accessibilityText)
     }
 
     private static let attributedTextCache = IRCMessageTextCache(countLimit: 5_500)
+
+    private var serverMessageFont: Font {
+        let design: Font.Design = usesMonospacedServerMessages ? .monospaced : chatFont.design
+        return .system(size: textMetrics.size(14), design: design)
+    }
 
     @ViewBuilder
     private var interactiveSenderText: some View {
@@ -1383,7 +1422,7 @@ private struct MessageRow: View {
 
     private var senderText: some View {
         Text(message.sender)
-            .font(.system(size: textMetrics.size(15), weight: .semibold))
+            .font(chatFont.font(size: textMetrics.size(15), weight: .semibold))
             .foregroundStyle(nicknameColor)
             .lineLimit(1)
             .truncationMode(.middle)
@@ -1394,7 +1433,7 @@ private struct MessageRow: View {
         IRCNicknameTruncationPolicy.isTruncated(
             message.sender,
             availableWidth: senderColumnWidth,
-            fontSize: textMetrics.size(15)
+            font: chatFont.nsFont(size: textMetrics.size(15), weight: .semibold)
         )
     }
 
@@ -1461,8 +1500,16 @@ enum IRCNicknameTruncationPolicy {
         availableWidth: CGFloat,
         fontSize: CGFloat
     ) -> Bool {
-        guard availableWidth > 0, !nickname.isEmpty else { return false }
         let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        return isTruncated(nickname, availableWidth: availableWidth, font: font)
+    }
+
+    static func isTruncated(
+        _ nickname: String,
+        availableWidth: CGFloat,
+        font: NSFont
+    ) -> Bool {
+        guard availableWidth > 0, !nickname.isEmpty else { return false }
         let renderedWidth = (nickname as NSString).size(withAttributes: [.font: font]).width
         return renderedWidth.rounded(.up) > availableWidth.rounded(.down)
     }
@@ -1481,7 +1528,7 @@ private struct LinkWarningView: View {
     @Environment(\.ircThemePalette) private var themePalette
 
     private var destination: String {
-        url.host(percentEncoded: false) ?? url.absoluteString
+        url.host(percentEncoded: true) ?? url.absoluteString
     }
 
     var body: some View {

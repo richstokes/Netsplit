@@ -17,10 +17,10 @@ Some thoughts/goals I had while making this.
 - macOS Native app - easily installable via the App Store
 - Tasteful (but opinionated) UI, following modern SwiftUI UI/UX guidelines
 - Accessibility baked in from day one - the app should work well with Voiceover, etc
-- Profiled and Optimized for low resource use
+- Profiled and optimized for low resource use
   - While connected to 7 active servers / 25 channels, memory footprint remained <150MB
 - No telemetry, no phone-home, no ads, no in-app-purchases, no junk
-- Secure-by-default, where possible. Prefer TLS. Option to easily connect via an SSH tunnel
+- Secure-by-default, where possible. Prefers TLS. Option to easily connect via an SSH tunnel
   - SSH is nice, as many IRC servers reveal the IP address you're connecting from
 - No DCC/filesharing features. I'm just not interested in it, but maybe will add support for it at some point
 - Client-side muting, easily filter out folks you'd rather not see messages from

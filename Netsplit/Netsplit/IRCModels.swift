@@ -3,6 +3,7 @@
 //  Netsplit
 //
 
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -49,6 +50,47 @@ enum IRCMessageSpacing: String, CaseIterable, Identifiable {
         case .compact: return "Compact"
         case .comfortable: return "Comfortable"
         }
+    }
+}
+
+enum IRCChatFont: String, CaseIterable, Identifiable {
+    case system
+    case rounded
+    case monospaced
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .system: return "System (SF Pro)"
+        case .rounded: return "SF Rounded"
+        case .monospaced: return "SF Mono"
+        }
+    }
+
+    var design: Font.Design {
+        switch self {
+        case .system: return .default
+        case .rounded: return .rounded
+        case .monospaced: return .monospaced
+        }
+    }
+
+    func font(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: design)
+    }
+
+    func nsFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        let systemDesign: NSFontDescriptor.SystemDesign?
+        switch self {
+        case .system: systemDesign = nil
+        case .rounded: systemDesign = .rounded
+        case .monospaced: systemDesign = .monospaced
+        }
+        guard let systemDesign,
+              let descriptor = base.fontDescriptor.withDesign(systemDesign) else { return base }
+        return NSFont(descriptor: descriptor, size: size) ?? base
     }
 }
 
@@ -360,6 +402,21 @@ enum IRCMessageTextRenderer {
 
     static func plainDisplayText(for message: IRCMessage) -> String {
         plainText(displayText(for: message))
+    }
+
+    static func webURLs(for message: IRCMessage) -> [URL] {
+        let text = plainDisplayText(for: message)
+        guard let linkDetector else { return [] }
+
+        var seen = Set<URL>()
+        let fullRange = NSRange(text.startIndex..., in: text)
+        return linkDetector.matches(in: text, range: fullRange).compactMap { match in
+            guard let url = match.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  seen.insert(url).inserted else { return nil }
+            return url
+        }
     }
 
     static func linkifiedText(

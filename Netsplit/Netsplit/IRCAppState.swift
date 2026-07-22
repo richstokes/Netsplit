@@ -42,6 +42,9 @@ final class IRCAppState: ObservableObject {
     @Published var messageSpacing: IRCMessageSpacing {
         didSet { UserDefaults.standard.set(messageSpacing.rawValue, forKey: "messageSpacing") }
     }
+    @Published var chatFont: IRCChatFont {
+        didSet { UserDefaults.standard.set(chatFont.rawValue, forKey: "chatFont") }
+    }
     @Published var usesColoredNicknames: Bool {
         didSet { UserDefaults.standard.set(usesColoredNicknames, forKey: "usesColoredNicknames") }
     }
@@ -50,6 +53,12 @@ final class IRCAppState: ObservableObject {
     }
     @Published var rendersIRCFormatting: Bool {
         didSet { UserDefaults.standard.set(rendersIRCFormatting, forKey: "rendersIRCFormatting") }
+    }
+    @Published var automaticallyPreviewsLinks: Bool {
+        didSet { UserDefaults.standard.set(automaticallyPreviewsLinks, forKey: "automaticallyPreviewsLinks") }
+    }
+    @Published var automaticallyPreviewsImages: Bool {
+        didSet { UserDefaults.standard.set(automaticallyPreviewsImages, forKey: "automaticallyPreviewsImages") }
     }
     @Published var channelEventVisibility: IRCChannelEventVisibility {
         didSet { UserDefaults.standard.set(channelEventVisibility.rawValue, forKey: "channelEventVisibility") }
@@ -152,9 +161,12 @@ final class IRCAppState: ObservableObject {
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
         applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
         messageSpacing = defaults.string(forKey: "messageSpacing").flatMap(IRCMessageSpacing.init(rawValue:)) ?? .comfortable
+        chatFont = defaults.string(forKey: "chatFont").flatMap(IRCChatFont.init(rawValue:)) ?? .system
         usesColoredNicknames = defaults.object(forKey: "usesColoredNicknames") as? Bool ?? false
         usesMonospacedServerMessages = defaults.object(forKey: "usesMonospacedServerMessages") as? Bool ?? true
         rendersIRCFormatting = defaults.object(forKey: "rendersIRCFormatting") as? Bool ?? false
+        automaticallyPreviewsLinks = defaults.object(forKey: "automaticallyPreviewsLinks") as? Bool ?? false
+        automaticallyPreviewsImages = defaults.object(forKey: "automaticallyPreviewsImages") as? Bool ?? false
         channelEventVisibility = defaults.string(forKey: "channelEventVisibility").flatMap(IRCChannelEventVisibility.init(rawValue:)) ?? .alwaysShow
         showsMemberList = defaults.object(forKey: "showsMemberList") as? Bool ?? true
         let savedTranscriptFontSize = defaults.object(forKey: "transcriptFontSize") as? Double ?? 16
