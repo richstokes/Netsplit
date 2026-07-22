@@ -24,7 +24,7 @@ Some thoughts/goals I had while making this.
   - SSH is nice, as many IRC servers reveal the IP address you're connecting from
 - No DCC/filesharing features. I'm just not interested in it, but maybe will add support for it at some point
 - Client-side muting, easily filter out folks you'd rather not see messages from
-- I probably won't add scripting support, it's not something I find useful, and would add a ton of complexity/potential for security issues. That said, there is basic "run these commands on connect" support already
+- I _probably_ won't add scripting, it's not something I find useful, and would add a ton of complexity/increased risk of security issues. That said, there is basic "run these commands on connect" support already
 
 ## SSH tunneling
 
