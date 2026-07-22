@@ -129,6 +129,9 @@ struct ContentView: View {
         .onChange(of: state.workspaceFocusRequest) { _, request in
             guard let request else { return }
             DispatchQueue.main.async {
+                guard state.workspaceFocusRequest == request else { return }
+                if case .composer(let selection) = request.target,
+                   state.selection != selection { return }
                 workspaceFocus = request.target
             }
         }
@@ -182,6 +185,9 @@ private struct SidebarView: View {
                                 .accessibilityLabel(channel.name)
                                 .accessibilityValue(channelAccessibilityValue(channel))
                                 .tag(SidebarItem.channel(channel.id))
+                                .simultaneousGesture(TapGesture().onEnded {
+                                    state.selectFromSidebar(.channel(channel.id))
+                                })
                                 .contextMenu {
                                     Button(state.isFavorite(channel) ? "Unfavorite" : "Favorite", systemImage: state.isFavorite(channel) ? "star.slash" : "star") {
                                         state.toggleFavorite(channel)
@@ -238,7 +244,11 @@ private struct SidebarView: View {
         .accessibilityHint("Use the arrow keys to choose a server or conversation")
         .onAppear { listSelection = state.selection }
         .onChange(of: listSelection) { _, newSelection in
-            DispatchQueue.main.async { state.selection = newSelection }
+            DispatchQueue.main.async {
+                guard listSelection == newSelection,
+                      state.selection != newSelection else { return }
+                state.selectFromSidebar(newSelection)
+            }
         }
         .onChange(of: state.selection) { _, newSelection in
             if listSelection != newSelection { listSelection = newSelection }
@@ -667,7 +677,7 @@ private struct ConversationView: View {
                             .padding(.horizontal, textMetrics.spacing(12))
                             .padding(.vertical, textMetrics.spacing(9))
                             .ircFieldBackground(in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .focused($workspaceFocus, equals: .composer)
+                            .focused($workspaceFocus, equals: .composer(selection))
                             .accessibilityLabel("Message to \(title)")
                             .accessibilityHint("Type one IRC message. Press Return to send or Tab to complete a command or nickname.")
                             .onSubmit(send)
@@ -700,7 +710,7 @@ private struct ConversationView: View {
         .onAppear {
             state.markRead(selection)
             draft = state.draft(for: selection)
-            workspaceFocus = .composer
+            workspaceFocus = .composer(selection)
         }
         .onChange(of: selection) { _, newSelection in
             state.markRead(newSelection)
@@ -1065,6 +1075,8 @@ private struct TranscriptLiveScrollObserver: NSViewRepresentable {
         var onScroll: (_ visibleBounds: CGRect, _ contentBounds: CGRect, _ contentIsFlipped: Bool) -> Void
         private weak var observedScrollView: NSScrollView?
         private var observers: [NSObjectProtocol] = []
+        private var attachmentGeneration = 0
+        private var hasPendingReport = false
 
         init(onScroll: @escaping (_ visibleBounds: CGRect, _ contentBounds: CGRect, _ contentIsFlipped: Bool) -> Void) {
             self.onScroll = onScroll
@@ -1102,16 +1114,33 @@ private struct TranscriptLiveScrollObserver: NSViewRepresentable {
                     object: scrollView,
                     queue: .main
                 ) { [weak self] _ in
-                    self?.reportPosition()
+                    self?.schedulePositionReport()
                 })
             }
         }
 
         func detach() {
+            attachmentGeneration &+= 1
+            hasPendingReport = false
             let center = NotificationCenter.default
             observers.forEach(center.removeObserver)
             observers.removeAll()
             observedScrollView = nil
+        }
+
+        /// AppKit can post live-scroll notifications while the scroll view is
+        /// still in its layout pass. Publishing SwiftUI state from that stack
+        /// can make the hosting view try to lay out recursively, so defer and
+        /// coalesce the report until the next main-queue turn.
+        private func schedulePositionReport() {
+            guard !hasPendingReport else { return }
+            hasPendingReport = true
+            let generation = attachmentGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.attachmentGeneration == generation else { return }
+                self.hasPendingReport = false
+                self.reportPosition()
+            }
         }
 
         private func reportPosition() {

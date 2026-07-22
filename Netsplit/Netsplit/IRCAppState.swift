@@ -296,14 +296,21 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    func selectFromSidebar(_ newSelection: SidebarItem?) {
+        selection = newSelection
+        if case .channel = newSelection {
+            requestComposerFocus()
+        }
+    }
+
     func requestSidebarFocus() {
         showsServerChannelPane = true
         workspaceFocusRequest = IRCWorkspaceFocusRequest(target: .sidebar)
     }
 
     func requestComposerFocus() {
-        guard selection != nil, selection != .connectionCenter else { return }
-        workspaceFocusRequest = IRCWorkspaceFocusRequest(target: .composer)
+        guard let selection, selection != .connectionCenter else { return }
+        workspaceFocusRequest = IRCWorkspaceFocusRequest(target: .composer(selection))
     }
 
     func closeActiveSelection() {

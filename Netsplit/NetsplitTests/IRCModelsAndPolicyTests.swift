@@ -872,6 +872,30 @@ struct IRCModelsAndPolicyTests {
         #expect(state.showsMemberList == initialValue)
     }
 
+    @Test("Sidebar channel selection requests composer focus, including reselection")
+    @MainActor
+    func focusesComposerForSidebarChannelSelection() throws {
+        let state = IRCAppState()
+        let firstChannel = SidebarItem.channel(UUID())
+        let secondChannel = SidebarItem.channel(UUID())
+
+        state.selectFromSidebar(firstChannel)
+        let firstRequest = try #require(state.workspaceFocusRequest)
+        #expect(state.selection == firstChannel)
+        #expect(firstRequest.target == .composer(firstChannel))
+
+        state.selectFromSidebar(secondChannel)
+        let secondRequest = try #require(state.workspaceFocusRequest)
+        #expect(state.selection == secondChannel)
+        #expect(secondRequest.target == .composer(secondChannel))
+        #expect(secondRequest.id != firstRequest.id)
+
+        state.selectFromSidebar(secondChannel)
+        let reselectionRequest = try #require(state.workspaceFocusRequest)
+        #expect(reselectionRequest.target == .composer(secondChannel))
+        #expect(reselectionRequest.id != secondRequest.id)
+    }
+
     @Test("Conversation drafts remain separate and clear when emptied")
     @MainActor
     func preservesConversationDrafts() {

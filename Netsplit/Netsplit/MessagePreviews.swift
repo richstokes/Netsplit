@@ -327,6 +327,8 @@ private final class IRCLinkPreviewCache {
 }
 
 private struct IRCLinkPreviewCard: View {
+    private static let maximumWidth: CGFloat = 440
+
     let url: URL
     @State private var metadata: IRCLinkPreviewMetadata?
     @State private var failed = false
@@ -364,7 +366,12 @@ private struct IRCLinkPreviewCard: View {
                         }
                     }
                     .padding(12)
-                    .frame(maxWidth: 520, minHeight: 82, maxHeight: 128, alignment: .leading)
+                    .frame(
+                        maxWidth: Self.maximumWidth,
+                        minHeight: 82,
+                        maxHeight: 128,
+                        alignment: .leading
+                    )
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -379,7 +386,7 @@ private struct IRCLinkPreviewCard: View {
             } else if !failed {
                 ProgressView()
                     .controlSize(.small)
-                    .frame(maxWidth: 520, minHeight: 72)
+                    .frame(maxWidth: Self.maximumWidth, minHeight: 72)
                     .background(cardBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .accessibilityLabel("Loading link preview")
             }

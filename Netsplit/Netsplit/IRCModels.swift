@@ -1111,7 +1111,7 @@ enum IRCJumpSearch {
 
 enum IRCWorkspaceFocus: Hashable {
     case sidebar
-    case composer
+    case composer(SidebarItem)
 }
 
 struct IRCWorkspaceFocusRequest: Equatable {
