@@ -63,4 +63,16 @@ struct IRCTransportBoundaryTests {
         #expect(output.lines == ["OK"])
         #expect(output.exceededMaximumLineLength)
     }
+
+    @Test("Graceful QUIT waits after a successful local write")
+    func gracefulQuitWaitsForPeerClose() {
+        #expect(IRCGracefulQuitPolicy.timeout(after: .started) == 2)
+        #expect(IRCGracefulQuitPolicy.timeout(after: .localWriteSucceeded) == 0.5)
+        #expect(IRCGracefulQuitPolicy.timeout(after: .localWriteFailed) == nil)
+        #expect(!IRCGracefulQuitPolicy.shouldFinish(after: .started))
+        #expect(!IRCGracefulQuitPolicy.shouldFinish(after: .localWriteSucceeded))
+        #expect(IRCGracefulQuitPolicy.shouldFinish(after: .localWriteFailed))
+        #expect(IRCGracefulQuitPolicy.shouldFinish(after: .peerClosed))
+        #expect(IRCGracefulQuitPolicy.shouldFinish(after: .timedOut))
+    }
 }

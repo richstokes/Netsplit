@@ -14,6 +14,39 @@ enum IRCTransportEvent {
     case sshHostKeyLearned(String)
 }
 
+enum IRCGracefulQuitEvent {
+    case started
+    case localWriteSucceeded
+    case localWriteFailed
+    case peerClosed
+    case timedOut
+}
+
+enum IRCGracefulQuitPolicy {
+    static let maximumWriteDuration: TimeInterval = 2
+    static let peerCloseGraceDuration: TimeInterval = 0.5
+
+    static func timeout(after event: IRCGracefulQuitEvent) -> TimeInterval? {
+        switch event {
+        case .started:
+            maximumWriteDuration
+        case .localWriteSucceeded:
+            peerCloseGraceDuration
+        case .localWriteFailed, .peerClosed, .timedOut:
+            nil
+        }
+    }
+
+    static func shouldFinish(after event: IRCGracefulQuitEvent) -> Bool {
+        switch event {
+        case .started, .localWriteSucceeded:
+            false
+        case .localWriteFailed, .peerClosed, .timedOut:
+            true
+        }
+    }
+}
+
 struct IRCWireMessage {
     var tags: [String: String?]
     var prefix: String?
@@ -86,6 +119,7 @@ struct IRCWireMessage {
     }
 }
 
+@MainActor
 final class IRCConnection {
     private static let maximumBufferedLineBytes = 64 * 1024
     private static let heartbeatInterval: TimeInterval = 30
@@ -108,6 +142,9 @@ final class IRCConnection {
     private var serverPassword: String?
     private var saslCredentials: (username: String, password: String)?
     private var isWaitingForSASLResponse = false
+    private var quitGeneration: UUID?
+    private var quitTimeoutGeneration: UUID?
+    private var quitCompletion: (@MainActor () -> Void)?
     var eventHandler: (@MainActor (IRCTransportEvent) -> Void)?
 
     func connect(profile: ServerProfile, nickname: String, realName: String, serverPassword: String, saslUsername: String?, saslPassword: String, sshPassword: String, sshPrivateKey: String) {
@@ -173,6 +210,7 @@ final class IRCConnection {
                     // channel and its parent SSH session before this callback.
                     self.sshTunnel = nil
                     self.stopHeartbeat()
+                    if self.handleQuitEvent(.peerClosed) { return }
                     if let error {
                         let preventsReconnect = (error as? SSHTunnelError)?.preventsAutomaticReconnect == true
                         self.reportFailure(
@@ -222,11 +260,16 @@ final class IRCConnection {
                     self.register(nickname: nickname, realName: realName)
                     self.startRegistrationTimeout()
                     self.receiveNext(on: connection)
-                case .failed(let error): self.reportFailure(error.localizedDescription, cancelling: false)
+                case .failed(let error):
+                    if !self.handleQuitEvent(.peerClosed) {
+                        self.reportFailure(error.localizedDescription, cancelling: false)
+                    }
                 case .cancelled:
                     self.stopHeartbeat()
-                    self.connection = nil
-                    if !self.hasReportedFailure { self.eventHandler?(.status(.offline)) }
+                    if !self.handleQuitEvent(.peerClosed) {
+                        self.connection = nil
+                        if !self.hasReportedFailure { self.eventHandler?(.status(.offline)) }
+                    }
                 default: break
                 }
             }
@@ -246,6 +289,14 @@ final class IRCConnection {
     }
 
     func disconnect() {
+        if quitGeneration != nil {
+            finishQuit()
+            return
+        }
+        closeTransport()
+    }
+
+    private func closeTransport() {
         stopHeartbeat()
         stopRegistrationTimeout()
         connection?.cancel()
@@ -255,51 +306,88 @@ final class IRCConnection {
         receiveBuffer.removeAll()
     }
 
-    /// Sends IRC QUIT and only closes the transport after Network.framework has
-    /// accepted the line. This gives the server a chance to remove the client
-    /// cleanly instead of treating a user-initiated disconnect as a dropped link.
+    /// Sends IRC QUIT and keeps the transport open until the server closes its
+    /// side of the IRC session. A bounded timeout still guarantees completion if
+    /// the peer does not respond to QUIT with an orderly close.
     func quit(reason: String, completion: @MainActor @escaping () -> Void = {}) {
+        guard quitGeneration == nil else {
+            completion()
+            return
+        }
+        guard connection != nil || sshTunnel != nil else {
+            completion()
+            return
+        }
+
+        stopHeartbeat()
+        stopRegistrationTimeout()
+        let generation = UUID()
+        quitGeneration = generation
+        quitCompletion = completion
+        _ = handleQuitEvent(.started, generation: generation)
+
         if let sshTunnel {
             let safeReason = reason
                 .replacingOccurrences(of: "\r", with: "")
                 .replacingOccurrences(of: "\n", with: "")
             let boundedCommand = IRCTextFraming.prefix("QUIT :\(safeReason)")
-            sshTunnel.send(Data("\(boundedCommand)\r\n".utf8)) { [weak self, weak sshTunnel] _, _ in
-                guard let self, self.sshTunnel === sshTunnel else {
-                    completion()
-                    return
-                }
-                sshTunnel?.close()
-                self.stopHeartbeat()
-                self.sshTunnel = nil
-                self.receiveBuffer.removeAll()
-                completion()
+            sshTunnel.send(Data("\(boundedCommand)\r\n".utf8)) { [weak self, weak sshTunnel] sent, error in
+                guard let self,
+                      self.quitGeneration == generation,
+                      self.sshTunnel === sshTunnel else { return }
+                let event: IRCGracefulQuitEvent = sent && error == nil ? .localWriteSucceeded : .localWriteFailed
+                _ = self.handleQuitEvent(event, generation: generation)
             }
             return
         }
-        guard let connection else {
-            completion()
-            return
-        }
+        guard let connection else { return }
 
         let safeReason = reason
             .replacingOccurrences(of: "\r", with: "")
             .replacingOccurrences(of: "\n", with: "")
         let boundedCommand = IRCTextFraming.prefix("QUIT :\(safeReason)")
         let line = "\(boundedCommand)\r\n"
-        connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] _ in
+        connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] error in
             Task { @MainActor [weak self, weak connection] in
-                guard let self, self.connection === connection else {
-                    completion()
-                    return
-                }
-                connection?.cancel()
-                self.stopHeartbeat()
-                self.connection = nil
-                self.receiveBuffer.removeAll()
-                completion()
+                guard let self,
+                      self.quitGeneration == generation,
+                      self.connection === connection else { return }
+                let event: IRCGracefulQuitEvent = error == nil ? .localWriteSucceeded : .localWriteFailed
+                _ = self.handleQuitEvent(event, generation: generation)
             }
         })
+    }
+
+    @discardableResult
+    private func handleQuitEvent(_ event: IRCGracefulQuitEvent, generation: UUID? = nil) -> Bool {
+        guard let activeGeneration = quitGeneration,
+              generation == nil || generation == activeGeneration else { return false }
+        if let timeout = IRCGracefulQuitPolicy.timeout(after: event) {
+            let timeoutGeneration = UUID()
+            quitTimeoutGeneration = timeoutGeneration
+            // This closure deliberately retains the transport until its deadline.
+            // The initial watchdog bounds a stalled write; after a successful
+            // write, a fresh grace period gives the peer time to close cleanly.
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [self] in
+                guard quitTimeoutGeneration == timeoutGeneration else { return }
+                _ = handleQuitEvent(.timedOut, generation: activeGeneration)
+            }
+        }
+        if IRCGracefulQuitPolicy.shouldFinish(after: event) {
+            finishQuit(generation: activeGeneration)
+        }
+        return true
+    }
+
+    private func finishQuit(generation: UUID? = nil) {
+        guard let activeGeneration = quitGeneration,
+              generation == nil || generation == activeGeneration else { return }
+        let completion = quitCompletion
+        quitGeneration = nil
+        quitTimeoutGeneration = nil
+        quitCompletion = nil
+        closeTransport()
+        completion?()
     }
 
     func send(command: String, completion: (@MainActor (Bool) -> Void)? = nil) {
@@ -366,11 +454,15 @@ final class IRCConnection {
                 guard let self, let connection, self.connection === connection else { return }
                 if let data, !self.process(data) { return }
                 if let error {
-                    self.reportFailure(error.localizedDescription)
+                    if !self.handleQuitEvent(.peerClosed) {
+                        self.reportFailure(error.localizedDescription)
+                    }
                 } else if isComplete {
                     self.stopHeartbeat()
-                    self.connection = nil
-                    self.eventHandler?(.status(.offline))
+                    if !self.handleQuitEvent(.peerClosed) {
+                        self.connection = nil
+                        self.eventHandler?(.status(.offline))
+                    }
                 } else {
                     self.receiveNext(on: connection)
                 }

@@ -88,6 +88,8 @@ final class IRCAppState: ObservableObject {
     private let inactiveUpdateSignal = IRCRevisionSignal()
     private var pendingChannelMembers: [UUID: [String: ChannelMember]] = [:]
     private var connections: [UUID: IRCConnection] = [:]
+    private var disconnectingConnections: [UUID: IRCConnection] = [:]
+    private var disconnectCompletionWaiters: [UUID: [@MainActor () -> Void]] = [:]
     private var pendingJoins: [String: PendingJoin] = [:]
     private var activeNicknames: [UUID: String] = [:]
     private var registeredServerIDs = Set<UUID>()
@@ -575,15 +577,18 @@ final class IRCAppState: ObservableObject {
         connectionStatuses.removeValue(forKey: profile.id)
         terminalServerErrors.removeValue(forKey: profile.id)
         registrationNicknameSuffixes.removeValue(forKey: profile.id)
-        transport?.quit(reason: reason ?? resolvedQuitMessage())
+        if let transport {
+            retainWhileQuitting(transport, reason: reason ?? resolvedQuitMessage())
+        }
     }
 
     /// Used by the application delegate during termination. Completion is
     /// guaranteed quickly so quitting the app is never held up by a network
     /// problem, while active connections still get a real IRC QUIT command.
     func quitAllConnections(completion: @escaping () -> Void) {
-        let activeConnections = connections.values
-        guard !activeConnections.isEmpty else {
+        let activeConnections = Array(connections.values)
+        let inFlightQuitIDs = Array(disconnectingConnections.keys)
+        guard !activeConnections.isEmpty || !inFlightQuitIDs.isEmpty else {
             completion()
             return
         }
@@ -598,9 +603,15 @@ final class IRCAppState: ObservableObject {
         terminalServerErrors.removeAll()
 
         let group = DispatchGroup()
+        for quitID in inFlightQuitIDs {
+            group.enter()
+            disconnectCompletionWaiters[quitID, default: []].append {
+                group.leave()
+            }
+        }
         for connection in activeConnections {
             group.enter()
-            connection.quit(reason: resolvedQuitMessage()) {
+            retainWhileQuitting(connection, reason: resolvedQuitMessage()) {
                 group.leave()
             }
         }
@@ -2411,6 +2422,25 @@ final class IRCAppState: ObservableObject {
     private func resolvedQuitMessage() -> String {
         let trimmedMessage = quitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedMessage.isEmpty ? Self.defaultQuitMessage : trimmedMessage
+    }
+
+    private func retainWhileQuitting(
+        _ connection: IRCConnection,
+        reason: String,
+        completion: @escaping @MainActor () -> Void = {}
+    ) {
+        let quitID = UUID()
+        disconnectingConnections[quitID] = connection
+        connection.quit(reason: reason) { [weak self, weak connection] in
+            if let self,
+               let connection,
+               self.disconnectingConnections[quitID] === connection {
+                self.disconnectingConnections.removeValue(forKey: quitID)
+                let waiters = self.disconnectCompletionWaiters.removeValue(forKey: quitID) ?? []
+                waiters.forEach { $0() }
+            }
+            completion()
+        }
     }
 
     private func scheduleReconnect(for profile: ServerProfile) {
