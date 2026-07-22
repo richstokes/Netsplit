@@ -1,5 +1,16 @@
 import Foundation
 
+enum IRCClientVersion {
+    static var ctcpReply: String {
+        ctcpReply(infoDictionary: Bundle.main.infoDictionary)
+    }
+
+    static func ctcpReply(infoDictionary: [String: Any]?) -> String {
+        let marketingVersion = infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
+        return "Netsplit \(marketingVersion) for macOS"
+    }
+}
+
 enum IRCSystemSleepPolicy {
     static func shouldRestoreConnection(status: ConnectionStatus, reconnectWasScheduled: Bool) -> Bool {
         switch status {

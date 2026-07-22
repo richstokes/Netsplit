@@ -4,6 +4,18 @@ import Testing
 
 @Suite("IRC outbound framing and commands")
 struct IRCFramingAndCommandTests {
+    @Test("Builds CTCP VERSION replies from the app marketing version")
+    func buildsClientVersionReply() throws {
+        #expect(IRCClientVersion.ctcpReply(infoDictionary: [
+            "CFBundleShortVersionString": "9.8.7"
+        ]) == "Netsplit 9.8.7 for macOS")
+
+        let bundledVersion = try #require(
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        )
+        #expect(IRCClientVersion.ctcpReply == "Netsplit \(bundledVersion) for macOS")
+    }
+
     @Test("Removes CR/LF command injection and enforces the IRC byte limit")
     func sanitizesAndBoundsCommands() {
         let sanitized = IRCTextFraming.sanitizedSingleLine("PRIVMSG #swift :hello\r\nOPER attacker")

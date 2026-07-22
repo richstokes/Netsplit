@@ -2021,7 +2021,7 @@ final class IRCAppState: ObservableObject {
             // client information; never send it back into a channel.
             if command.count == 1 {
                 guard canReplyToRequest else { return false }
-                connections[profile.id]?.send(command: "NOTICE \(sender) :\u{01}VERSION Netsplit 1.0 for macOS\u{01}")
+                connections[profile.id]?.send(command: "NOTICE \(sender) :\u{01}VERSION \(IRCClientVersion.ctcpReply)\u{01}")
                 appendSystem("\(sender) requested Netsplit's version.", for: .server(profile.id))
             } else {
                 let version = command[1]
