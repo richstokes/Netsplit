@@ -207,6 +207,21 @@ private struct IRCSidebarBackgroundModifier: ViewModifier {
     }
 }
 
+private struct IRCSettingsFormBackgroundModifier: ViewModifier {
+    @Environment(\.ircThemePalette) private var palette
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let palette {
+            content
+                .scrollContentBackground(.hidden)
+                .background(palette.background)
+        } else {
+            content
+        }
+    }
+}
+
 private struct IRCControlBackgroundModifier<S: InsettableShape>: ViewModifier {
     @Environment(\.ircThemePalette) private var palette
     let shape: S
@@ -335,6 +350,10 @@ extension View {
 
     func ircSidebarBackground() -> some View {
         modifier(IRCSidebarBackgroundModifier())
+    }
+
+    func ircSettingsFormBackground() -> some View {
+        modifier(IRCSettingsFormBackgroundModifier())
     }
 
     func ircControlBackground<S: InsettableShape>(in shape: S) -> some View {

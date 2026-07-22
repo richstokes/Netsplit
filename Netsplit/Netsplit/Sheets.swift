@@ -746,6 +746,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .ircSettingsFormBackground()
         .padding(16)
     }
 
@@ -832,6 +833,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .ircSettingsFormBackground()
         .padding(16)
     }
 
@@ -852,6 +854,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .ircSettingsFormBackground()
         .padding(16)
     }
 
