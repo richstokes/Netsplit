@@ -124,6 +124,10 @@ final class IRCConnection {
     private static let maximumBufferedLineBytes = 64 * 1024
     private static let heartbeatInterval: TimeInterval = 30
     private static let heartbeatTimeout: TimeInterval = 15
+    // Network.framework or the SSH transport can remain in setup without
+    // delivering a terminal state (for example, when TLS trust evaluation
+    // stalls). Cover the entire DNS/TCP/SSH/TLS setup phase with a bound.
+    private static let connectionTimeout: TimeInterval = 30
     // Some IRC networks perform reverse-DNS and Ident checks before replying
     // to CAP or completing registration. IRCnet commonly takes about 30
     // seconds, so leave enough headroom for capability negotiation afterward.
@@ -133,6 +137,8 @@ final class IRCConnection {
     private var receiveBuffer = IRCLineBuffer(maximumLineBytes: maximumBufferedLineBytes)
     private var heartbeatGeneration: UUID?
     private var pendingHeartbeatToken: String?
+    private var connectionTimeoutGeneration: UUID?
+    private var lastConnectionAttemptError: String?
     private var registrationTimeoutGeneration: UUID?
     private var hasReportedFailure = false
     private var hasReachedReadyState = false
@@ -181,6 +187,7 @@ final class IRCConnection {
             let tunnel = SSHTunnelConnection()
             sshTunnel = tunnel
             eventHandler?(.status(.connecting))
+            startConnectionTimeout()
             tunnel.connect(
                 configuration: SSHTunnelConfiguration(
                     sshHostname: sshHostname,
@@ -196,6 +203,7 @@ final class IRCConnection {
                 onReady: { [weak self, weak tunnel] in
                     guard let self, let tunnel, self.sshTunnel === tunnel else { return }
                     self.hasReachedReadyState = true
+                    self.stopConnectionTimeout()
                     self.eventHandler?(.status(.online))
                     self.register(nickname: nickname, realName: realName)
                     self.startRegistrationTimeout()
@@ -254,8 +262,15 @@ final class IRCConnection {
                 guard let self, let connection, self.connection === connection else { return }
                 switch state {
                 case .setup, .preparing: self.eventHandler?(.status(.connecting))
+                case .waiting(let error):
+                    // A waiting connection may recover on its own. Keep it
+                    // alive until the setup watchdog expires, while retaining
+                    // the most useful error for the eventual UI message.
+                    self.lastConnectionAttemptError = error.localizedDescription
+                    self.eventHandler?(.status(.connecting))
                 case .ready:
                     self.hasReachedReadyState = true
+                    self.stopConnectionTimeout()
                     self.eventHandler?(.status(.online))
                     self.register(nickname: nickname, realName: realName)
                     self.startRegistrationTimeout()
@@ -285,6 +300,7 @@ final class IRCConnection {
             }
         }
         eventHandler?(.status(.connecting))
+        startConnectionTimeout()
         connection.start(queue: .global(qos: .userInitiated))
     }
 
@@ -298,6 +314,7 @@ final class IRCConnection {
 
     private func closeTransport() {
         stopHeartbeat()
+        stopConnectionTimeout()
         stopRegistrationTimeout()
         connection?.cancel()
         connection = nil
@@ -548,6 +565,28 @@ final class IRCConnection {
         pendingHeartbeatToken = nil
     }
 
+    private func startConnectionTimeout() {
+        let generation = UUID()
+        connectionTimeoutGeneration = generation
+        lastConnectionAttemptError = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectionTimeout) { [weak self] in
+            guard let self,
+                  self.connectionTimeoutGeneration == generation,
+                  !self.hasReachedReadyState,
+                  self.connection != nil || self.sshTunnel != nil,
+                  !self.hasReportedFailure else { return }
+            let detail = self.lastConnectionAttemptError.map { " Last network error: \($0)" } ?? ""
+            self.reportFailure(
+                "The connection could not be established within \(Int(Self.connectionTimeout)) seconds.\(detail)"
+            )
+        }
+    }
+
+    private func stopConnectionTimeout() {
+        connectionTimeoutGeneration = nil
+        lastConnectionAttemptError = nil
+    }
+
     private func startRegistrationTimeout() {
         let generation = UUID()
         registrationTimeoutGeneration = generation
@@ -572,6 +611,7 @@ final class IRCConnection {
         guard !hasReportedFailure else { return }
         hasReportedFailure = true
         stopHeartbeat()
+        stopConnectionTimeout()
         stopRegistrationTimeout()
         if automaticallyReconnect {
             eventHandler?(.status(.failed(message)))
