@@ -1340,7 +1340,7 @@ private struct MessageRow: View {
             showsImagePreviews: automaticallyPreviewsImages
         )
 
-        HStack(alignment: .firstTextBaseline, spacing: textMetrics.spacing(10)) {
+        HStack(alignment: .firstTextBaseline, spacing: textMetrics.spacing(8)) {
             Text(message.timestamp, format: .dateTime.hour().minute())
                 .font(.system(size: timestampFontSize, design: .monospaced)).foregroundStyle(.tertiary)
                 .lineLimit(1).fixedSize(horizontal: true, vertical: false)
