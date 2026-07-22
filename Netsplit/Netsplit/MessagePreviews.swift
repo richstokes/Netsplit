@@ -60,7 +60,6 @@ enum IRCMessagePreviewPolicy {
 struct MessagePreviewStack: View {
     let previews: [IRCMessagePreview]
     @State private var isExpanded = true
-    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
 
     var body: some View {
         if !previews.isEmpty {
@@ -94,14 +93,9 @@ struct MessagePreviewStack: View {
                             }
                         }
                     }
-                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
             .frame(maxWidth: 520, alignment: .leading)
-            .animation(
-                accessibilityReduceMotion ? nil : .easeInOut(duration: 0.16),
-                value: isExpanded
-            )
         }
     }
 
