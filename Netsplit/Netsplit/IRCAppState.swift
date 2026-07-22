@@ -71,6 +71,8 @@ final class IRCAppState: ObservableObject {
         didSet { UserDefaults.standard.set(showsMemberList, forKey: "showsMemberList") }
     }
     @Published var showsServerChannelPane = true
+    @Published var isJumpPalettePresented = false
+    @Published private(set) var workspaceFocusRequest: IRCWorkspaceFocusRequest?
     @Published private(set) var channels: [Conversation] = []
     @Published private(set) var directMessages: [Conversation] = []
     @Published private(set) var connectionStatuses: [UUID: ConnectionStatus] = [:]
@@ -135,6 +137,7 @@ final class IRCAppState: ObservableObject {
     private var forwardSelectionHistory: [SidebarItem] = []
     private var isNavigatingSelectionHistory = false
     private let maximumSelectionHistoryCount = 100
+    private var lastConversationSelectionByServerID: [UUID: SidebarItem] = [:]
 
     init() {
         let defaults = UserDefaults.standard
@@ -193,6 +196,34 @@ final class IRCAppState: ObservableObject {
         return profile(for: selection)
     }
 
+    var jumpDestinations: [IRCJumpDestination] {
+        activeProfiles.flatMap { profile in
+            var destinations = [IRCJumpDestination(
+                selection: .server(profile.id),
+                title: profile.name,
+                serverName: profile.name,
+                kind: .server
+            )]
+            destinations.append(contentsOf: channels(for: profile).map {
+                IRCJumpDestination(
+                    selection: .channel($0.id),
+                    title: $0.name,
+                    serverName: profile.name,
+                    kind: .channel
+                )
+            })
+            destinations.append(contentsOf: directMessages(for: profile).map {
+                IRCJumpDestination(
+                    selection: .directMessage($0.id),
+                    title: $0.name,
+                    serverName: profile.name,
+                    kind: .directMessage
+                )
+            })
+            return destinations
+        }
+    }
+
     var canBrowseSelectedChannels: Bool {
         guard let profile = selectedProfile else { return false }
         return registeredServerIDs.contains(profile.id)
@@ -232,6 +263,47 @@ final class IRCAppState: ObservableObject {
 
     func toggleServerChannelPane() {
         showsServerChannelPane.toggle()
+    }
+
+    func presentJumpPalette() {
+        isJumpPalettePresented = true
+    }
+
+    func jumpDestinations(matching query: String) -> [IRCJumpDestination] {
+        IRCJumpSearch.results(in: jumpDestinations, matching: query)
+    }
+
+    func jump(to destination: IRCJumpDestination) {
+        guard isValidNavigationSelection(destination.selection) else { return }
+        selection = destination.selection
+        isJumpPalettePresented = false
+    }
+
+    @discardableResult
+    func selectActiveServer(number: Int) -> Bool {
+        guard (1...9).contains(number), activeProfiles.indices.contains(number - 1) else { return false }
+        selectServerRestoringLastConversation(activeProfiles[number - 1])
+        return true
+    }
+
+    func selectServerRestoringLastConversation(_ profile: ServerProfile) {
+        if let remembered = lastConversationSelectionByServerID[profile.id],
+           isValidNavigationSelection(remembered),
+           self.profile(for: remembered)?.id == profile.id {
+            selection = remembered
+        } else {
+            selection = .server(profile.id)
+        }
+    }
+
+    func requestSidebarFocus() {
+        showsServerChannelPane = true
+        workspaceFocusRequest = IRCWorkspaceFocusRequest(target: .sidebar)
+    }
+
+    func requestComposerFocus() {
+        guard selection != nil, selection != .connectionCenter else { return }
+        workspaceFocusRequest = IRCWorkspaceFocusRequest(target: .composer)
     }
 
     func closeActiveSelection() {
@@ -1962,10 +2034,21 @@ final class IRCAppState: ObservableObject {
     }
 
     private func recordSelectionChange(from previousSelection: SidebarItem?) {
+        rememberConversationSelection(selection)
         guard !isNavigatingSelectionHistory, previousSelection != selection else { return }
         forwardSelectionHistory.removeAll()
         guard let previousSelection, isValidNavigationSelection(previousSelection) else { return }
         appendToBackHistory(previousSelection)
+    }
+
+    private func rememberConversationSelection(_ item: SidebarItem?) {
+        guard let item, let profile = profile(for: item) else { return }
+        switch item {
+        case .channel, .directMessage:
+            lastConversationSelectionByServerID[profile.id] = item
+        case .connectionCenter, .server:
+            break
+        }
     }
 
     private func selectFromHistory(_ destination: SidebarItem) {
@@ -2076,6 +2159,7 @@ final class IRCAppState: ObservableObject {
             return !removedConversationIDs.contains(conversationID) && conversationID != serverID
         }
         pendingJoins = pendingJoins.filter { $0.value.serverID != serverID }
+        lastConversationSelectionByServerID.removeValue(forKey: serverID)
         if wasShowingRemovedServer {
             selection = .connectionCenter
         }

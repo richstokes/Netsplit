@@ -940,6 +940,77 @@ struct IRCModelsAndPolicyTests {
         #expect(state.selection == alice)
     }
 
+    @Test("Server selection restores the last open conversation on each server")
+    @MainActor
+    func restoresLastConversationForServerShortcuts() throws {
+        let state = IRCAppState()
+        let firstProfile = state.profiles[0]
+        let secondProfile = state.profiles[1]
+
+        state.startDirectMessage(with: "Alice", from: .server(firstProfile.id))
+        let alice = try #require(state.selection)
+        state.startDirectMessage(with: "Bob", from: .server(secondProfile.id))
+        let bob = try #require(state.selection)
+
+        state.selectServerRestoringLastConversation(firstProfile)
+        #expect(state.selection == alice)
+        state.selectServerRestoringLastConversation(secondProfile)
+        #expect(state.selection == bob)
+    }
+
+    @Test("Connections selection preserves each server's remembered conversation")
+    @MainActor
+    func opensConnectionsWithoutForgettingConversation() throws {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let alice = try #require(state.selection)
+
+        state.showConnections()
+        #expect(state.selection == .connectionCenter)
+
+        state.selectServerRestoringLastConversation(profile)
+        #expect(state.selection == alice)
+    }
+
+    @Test("Jump search supports partial, fuzzy, and cross-field matches")
+    func matchesJumpDestinations() {
+        let libera = UUID()
+        let snoonet = UUID()
+        let destinations = [
+            IRCJumpDestination(
+                selection: .server(libera),
+                title: "Libera.Chat",
+                serverName: "Libera.Chat",
+                kind: .server
+            ),
+            IRCJumpDestination(
+                selection: .channel(UUID()),
+                title: "#general",
+                serverName: "Libera.Chat",
+                kind: .channel
+            ),
+            IRCJumpDestination(
+                selection: .channel(UUID()),
+                title: "#development",
+                serverName: "Snoonet",
+                kind: .channel
+            ),
+            IRCJumpDestination(
+                selection: .directMessage(snoonet),
+                title: "Élodie",
+                serverName: "Snoonet",
+                kind: .directMessage
+            )
+        ]
+
+        #expect(IRCJumpSearch.results(in: destinations, matching: "lib gen").map(\.title) == ["#general"])
+        #expect(IRCJumpSearch.results(in: destinations, matching: "dvlp").map(\.title) == ["#development"])
+        #expect(IRCJumpSearch.results(in: destinations, matching: "elodie").map(\.title) == ["Élodie"])
+        #expect(IRCJumpSearch.results(in: destinations, matching: "libera").first?.title == "Libera.Chat")
+    }
+
     private func link(
         for substring: String,
         occurrence: Int,

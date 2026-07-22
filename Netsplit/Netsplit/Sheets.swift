@@ -527,6 +527,165 @@ private struct ServerEditorHelpText: View {
     }
 }
 
+struct JumpPalette: View {
+    @ObservedObject var state: IRCAppState
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.ircTextMetrics) private var textMetrics
+    @State private var search = ""
+    @State private var selectedItem: SidebarItem?
+    @FocusState private var isSearchFocused: Bool
+
+    private var results: [IRCJumpDestination] {
+        state.jumpDestinations(matching: search)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: textMetrics.spacing(12)) {
+                Text("Jump to Server or Conversation")
+                    .font(.system(size: textMetrics.size(20), weight: .semibold))
+                    .accessibilityAddTraits(.isHeader)
+
+                HStack(spacing: textMetrics.spacing(9)) {
+                    Image(systemName: "magnifyingglass")
+                        .ircSecondaryText()
+                        .accessibilityHidden(true)
+                    TextField("Search open servers and conversations", text: $search)
+                        .textFieldStyle(.plain)
+                        .focused($isSearchFocused)
+                        .onSubmit(openSelection)
+                        .onKeyPress(.downArrow) {
+                            moveSelection(by: 1)
+                            return .handled
+                        }
+                        .onKeyPress(.upArrow) {
+                            moveSelection(by: -1)
+                            return .handled
+                        }
+                    if !search.isEmpty {
+                        Button {
+                            search = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .ircSecondaryText()
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear search")
+                        .accessibilityLabel("Clear jump search")
+                    }
+                }
+                .padding(.horizontal, textMetrics.spacing(11))
+                .padding(.vertical, textMetrics.spacing(9))
+                .ircFieldBackground(in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .padding(textMetrics.spacing(18))
+
+            Divider()
+                .ircDivider()
+
+            Group {
+                if results.isEmpty {
+                    ContentUnavailableView(
+                        search.isEmpty ? "No Active Servers" : "No Matches",
+                        systemImage: search.isEmpty ? "network.slash" : "magnifyingglass",
+                        description: Text(search.isEmpty
+                            ? "Connect to a server to make it available here."
+                            : "Try a server, channel, or nickname.")
+                    )
+                } else {
+                    List(selection: $selectedItem) {
+                        ForEach(results) { destination in
+                            HStack(spacing: textMetrics.spacing(11)) {
+                                Image(systemName: destination.kind.icon)
+                                    .foregroundStyle(.tint)
+                                    .frame(width: textMetrics.spacing(22))
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(destination.title)
+                                        .font(.system(size: textMetrics.size(14), weight: .medium))
+                                    Text(destination.kind == .server
+                                         ? destination.kind.rawValue
+                                         : "\(destination.kind.rawValue) on \(destination.serverName)")
+                                        .font(.system(size: textMetrics.size(11)))
+                                        .ircSecondaryText()
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.vertical, textMetrics.spacing(3))
+                            .contentShape(Rectangle())
+                            .tag(destination.selection)
+                            .onTapGesture(count: 2) {
+                                state.jump(to: destination)
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel(destination.title)
+                            .accessibilityValue("\(destination.kind.rawValue), \(destination.serverName)")
+                            .accessibilityHint("Opens this destination")
+                            .accessibilityAction {
+                                state.jump(to: destination)
+                            }
+                        }
+                    }
+                    .listStyle(.inset)
+                }
+            }
+            .frame(height: textMetrics.spacing(290))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(results.count) jump results")
+
+            Divider()
+                .ircDivider()
+
+            HStack {
+                Text("↑↓ to choose · Return to open")
+                    .font(.system(size: textMetrics.size(11)))
+                    .ircSecondaryText()
+                    .accessibilityHidden(true)
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Open") { openSelection() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(selectedDestination == nil)
+            }
+            .padding(textMetrics.spacing(14))
+        }
+        .frame(width: textMetrics.spacing(520))
+        .onAppear {
+            selectedItem = results.first?.selection
+            DispatchQueue.main.async { isSearchFocused = true }
+        }
+        .onChange(of: results.map(\.selection)) { _, resultSelections in
+            if !resultSelections.contains(where: { $0 == selectedItem }) {
+                selectedItem = resultSelections.first
+            }
+        }
+    }
+
+    private var selectedDestination: IRCJumpDestination? {
+        if let selectedItem,
+           let selected = results.first(where: { $0.selection == selectedItem }) {
+            return selected
+        }
+        return results.first
+    }
+
+    private func moveSelection(by offset: Int) {
+        guard !results.isEmpty else { return }
+        let currentIndex = selectedItem.flatMap { selected in
+            results.firstIndex { $0.selection == selected }
+        } ?? (offset > 0 ? -1 : 0)
+        let newIndex = min(max(currentIndex + offset, 0), results.count - 1)
+        selectedItem = results[newIndex].selection
+    }
+
+    private func openSelection() {
+        guard let destination = selectedDestination else { return }
+        state.jump(to: destination)
+    }
+}
+
 struct ChannelBrowser: View {
     @ObservedObject var state: IRCAppState
     @Environment(\.dismiss) private var dismiss

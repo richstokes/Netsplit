@@ -1022,6 +1022,103 @@ enum SidebarItem: Hashable {
     }
 }
 
+enum IRCJumpDestinationKind: String, Hashable {
+    case server = "Server"
+    case channel = "Channel"
+    case directMessage = "Direct message"
+
+    var icon: String {
+        switch self {
+        case .server: "network"
+        case .channel: "number"
+        case .directMessage: "person.crop.circle"
+        }
+    }
+}
+
+struct IRCJumpDestination: Identifiable, Hashable {
+    let selection: SidebarItem
+    let title: String
+    let serverName: String
+    let kind: IRCJumpDestinationKind
+
+    var id: SidebarItem { selection }
+}
+
+/// Small, deterministic matcher shared by the jump palette and its tests.
+/// Results favor exact and prefix title matches, then substring and fuzzy
+/// matches across the conversation and server names.
+enum IRCJumpSearch {
+    static func results(
+        in destinations: [IRCJumpDestination],
+        matching query: String
+    ) -> [IRCJumpDestination] {
+        let terms = query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { normalized(String($0)) }
+
+        guard !terms.isEmpty else { return destinations }
+
+        return destinations.enumerated().compactMap { index, destination -> (Int, Int, IRCJumpDestination)? in
+            let title = normalized(destination.title)
+            let server = normalized(destination.serverName)
+            let combined = "\(title) \(server)"
+            var score = 0
+
+            for term in terms {
+                guard let termScore = matchScore(term, title: title, server: server, combined: combined) else {
+                    return nil
+                }
+                score += termScore
+            }
+            return (score, index, destination)
+        }
+        .sorted {
+            if $0.0 != $1.0 { return $0.0 < $1.0 }
+            return $0.1 < $1.1
+        }
+        .map(\.2)
+    }
+
+    private static func matchScore(_ term: String, title: String, server: String, combined: String) -> Int? {
+        if title == term { return 0 }
+        if title.hasPrefix(term) { return 10 }
+        if title.split(separator: " ").contains(where: { $0.hasPrefix(term) }) { return 20 }
+        if title.contains(term) { return 30 }
+        if server == term { return 35 }
+        if server.hasPrefix(term) { return 40 }
+        if combined.contains(term) { return 50 }
+        if isSubsequence(term, of: title) { return 70 }
+        if isSubsequence(term, of: combined) { return 80 }
+        return nil
+    }
+
+    private static func isSubsequence(_ needle: String, of haystack: String) -> Bool {
+        var needleIndex = needle.startIndex
+        for character in haystack where needleIndex < needle.endIndex {
+            if character == needle[needleIndex] {
+                needle.formIndex(after: &needleIndex)
+            }
+        }
+        return needleIndex == needle.endIndex
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+}
+
+enum IRCWorkspaceFocus: Hashable {
+    case sidebar
+    case composer
+}
+
+struct IRCWorkspaceFocusRequest: Equatable {
+    let id = UUID()
+    let target: IRCWorkspaceFocus
+}
+
 enum ConnectionStatus: Equatable {
     case offline, connecting, online, failed(String)
 

@@ -36,8 +36,9 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        // Handle conversation, pane, and history shortcuts before AppKit turns
-        // Command-W into Close Window or delivers shortcut input elsewhere.
+        // Handle conversation, server, pane, and history shortcuts before
+        // AppKit turns Command-W into Close Window or delivers shortcut input
+        // elsewhere.
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .otherMouseDown, .scrollWheel, .swipe]
         ) { [weak self] event in
@@ -76,6 +77,9 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
             case "e":
                 state?.toggleServerChannelPane()
                 return nil
+            case "k":
+                state?.presentJumpPalette()
+                return nil
             case "[":
                 if state?.canNavigateBack == true {
                     state?.navigateBack()
@@ -84,6 +88,11 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
             case "]":
                 if state?.canNavigateForward == true {
                     state?.navigateForward()
+                }
+                return nil
+            case let digit? where digit.count == 1 && ("1"..."9").contains(digit):
+                guard let number = Int(digit), state?.selectActiveServer(number: number) == true else {
+                    return event
                 }
                 return nil
             default:
@@ -213,15 +222,32 @@ struct NetsplitApp: App {
                 .keyboardShortcut("l", modifiers: [.command])
                 .disabled(!state.canBrowseSelectedChannels)
                 Button("Show Connections") { state.showConnections() }
-                    .keyboardShortcut("k", modifiers: [.command])
             }
             CommandMenu("Navigate") {
+                Button("Jump to Server or Conversation…") { state.presentJumpPalette() }
+                    .keyboardShortcut("k", modifiers: [.command])
+                Divider()
                 Button("Back") { state.navigateBack() }
                     .keyboardShortcut("[", modifiers: [.command])
                     .disabled(!state.canNavigateBack)
                 Button("Forward") { state.navigateForward() }
                     .keyboardShortcut("]", modifiers: [.command])
                     .disabled(!state.canNavigateForward)
+                if !state.activeProfiles.isEmpty {
+                    Divider()
+                    ForEach(Array(state.activeProfiles.prefix(9).enumerated()), id: \.element.id) { index, profile in
+                        Button("Server \(index + 1): \(profile.name)") {
+                            state.selectActiveServer(number: index + 1)
+                        }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command])
+                    }
+                }
+                Divider()
+                Button("Move Focus to Sidebar") { state.requestSidebarFocus() }
+                    .keyboardShortcut("s", modifiers: [.command, .control])
+                Button("Move Focus to Message Field") { state.requestComposerFocus() }
+                    .keyboardShortcut("m", modifiers: [.command, .control])
+                    .disabled(state.selection == nil || state.selection == .connectionCenter)
             }
             CommandGroup(after: .toolbar) {
                 Button(state.showsServerChannelPane ? "Hide Server/Channel Pane" : "Show Server/Channel Pane") {

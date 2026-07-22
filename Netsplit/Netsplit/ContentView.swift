@@ -40,6 +40,7 @@ struct ContentView: View {
     @ObservedObject var state: IRCAppState
     @State private var showAddServer = false
     @State private var editingProfile: ServerProfile?
+    @FocusState private var workspaceFocus: IRCWorkspaceFocus?
 
     private var textMetrics: IRCTextMetrics { IRCTextMetrics(bodySize: state.transcriptFontSize) }
     private var hasSelectedChannel: Bool {
@@ -53,7 +54,12 @@ struct ContentView: View {
             get: { state.showsServerChannelPane ? .all : .detailOnly },
             set: { state.showsServerChannelPane = $0 != .detailOnly }
         )) {
-            SidebarView(state: state, showAddServer: $showAddServer, editingProfile: $editingProfile)
+            SidebarView(
+                state: state,
+                showAddServer: $showAddServer,
+                editingProfile: $editingProfile,
+                workspaceFocus: $workspaceFocus
+            )
                 .navigationSplitViewColumnWidth(
                     min: textMetrics.spacing(218),
                     ideal: textMetrics.spacing(250),
@@ -64,7 +70,7 @@ struct ContentView: View {
                 if state.selection == .connectionCenter || state.selection == nil {
                     ConnectionCenterView(state: state, showAddServer: $showAddServer, editingProfile: $editingProfile)
                 } else if let selection = state.selection {
-                    ConversationView(state: state, selection: selection)
+                    ConversationView(state: state, selection: selection, workspaceFocus: $workspaceFocus)
                         .id(selection)
                 }
             }
@@ -117,6 +123,15 @@ struct ContentView: View {
         .sheet(isPresented: $state.isChannelBrowserPresented) {
             ChannelBrowser(state: state)
         }
+        .sheet(isPresented: $state.isJumpPalettePresented) {
+            JumpPalette(state: state)
+        }
+        .onChange(of: state.workspaceFocusRequest) { _, request in
+            guard let request else { return }
+            DispatchQueue.main.async {
+                workspaceFocus = request.target
+            }
+        }
     }
 }
 
@@ -124,6 +139,7 @@ private struct SidebarView: View {
     @ObservedObject var state: IRCAppState
     @Binding var showAddServer: Bool
     @Binding var editingProfile: ServerProfile?
+    @FocusState.Binding var workspaceFocus: IRCWorkspaceFocus?
     @State private var listSelection: SidebarItem?
     @State private var collapsedProfileIDs: Set<UUID> = []
     @Environment(\.ircTextMetrics) private var textMetrics
@@ -217,6 +233,9 @@ private struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .ircSidebarBackground()
+        .focused($workspaceFocus, equals: .sidebar)
+        .accessibilityLabel("Servers and conversations")
+        .accessibilityHint("Use the arrow keys to choose a server or conversation")
         .onAppear { listSelection = state.selection }
         .onChange(of: listSelection) { _, newSelection in
             DispatchQueue.main.async { state.selection = newSelection }
@@ -558,12 +577,12 @@ private struct ServerProfileCard: View {
 private struct ConversationView: View {
     @ObservedObject var state: IRCAppState
     let selection: SidebarItem
+    @FocusState.Binding var workspaceFocus: IRCWorkspaceFocus?
     @State private var draft = ""
     @State private var tabCompletion: RecipientTabCompletion?
     @State private var commandCompletion: CommandTabCompletion?
     @State private var pendingURL: PendingURL?
     @State private var showsTopic = false
-    @FocusState private var composerFocused: Bool
     @Environment(\.ircTextMetrics) private var textMetrics
 
     private var title: String { state.title(for: selection) }
@@ -648,7 +667,7 @@ private struct ConversationView: View {
                             .padding(.horizontal, textMetrics.spacing(12))
                             .padding(.vertical, textMetrics.spacing(9))
                             .ircFieldBackground(in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .focused($composerFocused)
+                            .focused($workspaceFocus, equals: .composer)
                             .accessibilityLabel("Message to \(title)")
                             .accessibilityHint("Type one IRC message. Press Return to send or Tab to complete a command or nickname.")
                             .onSubmit(send)
@@ -681,7 +700,7 @@ private struct ConversationView: View {
         .onAppear {
             state.markRead(selection)
             draft = state.draft(for: selection)
-            composerFocused = true
+            workspaceFocus = .composer
         }
         .onChange(of: selection) { _, newSelection in
             state.markRead(newSelection)
