@@ -16,6 +16,7 @@ Some thoughts/goals I had while making this.
 
 - macOS Native app - easily installable via the App Store
 - Tasteful (but opinionated) UI, following modern SwiftUI UI/UX guidelines
+- Generally lightweight. I'm basically just adding features I need/find useful as I go rather than overloading with every possible thing one could do
 - Accessibility baked in from day one - the app should work well with Voiceover, etc
 - Profiled and optimized for low resource use
   - While connected to 7 active servers / 25 channels, memory footprint remained <150MB

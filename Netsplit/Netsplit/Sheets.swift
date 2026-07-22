@@ -586,7 +586,7 @@ struct ChannelBrowser: View {
                 .padding(.vertical, textMetrics.spacing(8))
                 .ircFieldBackground(in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-                VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
                     Text(isLoading
                          ? "Receiving the live channel list…"
                          : (search.isEmpty
@@ -595,6 +595,12 @@ struct ChannelBrowser: View {
                         .font(.system(size: textMetrics.size(12), weight: .medium))
                         .ircSecondaryText()
                         .accessibilityAddTraits(.updatesFrequently)
+
+                    Spacer()
+
+                    Text("⌘-click Join to keep browsing")
+                        .font(.system(size: textMetrics.size(12)))
+                        .ircSecondaryText()
                 }
             }
             .padding(textMetrics.spacing(20))
