@@ -151,7 +151,7 @@ extension EnvironmentValues {
     }
 }
 
-private struct IRCApplicationThemeModifier: ViewModifier {
+private struct IRCApplicationAppearanceModifier: ViewModifier {
     let appearance: IRCApplicationAppearance
 
     @ViewBuilder
@@ -161,12 +161,25 @@ private struct IRCApplicationThemeModifier: ViewModifier {
                 .preferredColorScheme(appearance.colorScheme)
                 .environment(\.ircThemePalette, palette)
                 .tint(palette.accent)
-                .foregroundStyle(palette.text, palette.secondaryText)
-                .background(palette.background.ignoresSafeArea())
         } else {
             content
                 .preferredColorScheme(appearance.colorScheme)
                 .environment(\.ircThemePalette, nil)
+        }
+    }
+}
+
+private struct IRCWorkspaceThemeModifier: ViewModifier {
+    @Environment(\.ircThemePalette) private var palette
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let palette {
+            content
+                .foregroundStyle(palette.text, palette.secondaryText)
+                .background(palette.background.ignoresSafeArea())
+        } else {
+            content
         }
     }
 }
@@ -201,21 +214,6 @@ private struct IRCSidebarBackgroundModifier: ViewModifier {
             content
                 .scrollContentBackground(.hidden)
                 .background(palette.bar)
-        } else {
-            content
-        }
-    }
-}
-
-private struct IRCSettingsFormBackgroundModifier: ViewModifier {
-    @Environment(\.ircThemePalette) private var palette
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if let palette {
-            content
-                .scrollContentBackground(.hidden)
-                .background(palette.background)
         } else {
             content
         }
@@ -336,8 +334,12 @@ private struct IRCCustomWindowBackgroundModifier: ViewModifier {
 }
 
 extension View {
-    func ircApplicationTheme(_ appearance: IRCApplicationAppearance) -> some View {
-        modifier(IRCApplicationThemeModifier(appearance: appearance))
+    func ircApplicationAppearance(_ appearance: IRCApplicationAppearance) -> some View {
+        modifier(IRCApplicationAppearanceModifier(appearance: appearance))
+    }
+
+    func ircWorkspaceTheme() -> some View {
+        modifier(IRCWorkspaceThemeModifier())
     }
 
     func ircBarBackground() -> some View {
@@ -350,10 +352,6 @@ extension View {
 
     func ircSidebarBackground() -> some View {
         modifier(IRCSidebarBackgroundModifier())
-    }
-
-    func ircSettingsFormBackground() -> some View {
-        modifier(IRCSettingsFormBackgroundModifier())
     }
 
     func ircControlBackground<S: InsettableShape>(in shape: S) -> some View {

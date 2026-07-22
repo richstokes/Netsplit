@@ -187,7 +187,7 @@ struct NetsplitApp: App {
         WindowGroup(id: AppSceneID.mainWindow) {
             ContentView(state: state)
                 .frame(minWidth: 920, minHeight: 620)
-                .ircApplicationTheme(state.applicationAppearance)
+                .ircApplicationAppearance(state.applicationAppearance)
                 .onAppear {
                     appDelegate.state = state
                     DispatchQueue.main.async {
@@ -246,6 +246,7 @@ struct NetsplitApp: App {
         }
         Settings {
             SettingsView(state: state)
+                .ircApplicationAppearance(state.applicationAppearance)
         }
     }
 }

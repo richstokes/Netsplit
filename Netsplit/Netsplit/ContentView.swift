@@ -106,6 +106,7 @@ struct ContentView: View {
                 }
             }
         }
+        .ircWorkspaceTheme()
         .environment(\.ircTextMetrics, textMetrics)
         .sheet(isPresented: $showAddServer) {
             ServerProfileEditor(state: state)
@@ -1583,7 +1584,6 @@ private struct LinkWarningView: View {
         }
         .padding(22)
         .frame(width: 490)
-        .ircCustomWindowBackground()
     }
 }
 

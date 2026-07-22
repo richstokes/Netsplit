@@ -710,7 +710,6 @@ struct SettingsView: View {
                 .tabItem { Label("Safety", systemImage: "shield") }
         }
         .frame(width: 580, height: 620)
-        .ircApplicationTheme(state.applicationAppearance)
     }
 
     private var generalSettings: some View {
@@ -746,7 +745,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .ircSettingsFormBackground()
         .padding(16)
     }
 
@@ -787,7 +785,7 @@ struct SettingsView: View {
                 Toggle("Use monospace for server messages", isOn: $state.usesMonospacedServerMessages)
 
                 HStack {
-                    Text("Interface text size")
+                    Text("Chat interface text size")
                     Spacer()
                     Text("\(Int(state.transcriptFontSize)) pt")
                         .foregroundStyle(.secondary)
@@ -801,11 +799,11 @@ struct SettingsView: View {
                     in: 12...24,
                     step: 1
                 )
-                .accessibilityLabel("Interface text size")
+                .accessibilityLabel("Chat interface text size")
                 .accessibilityValue("\(Int(state.transcriptFontSize)) points")
-                .accessibilityHint("Adjusts text throughout the app from 12 to 24 points")
+                .accessibilityHint("Adjusts text throughout the chat interface from 12 to 24 points")
                 Button("Reset Text Size") { state.resetTranscriptFontSize() }
-                Text("Applies to conversations, navigation, member lists, connection cards, and the channel browser.")
+                Text("Applies to conversations, navigation, member lists, connection cards, and the channel browser. Settings and configuration forms retain the standard macOS text size.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -833,7 +831,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .ircSettingsFormBackground()
         .padding(16)
     }
 
@@ -854,7 +851,6 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .ircSettingsFormBackground()
         .padding(16)
     }
 
