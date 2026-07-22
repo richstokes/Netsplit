@@ -775,7 +775,7 @@ private struct ConversationView: View {
     }
 
     private static let supportedCommands = [
-        "AWAY", "CTCP", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
+        "AWAY", "CTCP", "DISCONNECT", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
         "MODE", "MOTD", "MSG", "MUTE", "NAMES", "NICK", "NOTICE", "PART",
         "QUERY", "QUIT", "SHOWMUTES", "SLAP", "TOPIC", "UNMUTE", "VERSION",
         "WHO", "WHOIS"

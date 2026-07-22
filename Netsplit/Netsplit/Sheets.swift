@@ -742,7 +742,7 @@ struct SettingsView: View {
             }
             Section("Connection") {
                 TextField("Quit message", text: $state.quitMessage)
-                Text("Sent when you disconnect or quit Netsplit. A reason supplied with /quit overrides this message once.")
+                Text("Sent when you disconnect or quit Netsplit. A reason supplied with /disconnect or /quit overrides this message once.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("Reconnect automatically", isOn: $state.reconnectAutomatically)

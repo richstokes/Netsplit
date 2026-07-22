@@ -981,7 +981,7 @@ final class IRCAppState: ObservableObject {
         let parts = input.dropFirst().split(separator: " ", maxSplits: 1).map(String.init)
         guard let command = parts.first?.uppercased(), let profile = profile(for: item) else { return }
         let argument = parts.count > 1 ? parts[1] : ""
-        let localCommands: Set<String> = ["SHOWMUTES", "MUTE", "UNMUTE", "QUIT"]
+        let localCommands: Set<String> = ["SHOWMUTES", "MUTE", "UNMUTE", "QUIT", "DISCONNECT"]
         if !localCommands.contains(command), !canSendMessages(on: profile, reportingTo: item) {
             return
         }
@@ -1186,7 +1186,7 @@ final class IRCAppState: ObservableObject {
             appendSystem("Changing nickname to \(newNickname)…", for: item)
         case "PART":
             executePart(argument, on: profile, from: item)
-        case "QUIT":
+        case "QUIT", "DISCONNECT":
             let reason = argument.trimmingCharacters(in: .whitespacesAndNewlines)
             disconnect(profile, reason: reason.isEmpty ? nil : reason)
         case "AWAY", "NAMES":

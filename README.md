@@ -84,6 +84,7 @@ server, channel, or private message first.
 | `/join <channel>` | Join a channel. A missing channel prefix is automatically changed to `#`. |
 | `/list [arguments]` | Open the live channel browser and request the server's channel list. |
 | `/part [#channel] [reason]` | Leave the current channel, a named joined channel, or include a part reason. |
+| `/disconnect [reason]` | Disconnect from the current server. |
 | `/quit [reason]` | Disconnect from the current server. |
 | `/topic [#channel] [topic]` | View or change a topic. In a channel, a non-channel first argument is treated as the new topic. |
 
