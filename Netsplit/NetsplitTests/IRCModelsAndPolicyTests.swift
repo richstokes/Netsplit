@@ -437,6 +437,127 @@ struct IRCModelsAndPolicyTests {
         ))
     }
 
+    @Test("Transcript tail following tolerates the bottom inset and detects scrolling into history")
+    func detectsTranscriptTailPosition() {
+        let content = CGRect(x: 0, y: 0, width: 600, height: 1_000)
+
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: CGRect(x: 0, y: 600, width: 600, height: 400),
+            contentBounds: content,
+            contentIsFlipped: true
+        ))
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: CGRect(x: 0, y: 580, width: 600, height: 400),
+            contentBounds: content,
+            contentIsFlipped: true
+        ))
+        #expect(!IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: CGRect(x: 0, y: 500, width: 600, height: 400),
+            contentBounds: content,
+            contentIsFlipped: true
+        ))
+
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: CGRect(x: 0, y: 0, width: 600, height: 400),
+            contentBounds: content,
+            contentIsFlipped: false
+        ))
+        #expect(!IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: CGRect(x: 0, y: 100, width: 600, height: 400),
+            contentBounds: content,
+            contentIsFlipped: false
+        ))
+    }
+
+    @Test("Transcript scroll notifications publish only tail-boundary transitions at retention-scale heights")
+    func deduplicatesTranscriptTailChanges() {
+        let rowHeight: CGFloat = 24
+        let content = CGRect(
+            x: 0,
+            y: 0,
+            width: 600,
+            height: CGFloat(IRCConversationHistory.retentionLimit) * rowHeight
+        )
+        let viewportHeight: CGFloat = 600
+        let bottom = CGRect(
+            x: 0,
+            y: content.maxY - viewportHeight,
+            width: content.width,
+            height: viewportHeight
+        )
+        let history = bottom.offsetBy(dx: 0, dy: -rowHeight * 10)
+        var isFollowingTail = true
+        var publishedChanges = 0
+
+        for _ in 0..<IRCConversationHistory.retentionLimit {
+            if let newValue = IRCTranscriptScrollPolicy.followingTailChange(
+                from: isFollowingTail,
+                visibleBounds: history,
+                contentBounds: content,
+                contentIsFlipped: true
+            ) {
+                isFollowingTail = newValue
+                publishedChanges += 1
+            }
+        }
+        #expect(!isFollowingTail)
+        #expect(publishedChanges == 1)
+
+        for _ in 0..<IRCConversationHistory.retentionLimit {
+            if let newValue = IRCTranscriptScrollPolicy.followingTailChange(
+                from: isFollowingTail,
+                visibleBounds: bottom,
+                contentBounds: content,
+                contentIsFlipped: true
+            ) {
+                isFollowingTail = newValue
+                publishedChanges += 1
+            }
+        }
+        #expect(isFollowingTail)
+        #expect(publishedChanges == 2)
+    }
+
+    @Test("Transcript history trims in a batch beyond the five-thousand-message limit and preserves the newest tail")
+    func trimsTranscriptHistoryAtRetentionBoundary() {
+        var messages: [IRCMessage] = []
+        let totalBeforeTrim = IRCConversationHistory.retentionLimit + IRCConversationHistory.trimBatchSize
+
+        for index in 0..<(IRCConversationHistory.retentionLimit - 1) {
+            IRCConversationHistory.append(
+                IRCMessage(sender: "Alice", text: "message \(index)"),
+                to: &messages
+            )
+        }
+        #expect(messages.count == IRCConversationHistory.retentionLimit - 1)
+
+        let messageAtLimit = IRCMessage(
+            sender: "Alice",
+            text: "message \(IRCConversationHistory.retentionLimit - 1)"
+        )
+        IRCConversationHistory.append(messageAtLimit, to: &messages)
+        #expect(messages.count == IRCConversationHistory.retentionLimit)
+        #expect(messages.last?.id == messageAtLimit.id)
+
+        for index in IRCConversationHistory.retentionLimit..<totalBeforeTrim {
+            IRCConversationHistory.append(
+                IRCMessage(sender: "Alice", text: "message \(index)"),
+                to: &messages
+            )
+        }
+
+        #expect(messages.count == totalBeforeTrim)
+        #expect(messages.first?.text == "message 0")
+        #expect(messages.last?.text == "message \(totalBeforeTrim - 1)")
+
+        let messageAfterThreshold = IRCMessage(sender: "Alice", text: "message \(totalBeforeTrim)")
+        IRCConversationHistory.append(messageAfterThreshold, to: &messages)
+
+        #expect(messages.count == IRCConversationHistory.retentionLimit)
+        #expect(messages.first?.text == "message \(IRCConversationHistory.trimBatchSize + 1)")
+        #expect(messages.last?.id == messageAfterThreshold.id)
+    }
+
     @Test("Merging renamed conversations preserves time order and retention limits")
     func mergesConversationHistory() {
         let base = Date(timeIntervalSince1970: 1_000)

@@ -235,6 +235,17 @@ enum IRCReconnectPolicy {
 }
 
 enum IRCConversationHistory {
+    static let retentionLimit = 5_000
+    static let trimBatchSize = 250
+
+    static func append(_ message: IRCMessage, to messages: inout [IRCMessage]) {
+        messages.append(message)
+        let trimThreshold = retentionLimit + trimBatchSize
+        if messages.count > trimThreshold {
+            messages.removeFirst(messages.count - retentionLimit)
+        }
+    }
+
     static func merging(_ first: [IRCMessage], _ second: [IRCMessage], limit: Int) -> [IRCMessage] {
         guard limit > 0 else { return [] }
         var messages = first + second

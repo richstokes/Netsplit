@@ -894,11 +894,14 @@ private struct ConversationTranscript: View {
     let messageSpacing: IRCMessageSpacing
     let channelEventVisibility: IRCChannelEventVisibility
     @ObservedObject private var updates: IRCRevisionSignal
-    @State private var scrollPosition: UUID?
     @State private var isFollowingTail = true
     @State private var hasPositionedInitialMessages = false
     @State private var lastAnimatedScroll = Date.distantPast
     @Environment(\.ircTextMetrics) private var textMetrics
+
+    private enum ScrollTarget: Hashable {
+        case tail
+    }
 
     init(
         state: IRCAppState,
@@ -927,68 +930,167 @@ private struct ConversationTranscript: View {
         )
         let lastMessageID = messages.last?.id
 
-        ScrollView {
-            LazyVStack(
-                alignment: .leading,
-                spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
-            ) {
-                ForEach(messages) { message in
-                    MessageRow(
-                        message: message,
-                        state: state,
-                        selection: selection,
-                        usesColoredNicknames: usesColoredNicknames,
-                        usesMonospacedServerMessages: usesMonospacedServerMessages,
-                        rendersIRCFormatting: rendersIRCFormatting,
-                        messageSpacing: messageSpacing
-                    )
-                    .id(message.id)
+        ScrollViewReader { scrollView in
+            ScrollView {
+                LazyVStack(
+                    alignment: .leading,
+                    spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
+                ) {
+                    ForEach(messages) { message in
+                        MessageRow(
+                            message: message,
+                            state: state,
+                            selection: selection,
+                            usesColoredNicknames: usesColoredNicknames,
+                            usesMonospacedServerMessages: usesMonospacedServerMessages,
+                            rendersIRCFormatting: rendersIRCFormatting,
+                            messageSpacing: messageSpacing
+                        )
+                        .id(message.id)
+                    }
                 }
+                .padding(.horizontal, textMetrics.spacing(24))
+                .padding(.top, textMetrics.spacing(18))
+                .background {
+                    TranscriptLiveScrollObserver { visibleBounds, contentBounds, contentIsFlipped in
+                        guard hasPositionedInitialMessages else { return }
+                        guard let newValue = IRCTranscriptScrollPolicy.followingTailChange(
+                            from: isFollowingTail,
+                            visibleBounds: visibleBounds,
+                            contentBounds: contentBounds,
+                            contentIsFlipped: contentIsFlipped
+                        ) else { return }
+                        isFollowingTail = newValue
+                    }
+                }
+                Color.clear
+                    .frame(height: textMetrics.spacing(18))
+                    .id(ScrollTarget.tail)
             }
-            .scrollTargetLayout()
-            .padding(.horizontal, textMetrics.spacing(24))
-            .padding(.vertical, textMetrics.spacing(18))
             .accessibilityAddTraits(.updatesFrequently)
-        }
-        .defaultScrollAnchor(.bottom)
-        .ircCustomWindowBackground()
-        .scrollPosition(id: $scrollPosition, anchor: .bottom)
-        .accessibilityLabel("Conversation messages")
-        .onChange(of: scrollPosition) { _, newPosition in
-            guard hasPositionedInitialMessages, let newPosition else { return }
-            isFollowingTail = newPosition == lastMessageID
-        }
-        .task(id: lastMessageID) {
-            guard let lastMessageID else { return }
-            guard hasPositionedInitialMessages else {
-                hasPositionedInitialMessages = true
-                scrollPosition = lastMessageID
-                return
-            }
-            guard isFollowingTail else { return }
-
-            // Collapse bursts into one tail update after traffic briefly settles.
-            // This avoids overlapping animations and repeated lazy-stack ID scans.
-            do {
-                try await Task.sleep(for: IRCTranscriptScrollPolicy.coalescingDelay)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled, isFollowingTail else { return }
-
-            let now = Date()
-            if IRCTranscriptScrollPolicy.shouldAnimate(lastAnimatedScroll: lastAnimatedScroll, now: now) {
-                lastAnimatedScroll = now
-                withAnimation(.easeOut(duration: IRCTranscriptScrollPolicy.animationDuration)) {
-                    scrollPosition = lastMessageID
+            .defaultScrollAnchor(.bottom)
+            .ircCustomWindowBackground()
+            .accessibilityLabel("Conversation messages")
+            .task(id: lastMessageID) {
+                guard lastMessageID != nil else { return }
+                guard hasPositionedInitialMessages else {
+                    hasPositionedInitialMessages = true
+                    await Task.yield()
+                    scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
+                    return
                 }
-            } else {
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    scrollPosition = lastMessageID
+                guard isFollowingTail else { return }
+
+                // Collapse bursts into one tail update after traffic briefly settles.
+                // This avoids overlapping animations and repeated lazy-stack ID scans.
+                do {
+                    try await Task.sleep(for: IRCTranscriptScrollPolicy.coalescingDelay)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, isFollowingTail else { return }
+
+                let now = Date()
+                if IRCTranscriptScrollPolicy.shouldAnimate(lastAnimatedScroll: lastAnimatedScroll, now: now) {
+                    lastAnimatedScroll = now
+                    withAnimation(.easeOut(duration: IRCTranscriptScrollPolicy.animationDuration)) {
+                        scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
+                    }
+                } else {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
+                    }
                 }
             }
+        }
+    }
+}
+
+/// Reports only live, user-driven scrolling. Transcript layout changes and
+/// programmatic tail scrolling must not be mistaken for the reader scrolling up.
+private struct TranscriptLiveScrollObserver: NSViewRepresentable {
+    let onScroll: (_ visibleBounds: CGRect, _ contentBounds: CGRect, _ contentIsFlipped: Bool) -> Void
+
+    func makeNSView(context: Context) -> ObserverView {
+        ObserverView(onScroll: onScroll)
+    }
+
+    func updateNSView(_ nsView: ObserverView, context: Context) {
+        nsView.onScroll = onScroll
+        nsView.attachToEnclosingScrollViewIfNeeded()
+    }
+
+    static func dismantleNSView(_ nsView: ObserverView, coordinator: ()) {
+        nsView.detach()
+    }
+
+    final class ObserverView: NSView {
+        var onScroll: (_ visibleBounds: CGRect, _ contentBounds: CGRect, _ contentIsFlipped: Bool) -> Void
+        private weak var observedScrollView: NSScrollView?
+        private var observers: [NSObjectProtocol] = []
+
+        init(onScroll: @escaping (_ visibleBounds: CGRect, _ contentBounds: CGRect, _ contentIsFlipped: Bool) -> Void) {
+            self.onScroll = onScroll
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            attachToEnclosingScrollViewIfNeeded()
+            if observedScrollView == nil, window != nil {
+                DispatchQueue.main.async { [weak self] in
+                    self?.attachToEnclosingScrollViewIfNeeded()
+                }
+            }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
+        func attachToEnclosingScrollViewIfNeeded() {
+            guard let scrollView = enclosingScrollView,
+                  scrollView !== observedScrollView else { return }
+            detach()
+            observedScrollView = scrollView
+            let center = NotificationCenter.default
+            for name in [NSScrollView.didLiveScrollNotification, NSScrollView.didEndLiveScrollNotification] {
+                observers.append(center.addObserver(
+                    forName: name,
+                    object: scrollView,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.reportPosition()
+                })
+            }
+        }
+
+        func detach() {
+            let center = NotificationCenter.default
+            observers.forEach(center.removeObserver)
+            observers.removeAll()
+            observedScrollView = nil
+        }
+
+        private func reportPosition() {
+            guard let scrollView = observedScrollView,
+                  let documentView = scrollView.documentView else { return }
+            onScroll(
+                scrollView.contentView.documentVisibleRect,
+                documentView.bounds,
+                documentView.isFlipped
+            )
+        }
+
+        deinit {
+            detach()
         }
     }
 }

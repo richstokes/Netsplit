@@ -115,8 +115,6 @@ final class IRCAppState: ObservableObject {
     private let favoriteJoinDelayAfterCommands: TimeInterval = 2
     private let initialReconnectDelay: TimeInterval = 2
     private let maximumReconnectDelay: TimeInterval = 60
-    private let maximumRetainedMessagesPerConversation = 5_000
-    private let transcriptTrimBatchSize = 250
     private static let defaultQuitMessage = "Closing macOS client"
     private var hasStartedLaunchConnections = false
     private var isSystemSleeping = false
@@ -2152,7 +2150,7 @@ final class IRCAppState: ObservableObject {
             conversations[newConversation.id] = IRCConversationHistory.merging(
                 conversations[newConversation.id] ?? [],
                 conversations[oldConversation.id] ?? [],
-                limit: maximumRetainedMessagesPerConversation
+                limit: IRCConversationHistory.retentionLimit
             )
             conversations.removeValue(forKey: oldConversation.id)
             let oldDraftKey = SidebarItem.directMessage(oldConversation.id)
@@ -2477,12 +2475,7 @@ final class IRCAppState: ObservableObject {
         markMention shouldMarkMention: Bool = false
     ) {
         guard let id = conversationID(for: item) else { return }
-        conversations[id, default: []].append(message)
-        let trimThreshold = maximumRetainedMessagesPerConversation + transcriptTrimBatchSize
-        let messageCount = conversations[id, default: []].count
-        if messageCount > trimThreshold {
-            conversations[id]?.removeFirst(messageCount - maximumRetainedMessagesPerConversation)
-        }
+        IRCConversationHistory.append(message, to: &conversations[id, default: []])
         if selection != item, !message.isSystem {
             if shouldMarkMention {
                 markMention(item)

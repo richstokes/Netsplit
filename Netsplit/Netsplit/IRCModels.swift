@@ -670,9 +670,41 @@ enum IRCTranscriptScrollPolicy {
     static let coalescingDelay: Duration = .milliseconds(60)
     static let minimumAnimatedScrollInterval: TimeInterval = 0.35
     static let animationDuration: TimeInterval = 0.12
+    static let tailTolerance: CGFloat = 24
 
     static func shouldAnimate(lastAnimatedScroll: Date, now: Date) -> Bool {
         now.timeIntervalSince(lastAnimatedScroll) >= minimumAnimatedScrollInterval
+    }
+
+    static func isAtBottom(
+        visibleBounds: CGRect,
+        contentBounds: CGRect,
+        contentIsFlipped: Bool,
+        tolerance: CGFloat = tailTolerance
+    ) -> Bool {
+        let distanceFromBottom = contentIsFlipped
+            ? contentBounds.maxY - visibleBounds.maxY
+            : visibleBounds.minY - contentBounds.minY
+        return distanceFromBottom <= tolerance
+    }
+
+    /// Returns a value only when a live user scroll crosses the tail boundary.
+    /// Avoiding redundant state writes keeps high-frequency scroll notifications
+    /// from needlessly invalidating the transcript view.
+    static func followingTailChange(
+        from currentValue: Bool,
+        visibleBounds: CGRect,
+        contentBounds: CGRect,
+        contentIsFlipped: Bool,
+        tolerance: CGFloat = tailTolerance
+    ) -> Bool? {
+        let newValue = isAtBottom(
+            visibleBounds: visibleBounds,
+            contentBounds: contentBounds,
+            contentIsFlipped: contentIsFlipped,
+            tolerance: tolerance
+        )
+        return newValue == currentValue ? nil : newValue
     }
 }
 
