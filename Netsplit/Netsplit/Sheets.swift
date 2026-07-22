@@ -532,6 +532,7 @@ struct ChannelBrowser: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ircTextMetrics) private var textMetrics
     @State private var search = ""
+    @FocusState private var isSearchFocused: Bool
 
     private var profile: ServerProfile? { state.selectedProfile }
     private var availableChannels: [ChannelListing] { state.channelListings(for: profile?.id) }
@@ -568,7 +569,7 @@ struct ChannelBrowser: View {
                     TextField("Search channel names and topics", text: $search)
                         .font(.system(size: textMetrics.size(14)))
                         .textFieldStyle(.plain)
-                        .disabled(availableChannels.isEmpty)
+                        .focused($isSearchFocused)
                     if !search.isEmpty {
                         Button {
                             search = ""
@@ -672,6 +673,9 @@ struct ChannelBrowser: View {
         }
         .frame(minWidth: textMetrics.spacing(720), minHeight: textMetrics.spacing(540))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onAppear {
+            isSearchFocused = true
+        }
     }
 
     private func join(_ channel: ChannelListing) {
