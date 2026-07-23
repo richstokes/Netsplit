@@ -168,6 +168,44 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCMentionPolicy.containsMention(of: "[Nick]", in: "hello {nick}", caseMapping: mapping))
     }
 
+    @Test("Mention notification settings allow per-server overrides")
+    func resolvesMentionNotificationSettings() {
+        #expect(!IRCMentionNotificationPolicy.isEnabled(globalSetting: false, serverOverride: nil))
+        #expect(IRCMentionNotificationPolicy.isEnabled(globalSetting: true, serverOverride: nil))
+        #expect(IRCMentionNotificationPolicy.isEnabled(globalSetting: false, serverOverride: true))
+        #expect(!IRCMentionNotificationPolicy.isEnabled(globalSetting: true, serverOverride: false))
+
+        #expect(IRCMentionNotificationPolicy.shouldNotify(
+            isEnabled: true,
+            applicationIsActive: false,
+            conversationIsSelected: true
+        ))
+        #expect(IRCMentionNotificationPolicy.shouldNotify(
+            isEnabled: true,
+            applicationIsActive: true,
+            conversationIsSelected: false
+        ))
+        #expect(!IRCMentionNotificationPolicy.shouldNotify(
+            isEnabled: true,
+            applicationIsActive: true,
+            conversationIsSelected: true
+        ))
+        #expect(!IRCMentionNotificationPolicy.shouldNotify(
+            isEnabled: false,
+            applicationIsActive: false,
+            conversationIsSelected: false
+        ))
+
+        let serverID = UUID()
+        let freshChannel = Conversation(name: "#Swift", serverID: serverID)
+        let destination = IRCMentionNotificationDestination(serverID: serverID, channelName: "#swift")
+        #expect(IRCMentionNotificationPolicy.channelID(
+            for: destination,
+            in: [freshChannel, Conversation(name: "#swift", serverID: UUID())],
+            caseMapping: .rfc1459
+        ) == freshChannel.id)
+    }
+
     @Test("WHOIS channel lists preserve channels and remove membership prefixes")
     func parsesWhoisChannels() {
         let channels = IRCWhoisChannelParser.channels(

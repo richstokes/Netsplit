@@ -27,6 +27,7 @@ struct ServerProfileTests {
         #expect(profile.useTLS)
         #expect(!profile.autoConnect)
         #expect(!profile.isBuiltIn)
+        #expect(profile.mentionNotificationsOverride == nil)
         #expect(profile.favoriteChannels == nil)
         #expect(profile.useSASL == nil)
         #expect(profile.useSSHTunnel == nil)
@@ -43,6 +44,7 @@ struct ServerProfileTests {
             useTLS: true,
             autoConnect: true,
             nicknameOverride: "Alice",
+            mentionNotificationsOverride: true,
             favoriteChannels: ["#swift"],
             mutedNicknames: ["bot"],
             useSASL: true,

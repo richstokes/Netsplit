@@ -3,8 +3,10 @@
 //  Netsplit
 //
 
+import AppKit
 import Combine
 import Foundation
+import UserNotifications
 
 @MainActor
 final class IRCRevisionSignal: ObservableObject {
@@ -72,6 +74,12 @@ final class IRCAppState: ObservableObject {
     }
     @Published var warnBeforeOpeningLinks: Bool {
         didSet { UserDefaults.standard.set(warnBeforeOpeningLinks, forKey: "warnBeforeOpeningLinks") }
+    }
+    @Published var mentionNotificationsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(mentionNotificationsEnabled, forKey: "mentionNotificationsEnabled")
+            if mentionNotificationsEnabled { requestMentionNotificationAuthorization() }
+        }
     }
     @Published var applicationAppearance: IRCApplicationAppearance {
         didSet { UserDefaults.standard.set(applicationAppearance.rawValue, forKey: "applicationAppearance") }
@@ -175,6 +183,7 @@ final class IRCAppState: ObservableObject {
     private var isNavigatingSelectionHistory = false
     private let maximumSelectionHistoryCount = 100
     private var lastConversationSelectionByServerID: [UUID: SidebarItem] = [:]
+    private var pendingMentionNotificationDestination: IRCMentionNotificationDestination?
 
     init() {
         let defaults = UserDefaults.standard
@@ -201,6 +210,7 @@ final class IRCAppState: ObservableObject {
         quitMessage = savedQuitMessage.isEmpty ? Self.defaultQuitMessage : savedQuitMessage
         reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
+        mentionNotificationsEnabled = defaults.object(forKey: "mentionNotificationsEnabled") as? Bool ?? false
         applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
         messageSpacing = defaults.string(forKey: "messageSpacing").flatMap(IRCMessageSpacing.init(rawValue:)) ?? .comfortable
         chatFont = defaults.string(forKey: "chatFont").flatMap(IRCChatFont.init(rawValue:)) ?? .system
@@ -220,6 +230,10 @@ final class IRCAppState: ObservableObject {
             profiles = ServerProfile.recommended
         }
         selection = .connectionCenter
+
+        if mentionNotificationsEnabled || profiles.contains(where: { $0.mentionNotificationsOverride == true }) {
+            requestMentionNotificationAuthorization()
+        }
     }
 
     var activeProfiles: [ServerProfile] {
@@ -337,6 +351,14 @@ final class IRCAppState: ObservableObject {
         selection = newSelection
         if case .channel = newSelection {
             requestComposerFocus()
+        }
+    }
+
+    func openMentionNotification(_ destination: IRCMentionNotificationDestination) {
+        guard profiles.contains(where: { $0.id == destination.serverID }) else { return }
+        pendingMentionNotificationDestination = destination
+        if !resolvePendingMentionNotificationDestination() {
+            selection = .server(destination.serverID)
         }
     }
 
@@ -744,8 +766,9 @@ final class IRCAppState: ObservableObject {
         selection = .connectionCenter
     }
 
-    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: [String], useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
+    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: [String], useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
         var profile = ServerProfile(name: name, hostname: hostname, port: port, useTLS: useTLS, autoConnect: autoConnect)
+        profile.mentionNotificationsOverride = mentionNotificationsOverride
         profile.useSASL = useSASL
         profile.saslUsername = saslUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : saslUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         applySSHSettings(to: &profile, enabled: useSSHTunnel, hostname: sshHostname, port: sshPort, username: sshUsername, keyFilename: sshKeyFilename)
@@ -753,6 +776,7 @@ final class IRCAppState: ObservableObject {
         saveCredentials(for: profile, serverPassword: serverPassword, saslPassword: saslPassword, onConnectCommands: onConnectCommands, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
         saveProfiles()
         selection = .connectionCenter
+        if mentionNotificationsOverride == true { requestMentionNotificationAuthorization() }
     }
 
     func delete(_ profile: ServerProfile) {
@@ -768,7 +792,7 @@ final class IRCAppState: ObservableObject {
         saveProfiles()
     }
 
-    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: [String], useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
+    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: [String], useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         var updated = profile
         updated.name = name
@@ -778,6 +802,7 @@ final class IRCAppState: ObservableObject {
         updated.autoConnect = autoConnect
         let cleanNickname = nicknameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.nicknameOverride = cleanNickname.isEmpty ? nil : cleanNickname
+        updated.mentionNotificationsOverride = mentionNotificationsOverride
         updated.useSASL = useSASL
         let cleanSASLUsername = saslUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.saslUsername = cleanSASLUsername.isEmpty ? nil : cleanSASLUsername
@@ -789,6 +814,7 @@ final class IRCAppState: ObservableObject {
         profiles[index] = updated
         saveCredentials(for: updated, serverPassword: serverPassword, saslPassword: saslPassword, onConnectCommands: onConnectCommands, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
         saveProfiles()
+        if mentionNotificationsOverride == true { requestMentionNotificationAuthorization() }
     }
 
     func restorePreset(_ profile: ServerProfile) {
@@ -797,6 +823,7 @@ final class IRCAppState: ObservableObject {
               let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         preset.id = profile.id
         preset.autoConnect = profile.autoConnect
+        preset.mentionNotificationsOverride = profile.mentionNotificationsOverride
         preset.favoriteChannels = profile.favoriteChannels
         preset.mutedNicknames = profile.mutedNicknames
         preset.useSASL = profile.useSASL
@@ -2149,12 +2176,29 @@ final class IRCAppState: ObservableObject {
     }
 
     private func channel(named name: String, serverID: UUID) -> Conversation {
-        if let existing = channels.first(where: { $0.serverID == serverID && identifiersEqual($0.name, name, serverID: serverID) }) { return existing }
+        if let existing = channels.first(where: { $0.serverID == serverID && identifiersEqual($0.name, name, serverID: serverID) }) {
+            resolvePendingMentionNotificationDestination()
+            return existing
+        }
         let conversation = Conversation(name: name, serverID: serverID)
         channels.append(conversation)
         let profileNickname = profiles.first(where: { $0.id == serverID }).map { nickname(for: $0) } ?? nickname
         channelMembers[conversation.id] = [ChannelMember(nickname: profileNickname, prefix: nil)]
+        resolvePendingMentionNotificationDestination()
         return conversation
+    }
+
+    @discardableResult
+    private func resolvePendingMentionNotificationDestination() -> Bool {
+        guard let destination = pendingMentionNotificationDestination,
+              let channelID = IRCMentionNotificationPolicy.channelID(
+                for: destination,
+                in: channels,
+                caseMapping: caseMappings[destination.serverID] ?? .rfc1459
+              ) else { return false }
+        pendingMentionNotificationDestination = nil
+        selection = .channel(channelID)
+        return true
     }
 
     private func existingChannel(named name: String, serverID: UUID) -> Conversation? {
@@ -2669,7 +2713,44 @@ final class IRCAppState: ObservableObject {
                 markUnread(item)
             }
         }
+        if shouldMarkMention {
+            postMentionNotification(for: message, in: item)
+        }
         messagesDidChange(for: id)
+    }
+
+    private func postMentionNotification(for message: IRCMessage, in item: SidebarItem) {
+        guard case .channel(let conversationID) = item,
+              let channel = channels.first(where: { $0.id == conversationID }),
+              let profile = profiles.first(where: { $0.id == channel.serverID }) else { return }
+
+        let enabled = IRCMentionNotificationPolicy.isEnabled(
+            globalSetting: mentionNotificationsEnabled,
+            serverOverride: profile.mentionNotificationsOverride
+        )
+        guard IRCMentionNotificationPolicy.shouldNotify(
+            isEnabled: enabled,
+            applicationIsActive: NSApplication.shared.isActive,
+            conversationIsSelected: selection == item
+        ) else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "\(IRCMessageTextRenderer.plainText(message.sender)) mentioned you"
+        content.subtitle = "\(channel.name) on \(profile.name)"
+        content.body = IRCMessageTextRenderer.plainText(message.text)
+        content.sound = .default
+        content.threadIdentifier = "\(profile.id.uuidString).\(channel.name)"
+        content.userInfo = [
+            "serverID": profile.id.uuidString,
+            "channelName": channel.name
+        ]
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        )
+    }
+
+    private func requestMentionNotificationAuthorization() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     private func markUnread(_ item: SidebarItem) {
@@ -2877,6 +2958,7 @@ final class IRCAppState: ObservableObject {
             var current = matchedPreset
             current.id = profile.id
             current.autoConnect = profile.autoConnect
+            current.mentionNotificationsOverride = profile.mentionNotificationsOverride
             current.favoriteChannels = profile.favoriteChannels
             current.mutedNicknames = profile.mutedNicknames
             current.useSASL = profile.useSASL

@@ -7,21 +7,26 @@
 
 import AppKit
 import SwiftUI
+import UserNotifications
 
 private enum AppSceneID {
     // SwiftUI uses this identity for persisted window state. Keep it stable.
     static let mainWindow = "main"
 }
 
-final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
-    weak var state: IRCAppState?
+final class NetsplitAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    weak var state: IRCAppState? {
+        didSet { deliverPendingMentionNotificationDestination() }
+    }
     weak var mainWindow: NSWindow?
     private var isTerminating = false
     private var hasRepliedToTermination = false
     private var shortcutMonitor: Any?
+    private var pendingMentionNotificationDestination: IRCMentionNotificationDestination?
     private let swipeCommitThreshold: CGFloat = 0.25
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
         let notifications = NSWorkspace.shared.notificationCenter
         notifications.addObserver(
             self,
@@ -60,6 +65,52 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func workspaceDidWake(_ notification: Notification) {
         state?.systemDidWake()
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        guard response.actionIdentifier != UNNotificationDismissActionIdentifier,
+              let serverIDValue = response.notification.request.content.userInfo["serverID"] as? String,
+              let channelName = response.notification.request.content.userInfo["channelName"] as? String,
+              let serverID = UUID(uuidString: serverIDValue),
+              !channelName.isEmpty else {
+            completionHandler()
+            return
+        }
+
+        let destination = IRCMentionNotificationDestination(serverID: serverID, channelName: channelName)
+
+        DispatchQueue.main.async { [weak self] in
+            self?.openMentionNotification(destination)
+            NSApp.activate(ignoringOtherApps: true)
+            self?.mainWindow?.makeKeyAndOrderFront(nil)
+            completionHandler()
+        }
+    }
+
+    private func openMentionNotification(_ destination: IRCMentionNotificationDestination) {
+        guard let state else {
+            pendingMentionNotificationDestination = destination
+            return
+        }
+        pendingMentionNotificationDestination = nil
+        state.openMentionNotification(destination)
+    }
+
+    private func deliverPendingMentionNotificationDestination() {
+        guard let pendingMentionNotificationDestination, state != nil else { return }
+        openMentionNotification(pendingMentionNotificationDestination)
     }
 
     private func handleShortcutEvent(_ event: NSEvent) -> NSEvent? {

@@ -21,6 +21,7 @@ struct ServerProfileEditor: View {
     @State private var useTLS: Bool
     @State private var autoConnect: Bool
     @State private var nicknameOverride: String
+    @State private var mentionNotificationsOverride: Bool?
     @State private var serverPassword: String
     @State private var useSASL: Bool
     @State private var saslUsername: String
@@ -45,6 +46,7 @@ struct ServerProfileEditor: View {
         _useTLS = State(initialValue: profileToEdit?.useTLS ?? true)
         _autoConnect = State(initialValue: profileToEdit?.autoConnect ?? false)
         _nicknameOverride = State(initialValue: profileToEdit?.nicknameOverride ?? "")
+        _mentionNotificationsOverride = State(initialValue: profileToEdit?.mentionNotificationsOverride)
         _serverPassword = State(initialValue: profileToEdit.map { state.serverPassword(for: $0) } ?? "")
         _useSASL = State(initialValue: profileToEdit?.useSASL ?? false)
         _saslUsername = State(initialValue: profileToEdit?.saslUsername ?? "")
@@ -108,6 +110,7 @@ struct ServerProfileEditor: View {
                 VStack(spacing: 18) {
                     connectionSection
                     identitySection
+                    notificationsSection
                     authenticationSection
                     onConnectSection
                     sshSection
@@ -206,6 +209,21 @@ struct ServerProfileEditor: View {
                 }
             }
             ServerEditorHelpText("Passwords are stored in your macOS Keychain. SASL PLAIN is requested only when the IRC server advertises SASL support.")
+        }
+    }
+
+    private var notificationsSection: some View {
+        ServerEditorSection(title: "Notifications", systemImage: "bell") {
+            ServerEditorFieldRow("Username mentions") {
+                Picker("Username mentions", selection: $mentionNotificationsOverride) {
+                    Text("Use Global Setting").tag(nil as Bool?)
+                    Text("On").tag(true as Bool?)
+                    Text("Off").tag(false as Bool?)
+                }
+                .labelsHidden()
+                .accessibilityLabel("Username mention notifications")
+            }
+            ServerEditorHelpText("Choose whether this server follows the global setting in Netsplit Settings or overrides it.")
         }
     }
 
@@ -347,9 +365,9 @@ struct ServerProfileEditor: View {
             savedSSHPort = parsedSSHPort ?? 22
         }
         if let profileToEdit {
-            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
+            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
         } else {
-            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
+            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
         }
         dismiss()
     }
@@ -909,6 +927,12 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("Netsplit requests standard IRCv3 capabilities when supported by the server, including server timestamps and message tags.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Notifications") {
+                Toggle("Notify me when my username is mentioned", isOn: $state.mentionNotificationsEnabled)
+                Text("Off by default. Individual server profiles can follow or override this setting. macOS may ask for notification permission when you turn notifications on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
