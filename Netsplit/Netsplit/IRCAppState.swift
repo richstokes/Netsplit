@@ -121,6 +121,7 @@ final class IRCAppState: ObservableObject {
     @Published private(set) var channels: [Conversation] = []
     @Published private(set) var directMessages: [Conversation] = []
     @Published private(set) var connectionStatuses: [UUID: ConnectionStatus] = [:]
+    @Published private var unreadInviteCountsByServer: [UUID: Int] = [:]
     @Published private var channelTopics: [UUID: String] = [:]
     @Published var isChannelBrowserPresented = false
     @Published private var listedChannelsByServer: [UUID: [ChannelListing]] = [:]
@@ -439,6 +440,10 @@ final class IRCAppState: ObservableObject {
             serverID: profile.id,
             conversations: channels + directMessages
         )
+    }
+
+    func unreadInviteCount(for profile: ServerProfile) -> Int {
+        unreadInviteCountsByServer[profile.id, default: 0]
     }
 
     func draft(for item: SidebarItem) -> String {
@@ -890,7 +895,9 @@ final class IRCAppState: ObservableObject {
         case .directMessage(let id):
             guard let index = directMessages.firstIndex(where: { $0.id == id }), directMessages[index].hasUnread else { return }
             directMessages[index].hasUnread = false
-        case .connectionCenter, .server:
+        case .server(let id):
+            unreadInviteCountsByServer.removeValue(forKey: id)
+        case .connectionCenter:
             break
         }
     }
@@ -1573,6 +1580,24 @@ final class IRCAppState: ObservableObject {
             } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
                 append(IRCMessage(sender: sender, text: text), for: .directMessage(conversation.id))
+            }
+        case "INVITE":
+            guard let invite = IRCIncomingInvite(
+                wire: wire,
+                localNickname: nickname(for: profile),
+                caseMapping: caseMappings[profile.id] ?? .rfc1459
+            ), !isMuted(invite.inviter, on: profile) else { return }
+
+            append(
+                IRCMessage(
+                    sender: invite.inviter,
+                    text: "invited you to join \(invite.channel).",
+                    channelLinks: [invite.channel]
+                ),
+                for: .server(profile.id)
+            )
+            if selection != .server(profile.id) {
+                unreadInviteCountsByServer[profile.id, default: 0] += 1
             }
         case "JOIN":
             let channelName = wire.trailing ?? wire.parameters.last ?? ""
@@ -2262,6 +2287,7 @@ final class IRCAppState: ObservableObject {
             return !removedConversationIDs.contains(conversationID) && conversationID != serverID
         }
         pendingJoins = pendingJoins.filter { $0.value.serverID != serverID }
+        unreadInviteCountsByServer.removeValue(forKey: serverID)
         lastConversationSelectionByServerID.removeValue(forKey: serverID)
         if wasShowingRemovedServer {
             selection = .connectionCenter

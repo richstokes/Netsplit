@@ -150,6 +150,33 @@ enum IRCNoticeRoutingPolicy {
     }
 }
 
+struct IRCIncomingInvite: Equatable {
+    let inviter: String
+    let channel: String
+
+    init?(
+        wire: IRCWireMessage,
+        localNickname: String,
+        caseMapping: IRCCaseMapping
+    ) {
+        guard wire.command == "INVITE",
+              let target = wire.parameters.first,
+              caseMapping.normalize(target) == caseMapping.normalize(localNickname),
+              let prefix = wire.prefix else { return nil }
+
+        let inviter = prefix.split(separator: "!", maxSplits: 1).first.map(String.init) ?? ""
+        guard !inviter.isEmpty,
+              caseMapping.normalize(inviter) != caseMapping.normalize(localNickname) else { return nil }
+
+        let rawChannel = wire.trailing ?? wire.parameters.dropFirst().first
+        let channel = rawChannel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard channel.first.map({ "#&+!".contains($0) }) == true else { return nil }
+
+        self.inviter = inviter
+        self.channel = channel
+    }
+}
+
 struct ServerProfile: Identifiable, Codable, Hashable {
     var id = UUID()
     var name: String

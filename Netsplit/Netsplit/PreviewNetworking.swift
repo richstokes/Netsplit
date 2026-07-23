@@ -68,7 +68,13 @@ enum IRCRemotePreviewPolicy {
     }
 
     nonisolated static func normalizedNetworkURL(_ url: URL) -> URL? {
-        guard isPermitted(url), var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        guard isPermitted(url) else { return nil }
+
+        if normalizedHost(for: url) == "youtu.be" {
+            return normalizedYouTubeWatchURL(url)
+        }
+
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return nil
         }
         components.scheme = "https"
@@ -77,6 +83,25 @@ enum IRCRemotePreviewPolicy {
         }
         if components.port == 443 { components.port = nil }
         components.fragment = nil
+        return components.url
+    }
+
+    nonisolated private static func normalizedYouTubeWatchURL(_ url: URL) -> URL? {
+        let pathComponents = url.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard pathComponents.count == 1 else { return nil }
+
+        let videoID = String(pathComponents[0])
+        guard videoID.utf8.count == 11,
+              videoID.utf8.allSatisfy({ byte in
+                  (65...90).contains(byte) || (97...122).contains(byte) ||
+                      (48...57).contains(byte) || byte == 95 || byte == 45
+              }) else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.youtube.com"
+        components.path = "/watch"
+        components.queryItems = [URLQueryItem(name: "v", value: videoID)]
         return components.url
     }
 
@@ -222,6 +247,30 @@ struct IRCPreviewHTTPResponse {
     let textEncodingName: String?
 }
 
+enum IRCPreviewBodyPolicy: Equatable {
+    case complete
+    case htmlHead
+}
+
+struct IRCHTMLHeadTerminator {
+    private static let closingTag = Array("</head>".utf8)
+    private var matchedByteCount = 0
+
+    mutating func consume(_ byte: UInt8) -> Bool {
+        let normalizedByte = (65...90).contains(byte) ? byte + 32 : byte
+        if normalizedByte == Self.closingTag[matchedByteCount] {
+            matchedByteCount += 1
+            if matchedByteCount == Self.closingTag.count {
+                matchedByteCount = 0
+                return true
+            }
+        } else {
+            matchedByteCount = normalizedByte == Self.closingTag[0] ? 1 : 0
+        }
+        return false
+    }
+}
+
 @MainActor
 final class IRCPreviewHTTPClient {
     static let shared = IRCPreviewHTTPClient()
@@ -252,6 +301,7 @@ final class IRCPreviewHTTPClient {
         url: URL,
         maximumBytes: Int,
         acceptHeader: String,
+        bodyPolicy: IRCPreviewBodyPolicy = .complete,
         acceptsMIMEType: @escaping (String) -> Bool
     ) async throws -> IRCPreviewHTTPResponse {
         let permitID = UUID()
@@ -267,6 +317,7 @@ final class IRCPreviewHTTPClient {
                 url: url,
                 maximumBytes: maximumBytes,
                 acceptHeader: acceptHeader,
+                bodyPolicy: bodyPolicy,
                 acceptsMIMEType: acceptsMIMEType
             )
             await limiter.release(id: permitID)
@@ -281,6 +332,7 @@ final class IRCPreviewHTTPClient {
         url: URL,
         maximumBytes: Int,
         acceptHeader: String,
+        bodyPolicy: IRCPreviewBodyPolicy,
         acceptsMIMEType: @escaping (String) -> Bool
     ) async throws -> IRCPreviewHTTPResponse {
         guard maximumBytes > 0,
@@ -326,7 +378,8 @@ final class IRCPreviewHTTPClient {
                   acceptsMIMEType(mimeType) else {
                 throw IRCPreviewError.invalidResponse
             }
-            if response.expectedContentLength > Int64(maximumBytes) {
+            if bodyPolicy == .complete,
+               response.expectedContentLength > Int64(maximumBytes) {
                 throw IRCPreviewError.tooLarge
             }
 
@@ -334,10 +387,18 @@ final class IRCPreviewHTTPClient {
             if response.expectedContentLength > 0 {
                 data.reserveCapacity(min(maximumBytes, Int(response.expectedContentLength)))
             }
+            var htmlHeadTerminator = IRCHTMLHeadTerminator()
             for try await byte in bytes {
                 try Task.checkCancellation()
-                guard data.count < maximumBytes else { throw IRCPreviewError.tooLarge }
+                guard data.count < maximumBytes else {
+                    if bodyPolicy == .htmlHead { break }
+                    throw IRCPreviewError.tooLarge
+                }
                 data.append(byte)
+                if bodyPolicy == .htmlHead,
+                   (htmlHeadTerminator.consume(byte) || data.count == maximumBytes) {
+                    break
+                }
             }
             return IRCPreviewHTTPResponse(
                 data: data,

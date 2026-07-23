@@ -99,6 +99,53 @@ struct IRCModelsAndPolicyTests {
         ) == .server)
     }
 
+    @Test("Incoming channel invitations identify the inviter and channel")
+    func parsesIncomingInvites() throws {
+        let standard = try #require(IRCWireMessage(
+            line: ":Alice!user@example.org INVITE NetsplitUser :#swift"
+        ))
+        let parameterOnly = try #require(IRCWireMessage(
+            line: ":Bob!user@example.org INVITE NetsplitUser #macos"
+        ))
+
+        let standardInvite = try #require(IRCIncomingInvite(
+            wire: standard,
+            localNickname: "netsplituser",
+            caseMapping: .rfc1459
+        ))
+        let parameterOnlyInvite = try #require(IRCIncomingInvite(
+            wire: parameterOnly,
+            localNickname: "NetsplitUser",
+            caseMapping: .rfc1459
+        ))
+
+        #expect(standardInvite.inviter == "Alice")
+        #expect(standardInvite.channel == "#swift")
+        #expect(parameterOnlyInvite.inviter == "Bob")
+        #expect(parameterOnlyInvite.channel == "#macos")
+    }
+
+    @Test("Incoming channel invitations reject other targets and self-invites")
+    func rejectsIrrelevantInvites() throws {
+        let otherTarget = try #require(IRCWireMessage(
+            line: ":Alice!user@example.org INVITE SomeoneElse :#swift"
+        ))
+        let selfInvite = try #require(IRCWireMessage(
+            line: ":NetsplitUser!user@example.org INVITE NetsplitUser :#swift"
+        ))
+
+        #expect(IRCIncomingInvite(
+            wire: otherTarget,
+            localNickname: "NetsplitUser",
+            caseMapping: .rfc1459
+        ) == nil)
+        #expect(IRCIncomingInvite(
+            wire: selfInvite,
+            localNickname: "NetsplitUser",
+            caseMapping: .rfc1459
+        ) == nil)
+    }
+
     @Test("Command-click joins channels without closing the channel browser")
     func choosesChannelBrowserJoinBehavior() {
         let ordinaryClick = IRCChannelBrowserJoinBehavior(modifierFlags: [])
@@ -476,6 +523,34 @@ struct IRCModelsAndPolicyTests {
             from: URL(string: "https://example.com/article")!,
             to: URL(string: "http://127.0.0.1/admin")!
         ))
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://youtu.be/dQw4w9WgXcQ")!,
+            to: URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ")!
+        ))
+    }
+
+    @Test("YouTube short links normalize without allowing generic cross-host redirects")
+    func normalizesYouTubeShortLinks() {
+        #expect(IRCRemotePreviewPolicy.normalizedNetworkURL(
+            URL(string: "https://youtu.be/dQw4w9WgXcQ?si=tracking#fragment")!
+        ) == URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ")!)
+        #expect(IRCRemotePreviewPolicy.normalizedNetworkURL(
+            URL(string: "https://youtu.be/not-a-video-id")!
+        ) == nil)
+        #expect(IRCRemotePreviewPolicy.normalizedNetworkURL(
+            URL(string: "https://youtu.be/dQw4w9WgXcQ/extra")!
+        ) == nil)
+    }
+
+    @Test("HTML head detection is streaming and case insensitive")
+    func detectsEndOfHTMLHead() {
+        var terminator = IRCHTMLHeadTerminator()
+        let html = Data("<html><HeAd><title>Example</title></hEaD><body>Ignored".utf8)
+        let detectionIndexes = html.indices.filter { terminator.consume(html[$0]) }
+        #expect(detectionIndexes == [40])
+
+        var nonTerminator = IRCHTMLHeadTerminator()
+        #expect(!Data("</header>".utf8).contains { nonTerminator.consume($0) })
     }
 
     @Test("Preview resources deduplicate URL fragments")

@@ -406,6 +406,12 @@ private struct ServerRow: View {
     let profile: ServerProfile
     @ObservedObject var state: IRCAppState
     @Environment(\.ircTextMetrics) private var textMetrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isInvitePulseDimmed = false
+
+    private var unreadInviteCount: Int {
+        state.unreadInviteCount(for: profile)
+    }
 
     var body: some View {
         HStack(spacing: 9) {
@@ -420,11 +426,53 @@ private struct ServerRow: View {
                     .font(.system(size: textMetrics.size(11)))
                     .foregroundStyle(.secondary)
             }
+            Spacer(minLength: 0)
+            if unreadInviteCount > 0 {
+                Image(systemName: "envelope.badge.fill")
+                    .font(.system(size: textMetrics.size(13), weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .opacity(isInvitePulseDimmed ? 0.35 : 1)
+                    .accessibilityHidden(true)
+            }
         }
         .padding(.vertical, textMetrics.spacing(1))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(profile.hostname)
-        .accessibilityValue(state.status(for: profile).label)
+        .accessibilityValue(accessibilityValue)
+        .task(id: unreadInviteCount > 0 ? unreadInviteCount : nil) {
+            await pulseInvite()
+        }
+    }
+
+    private var accessibilityValue: String {
+        guard unreadInviteCount > 0 else { return state.status(for: profile).label }
+        let invitations = unreadInviteCount == 1 ? "channel invitation" : "channel invitations"
+        return "\(state.status(for: profile).label), \(unreadInviteCount) unread \(invitations)"
+    }
+
+    @MainActor
+    private func pulseInvite() async {
+        isInvitePulseDimmed = false
+        guard unreadInviteCount > 0, !reduceMotion else { return }
+
+        for _ in 0..<3 {
+            withAnimation(.easeInOut(duration: 0.5)) {
+                isInvitePulseDimmed = true
+            }
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.5)) {
+                isInvitePulseDimmed = false
+            }
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                return
+            }
+        }
     }
 }
 

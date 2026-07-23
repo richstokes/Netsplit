@@ -111,7 +111,7 @@ struct IRCLinkPreviewMetadata: Equatable {
 }
 
 enum IRCLinkPreviewMetadataParser {
-    private static let maximumHTMLBytes = 512 * 1_024
+    private static let maximumHTMLBytes = 1_024 * 1_024
     private static let maximumTitleCharacters = 200
     private static let maximumSummaryCharacters = 280
 
@@ -120,6 +120,7 @@ enum IRCLinkPreviewMetadataParser {
             url: url,
             maximumBytes: maximumHTMLBytes,
             acceptHeader: "text/html, application/xhtml+xml;q=0.9",
+            bodyPolicy: .htmlHead,
             acceptsMIMEType: { mimeType in
                 mimeType == "text/html" || mimeType == "application/xhtml+xml"
             }
@@ -307,9 +308,14 @@ private final class IRCLinkPreviewCache {
         cache.countLimit = 200
     }
 
+    func cachedMetadata(for url: URL) -> IRCLinkPreviewMetadata? {
+        let key = IRCRemotePreviewPolicy.normalizedNetworkURL(url) ?? url
+        return cache.object(forKey: key as NSURL)?.metadata
+    }
+
     func metadata(for url: URL) async throws -> IRCLinkPreviewMetadata {
         let key = IRCRemotePreviewPolicy.normalizedNetworkURL(url) ?? url
-        if let cached = cache.object(forKey: key as NSURL) { return cached.metadata }
+        if let cached = cachedMetadata(for: key) { return cached }
         if let task = inFlight[key] { return try await task.value }
 
         let task = Task { try await IRCLinkPreviewMetadataParser.fetch(url: key) }
@@ -337,52 +343,8 @@ private struct IRCLinkPreviewCard: View {
 
     var body: some View {
         Group {
-            if let metadata {
-                Button {
-                    openURL(url)
-                } label: {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(displayHost)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Text(metadata.title ?? displayURL)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                        if let summary = metadata.summary {
-                            Text(summary)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.leading)
-                        } else {
-                            Text(displayURL)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                    .padding(12)
-                    .frame(
-                        maxWidth: Self.maximumWidth,
-                        minHeight: 82,
-                        maxHeight: 128,
-                        alignment: .leading
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(cardBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(cardBorder, lineWidth: 1)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .help("Open \(url.absoluteString)")
-                .accessibilityLabel("Link preview: \(metadata.title ?? displayURL)")
+            if let displayedMetadata {
+                loadedPreview(for: displayedMetadata)
             } else if !failed {
                 ProgressView()
                     .controlSize(.small)
@@ -402,11 +364,67 @@ private struct IRCLinkPreviewCard: View {
         }
     }
 
+    private var displayedMetadata: IRCLinkPreviewMetadata? {
+        metadata ?? IRCLinkPreviewCache.shared.cachedMetadata(for: url)
+    }
+
+    private func loadedPreview(for metadata: IRCLinkPreviewMetadata) -> some View {
+        Button {
+            openURL(url)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(displayHost)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(previewTitle(for: metadata))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                if let summary = metadata.summary {
+                    Text(summary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                } else {
+                    Text(displayURL(for: metadata))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .padding(12)
+            .frame(
+                maxWidth: Self.maximumWidth,
+                minHeight: 82,
+                maxHeight: 128,
+                alignment: .leading
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(cardBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(cardBorder, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .help("Open \(url.absoluteString)")
+        .accessibilityLabel("Link preview: \(previewTitle(for: metadata))")
+    }
+
     private var displayHost: String {
         (url.host(percentEncoded: true) ?? "WEB LINK").uppercased()
     }
 
-    private var displayURL: String {
+    private func previewTitle(for metadata: IRCLinkPreviewMetadata) -> String {
+        metadata.title ?? displayURL(for: metadata)
+    }
+
+    private func displayURL(for metadata: IRCLinkPreviewMetadata?) -> String {
         guard let components = URLComponents(url: metadata?.resolvedURL ?? url, resolvingAgainstBaseURL: false) else {
             return url.absoluteString
         }
@@ -435,9 +453,14 @@ private final class IRCImagePreviewCache {
         cache.totalCostLimit = 64 * 1_024 * 1_024
     }
 
+    func cachedImage(for url: URL) -> NSImage? {
+        let key = IRCRemotePreviewPolicy.normalizedNetworkURL(url) ?? url
+        return cache.object(forKey: key as NSURL)
+    }
+
     func image(for url: URL) async throws -> NSImage {
         let key = IRCRemotePreviewPolicy.normalizedNetworkURL(url) ?? url
-        if let cached = cache.object(forKey: key as NSURL) { return cached }
+        if let cached = cachedImage(for: key) { return cached }
         if let task = inFlight[key] { return try await task.value }
 
         let task = Task { try await IRCBoundedImageLoader.load(url: key) }
@@ -464,26 +487,8 @@ private struct IRCImagePreview: View {
 
     var body: some View {
         Group {
-            if let image {
-                Button {
-                    openURL(url)
-                } label: {
-                    IRCBoundedImageLayout(aspectRatio: imageAspectRatio) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .scaledToFit()
-                    }
-                    .background(imageBackground)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(imageBorder, lineWidth: 1)
-                }
-                .help("Open image in browser")
-                .accessibilityLabel("Image preview from \(url.host(percentEncoded: true) ?? "web link")")
+            if let displayedImage {
+                loadedPreview(for: displayedImage)
             } else if !failed {
                 ProgressView()
                     .controlSize(.small)
@@ -503,6 +508,32 @@ private struct IRCImagePreview: View {
         }
     }
 
+    private var displayedImage: NSImage? {
+        image ?? IRCImagePreviewCache.shared.cachedImage(for: url)
+    }
+
+    private func loadedPreview(for image: NSImage) -> some View {
+        Button {
+            openURL(url)
+        } label: {
+            IRCBoundedImageLayout(aspectRatio: Self.aspectRatio(for: image)) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            }
+            .background(imageBackground)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(imageBorder, lineWidth: 1)
+        }
+        .help("Open image in browser")
+        .accessibilityLabel("Image preview from \(url.host(percentEncoded: true) ?? "web link")")
+    }
+
     private var imageBackground: Color {
         themePalette?.panel ?? Color(nsColor: .controlBackgroundColor)
     }
@@ -511,8 +542,8 @@ private struct IRCImagePreview: View {
         themePalette?.border.opacity(0.7) ?? Color(nsColor: .separatorColor)
     }
 
-    private var imageAspectRatio: CGFloat {
-        guard let image, image.size.height > 0 else { return 1 }
+    private static func aspectRatio(for image: NSImage) -> CGFloat {
+        guard image.size.height > 0 else { return 1 }
         return image.size.width / image.size.height
     }
 }
