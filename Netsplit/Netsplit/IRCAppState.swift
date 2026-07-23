@@ -2359,11 +2359,14 @@ final class IRCAppState: ObservableObject {
     @discardableResult
     private func removeMember(named nickname: String, from channelID: UUID) -> Bool {
         guard let serverID = channels.first(where: { $0.id == channelID })?.serverID else { return false }
+        let normalizedNickname = normalizedIdentifier(nickname, serverID: serverID)
         if var pending = pendingChannelMembers[channelID] {
-            pending.removeValue(forKey: normalizedIdentifier(nickname, serverID: serverID))
+            pending.removeValue(forKey: normalizedNickname)
             pendingChannelMembers[channelID] = pending
         }
-        guard var members = channelMembers[channelID], let index = members.firstIndex(where: { identifiersEqual($0.nickname, nickname, serverID: serverID) }) else { return false }
+        guard var members = channelMembers[channelID], let index = members.firstIndex(where: {
+            normalizedIdentifier($0.nickname, serverID: serverID) == normalizedNickname
+        }) else { return false }
         members.remove(at: index)
         channelMembers[channelID] = members
         membersDidChange(for: channelID)
@@ -2373,11 +2376,14 @@ final class IRCAppState: ObservableObject {
     @discardableResult
     private func renameMember(_ oldNickname: String, to newNickname: String, in channelID: UUID) -> Bool {
         guard let serverID = channels.first(where: { $0.id == channelID })?.serverID else { return false }
-        if var pending = pendingChannelMembers[channelID], let member = pending.removeValue(forKey: normalizedIdentifier(oldNickname, serverID: serverID)) {
+        let normalizedOldNickname = normalizedIdentifier(oldNickname, serverID: serverID)
+        if var pending = pendingChannelMembers[channelID], let member = pending.removeValue(forKey: normalizedOldNickname) {
             pending[normalizedIdentifier(newNickname, serverID: serverID)] = ChannelMember(nickname: newNickname, modes: member.modes)
             pendingChannelMembers[channelID] = pending
         }
-        guard var members = channelMembers[channelID], let index = members.firstIndex(where: { identifiersEqual($0.nickname, oldNickname, serverID: serverID) }) else { return false }
+        guard var members = channelMembers[channelID], let index = members.firstIndex(where: {
+            normalizedIdentifier($0.nickname, serverID: serverID) == normalizedOldNickname
+        }) else { return false }
         members[index].nickname = newNickname
         channelMembers[channelID] = sortedMembers(members)
         membersDidChange(for: channelID)
@@ -2409,7 +2415,9 @@ final class IRCAppState: ObservableObject {
             pendingChannelMembers[channelID] = pending
         }
 
-        guard var members = channelMembers[channelID], let index = members.firstIndex(where: { identifiersEqual($0.nickname, nickname, serverID: serverID) }) else { return }
+        guard var members = channelMembers[channelID], let index = members.firstIndex(where: {
+            normalizedIdentifier($0.nickname, serverID: serverID) == normalizedNickname
+        }) else { return }
         if adding {
             didChange = members[index].modes.insert(mode).inserted || didChange
         } else {
@@ -2421,7 +2429,10 @@ final class IRCAppState: ObservableObject {
     }
 
     private func upsert(_ member: ChannelMember, into members: inout [ChannelMember], serverID: UUID) {
-        if let index = members.firstIndex(where: { identifiersEqual($0.nickname, member.nickname, serverID: serverID) }) {
+        let normalizedNickname = normalizedIdentifier(member.nickname, serverID: serverID)
+        if let index = members.firstIndex(where: {
+            normalizedIdentifier($0.nickname, serverID: serverID) == normalizedNickname
+        }) {
             if member.prefix != nil { members[index] = member }
         } else {
             members.append(member)
