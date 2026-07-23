@@ -723,6 +723,23 @@ final class IRCMessageTextCache {
     }
 }
 
+enum IRCTranscriptUpdatePolicy {
+    /// Keep ordinary messages immediate, while bounding transcript layout work
+    /// and array snapshot churn during sustained bursts. A full retained
+    /// transcript can take tens of milliseconds to lay out, so cap an ongoing
+    /// flood at four visual updates per second.
+    static let burstPublicationInterval: Duration = .milliseconds(250)
+}
+
+enum IRCTranscriptPresentationPolicy {
+    static let initialVisibleMessageLimit = 1_000
+    static let earlierMessagePageSize = 1_000
+
+    static func expandedVisibleMessageLimit(current: Int, total: Int) -> Int {
+        min(total, current + earlierMessagePageSize)
+    }
+}
+
 enum IRCTranscriptScrollPolicy {
     static let coalescingDelay: Duration = .milliseconds(60)
     static let minimumAnimatedScrollInterval: TimeInterval = 0.35

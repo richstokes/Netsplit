@@ -861,6 +861,50 @@ struct IRCModelsAndPolicyTests {
         #expect(replacementBobUpdates.revision == 0)
     }
 
+    @Test("Transcript update signals throttle bursts without starving trailing updates")
+    @MainActor
+    func throttlesTranscriptUpdateBursts() async throws {
+        let signal = IRCRevisionSignal(minimumPublicationInterval: .milliseconds(60))
+
+        signal.advance()
+        #expect(signal.revision == 1)
+
+        for _ in 0..<5 {
+            signal.advance()
+        }
+        #expect(signal.revision == 1)
+
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(signal.revision == 2)
+
+        signal.advance()
+        #expect(signal.revision == 2)
+
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(signal.revision == 3)
+
+        try await Task.sleep(for: .milliseconds(80))
+        signal.advance()
+        #expect(signal.revision == 4)
+    }
+
+    @Test("Transcript presentation expands retained history in bounded pages")
+    func expandsTranscriptPresentationInPages() {
+        let initial = IRCTranscriptPresentationPolicy.initialVisibleMessageLimit
+        let pageSize = IRCTranscriptPresentationPolicy.earlierMessagePageSize
+
+        #expect(initial < IRCConversationHistory.retentionLimit)
+        #expect(pageSize > 0)
+        #expect(IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
+            current: initial,
+            total: IRCConversationHistory.retentionLimit
+        ) == initial + pageSize)
+        #expect(IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
+            current: IRCConversationHistory.retentionLimit - 100,
+            total: IRCConversationHistory.retentionLimit
+        ) == IRCConversationHistory.retentionLimit)
+    }
+
     @Test("Member list shortcut only applies to channels")
     @MainActor
     func ignoresMemberListToggleOutsideChannels() {

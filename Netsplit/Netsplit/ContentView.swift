@@ -933,6 +933,7 @@ private struct ConversationTranscript: View {
     @State private var isFollowingTail = true
     @State private var hasPositionedInitialMessages = false
     @State private var lastAnimatedScroll = Date.distantPast
+    @State private var visibleMessageLimit = IRCTranscriptPresentationPolicy.initialVisibleMessageLimit
     @Environment(\.ircTextMetrics) private var textMetrics
 
     private enum ScrollTarget: Hashable {
@@ -966,10 +967,12 @@ private struct ConversationTranscript: View {
 
     var body: some View {
         let _ = updates.revision
-        let messages = state.messages(
+        let allMessages = state.messages(
             for: selection,
             channelEventVisibility: channelEventVisibility
         )
+        let messages = allMessages.suffix(visibleMessageLimit)
+        let hiddenMessageCount = allMessages.count - messages.count
         let lastMessageID = messages.last?.id
 
         ScrollViewReader { scrollView in
@@ -978,6 +981,32 @@ private struct ConversationTranscript: View {
                     alignment: .leading,
                     spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
                 ) {
+                    if hiddenMessageCount > 0 {
+                        Button {
+                            let previousFirstMessageID = messages.first?.id
+                            visibleMessageLimit = IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
+                                current: visibleMessageLimit,
+                                total: allMessages.count
+                            )
+                            guard let previousFirstMessageID else { return }
+                            Task { @MainActor in
+                                await Task.yield()
+                                scrollView.scrollTo(previousFirstMessageID, anchor: .top)
+                            }
+                        } label: {
+                            Label(
+                                "Load \(min(hiddenMessageCount, IRCTranscriptPresentationPolicy.earlierMessagePageSize)) earlier messages",
+                                systemImage: "arrow.up"
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: textMetrics.size(13), weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, textMetrics.spacing(8))
+                        .accessibilityHint("Keeps the current reading position")
+                    }
+
                     ForEach(messages) { message in
                         MessageRow(
                             message: message,
