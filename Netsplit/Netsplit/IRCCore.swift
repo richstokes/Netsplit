@@ -61,23 +61,314 @@ struct IRCLineBuffer {
 }
 
 enum IRCCapability {
+    /// Capabilities for features the client actively implements. Keeping this
+    /// list separate from CAP negotiation makes it harder to accidentally ask
+    /// a server for response formats that are not parsed.
+    static let preferred = [
+        "message-tags",
+        "server-time",
+        "multi-prefix",
+        "userhost-in-names",
+        "chghost",
+        "echo-message"
+    ]
+
     static func name(from advertisedValue: String) -> String {
         String(advertisedValue.drop(while: { $0 == "-" }).split(separator: "=", maxSplits: 1).first ?? "")
     }
 }
 
-enum IRCMemberParser {
-    static func member(from rawName: String) -> ChannelMember {
-        let modeByPrefix: [Character: Character] = [
-            "~": "q", "&": "a", "@": "o", "%": "h", "+": "v"
-        ]
-        var nickname = rawName[...]
-        var modes = Set<Character>()
-        while let first = nickname.first, let mode = modeByPrefix[first] {
-            modes.insert(mode)
-            nickname = nickname.dropFirst()
+enum IRCServerTimeParser {
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let wholeSecondsFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static func date(from value: String?) -> Date? {
+        guard let value else { return nil }
+        return fractionalFormatter.date(from: value)
+            ?? wholeSecondsFormatter.date(from: value)
+    }
+}
+
+struct IRCMembershipConfiguration: Hashable {
+    struct Entry: Hashable {
+        var mode: Character
+        var prefix: Character
+    }
+
+    static let rfc1459 = IRCMembershipConfiguration(entries: [
+        Entry(mode: "o", prefix: "@"),
+        Entry(mode: "v", prefix: "+")
+    ])
+    static let common = IRCMembershipConfiguration(entries: [
+        Entry(mode: "q", prefix: "~"),
+        Entry(mode: "a", prefix: "&"),
+        Entry(mode: "o", prefix: "@"),
+        Entry(mode: "h", prefix: "%"),
+        Entry(mode: "v", prefix: "+")
+    ])
+
+    var entries: [Entry]
+
+    init(entries: [Entry]) {
+        self.entries = entries
+    }
+
+    init?(advertisedValue: String) {
+        guard advertisedValue.first == "(",
+              let closingParenthesis = advertisedValue.firstIndex(of: ")") else { return nil }
+        let modeStart = advertisedValue.index(after: advertisedValue.startIndex)
+        let modes = Array(advertisedValue[modeStart..<closingParenthesis])
+        let prefixes = Array(advertisedValue[advertisedValue.index(after: closingParenthesis)...])
+        guard modes.count == prefixes.count,
+              Set(modes).count == modes.count,
+              Set(prefixes).count == prefixes.count else { return nil }
+        entries = zip(modes, prefixes).map { Entry(mode: $0.0, prefix: $0.1) }
+    }
+
+    var modes: Set<Character> {
+        Set(entries.map(\.mode))
+    }
+
+    var prefixes: Set<Character> {
+        Set(entries.map(\.prefix))
+    }
+
+    var operatorMode: Character? {
+        entries.first(where: { $0.mode == "o" })?.mode
+            ?? entries.first(where: { $0.prefix == "@" })?.mode
+    }
+
+    var voiceMode: Character? {
+        entries.first(where: { $0.mode == "v" })?.mode
+            ?? entries.first(where: { $0.prefix == "+" })?.mode
+    }
+
+    func mode(for prefix: Character) -> Character? {
+        entries.first(where: { $0.prefix == prefix })?.mode
+    }
+
+    func prefix(for mode: Character) -> Character? {
+        entries.first(where: { $0.mode == mode })?.prefix
+    }
+
+    func highestEntry(in modes: Set<Character>) -> Entry? {
+        entries.first(where: { modes.contains($0.mode) })
+    }
+
+    func rank(of modes: Set<Character>) -> Int? {
+        entries.firstIndex(where: { modes.contains($0.mode) })
+    }
+
+    func hasOperatorPrivileges(_ modes: Set<Character>) -> Bool {
+        guard let operatorMode,
+              let operatorRank = entries.firstIndex(where: { $0.mode == operatorMode }),
+              let memberRank = rank(of: modes) else { return false }
+        return memberRank <= operatorRank
+    }
+
+    func roleName(for mode: Character) -> String {
+        switch mode {
+        case "q": "Owner"
+        case "a": "Admin"
+        case "o": "Operator"
+        case "h": "Half-op"
+        case "v": "Voice"
+        default: "Mode +\(mode)"
         }
-        return ChannelMember(nickname: String(nickname), modes: modes)
+    }
+}
+
+struct IRCChannelModeCapabilities: Equatable {
+    static let rfc1459 = IRCChannelModeCapabilities(
+        listModes: ["b"],
+        alwaysParameterizedModes: ["k"],
+        setOnlyParameterizedModes: ["l"],
+        parameterlessModes: Set("imnpst")
+    )
+
+    var listModes: Set<Character>
+    var alwaysParameterizedModes: Set<Character>
+    var setOnlyParameterizedModes: Set<Character>
+    var parameterlessModes: Set<Character>
+
+    init(
+        listModes: Set<Character>,
+        alwaysParameterizedModes: Set<Character>,
+        setOnlyParameterizedModes: Set<Character>,
+        parameterlessModes: Set<Character>
+    ) {
+        self.listModes = listModes
+        self.alwaysParameterizedModes = alwaysParameterizedModes
+        self.setOnlyParameterizedModes = setOnlyParameterizedModes
+        self.parameterlessModes = parameterlessModes
+    }
+
+    init?(advertisedValue: String) {
+        let groups = advertisedValue.split(separator: ",", omittingEmptySubsequences: false)
+        guard groups.count == 4 else { return nil }
+        listModes = Set(groups[0])
+        alwaysParameterizedModes = Set(groups[1])
+        setOnlyParameterizedModes = Set(groups[2])
+        parameterlessModes = Set(groups[3])
+    }
+
+    func consumesArgument(for mode: Character, adding: Bool) -> Bool {
+        listModes.contains(mode)
+            || alwaysParameterizedModes.contains(mode)
+            || (adding && setOnlyParameterizedModes.contains(mode))
+    }
+}
+
+struct IRCServerFeatures: Equatable {
+    static let defaults = IRCServerFeatures()
+
+    var caseMapping: IRCCaseMapping = .rfc1459
+    var membership: IRCMembershipConfiguration = .rfc1459
+    var channelModes: IRCChannelModeCapabilities = .rfc1459
+    var channelTypes: Set<Character> = ["#", "&"]
+    var statusMessagePrefixes: Set<Character> = []
+    var networkName: String?
+    var maximumNicknameLength: Int?
+    var maximumChannelLength: Int?
+    var maximumModesPerCommand: Int?
+
+    mutating func apply(parameters: ArraySlice<String>) {
+        for parameter in parameters {
+            apply(parameter: parameter)
+        }
+    }
+
+    func isChannelName(_ value: String) -> Bool {
+        value.first.map(channelTypes.contains) ?? false
+    }
+
+    func channelName(fromMessageTarget target: String) -> String? {
+        var candidate = target[...]
+        while let first = candidate.first, statusMessagePrefixes.contains(first) {
+            candidate = candidate.dropFirst()
+        }
+        let channel = String(candidate)
+        return isChannelName(channel) ? channel : nil
+    }
+
+    var preferredChannelPrefix: Character {
+        if channelTypes.contains("#") { return "#" }
+        return channelTypes.sorted().first ?? "#"
+    }
+
+    private mutating func apply(parameter: String) {
+        let removing = parameter.hasPrefix("-")
+        let token = removing ? String(parameter.dropFirst()) : parameter
+        let parts = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let rawName = parts.first, !rawName.isEmpty else { return }
+        let name = rawName.uppercased()
+        let value = parts.count == 2 ? String(parts[1]) : nil
+
+        if removing {
+            reset(name)
+            return
+        }
+
+        switch name {
+        case "CASEMAPPING":
+            switch value?.lowercased() {
+            case "ascii": caseMapping = .ascii
+            case "strict-rfc1459": caseMapping = .strictRFC1459
+            case "rfc1459": caseMapping = .rfc1459
+            default: break
+            }
+        case "PREFIX":
+            if let value, let parsed = IRCMembershipConfiguration(advertisedValue: value) {
+                membership = parsed
+            } else if value == nil {
+                membership = IRCMembershipConfiguration(entries: [])
+            }
+        case "CHANMODES":
+            if let value, let parsed = IRCChannelModeCapabilities(advertisedValue: value) {
+                channelModes = parsed
+            }
+        case "CHANTYPES":
+            channelTypes = Set(value ?? "")
+        case "STATUSMSG":
+            statusMessagePrefixes = Set(value ?? "")
+        case "NETWORK":
+            networkName = value
+        case "NICKLEN":
+            maximumNicknameLength = positiveInteger(value)
+        case "CHANNELLEN":
+            maximumChannelLength = positiveInteger(value)
+        case "MODES":
+            maximumModesPerCommand = positiveInteger(value)
+        default:
+            break
+        }
+    }
+
+    private mutating func reset(_ name: String) {
+        let defaults = Self.defaults
+        switch name {
+        case "CASEMAPPING": caseMapping = defaults.caseMapping
+        case "PREFIX": membership = defaults.membership
+        case "CHANMODES": channelModes = defaults.channelModes
+        case "CHANTYPES": channelTypes = defaults.channelTypes
+        case "STATUSMSG": statusMessagePrefixes = defaults.statusMessagePrefixes
+        case "NETWORK": networkName = nil
+        case "NICKLEN": maximumNicknameLength = nil
+        case "CHANNELLEN": maximumChannelLength = nil
+        case "MODES": maximumModesPerCommand = nil
+        default: break
+        }
+    }
+
+    private func positiveInteger(_ value: String?) -> Int? {
+        guard let value, let parsed = Int(value), parsed > 0 else { return nil }
+        return parsed
+    }
+}
+
+enum IRCMemberParser {
+    static func member(
+        from rawName: String,
+        membership: IRCMembershipConfiguration = .common
+    ) -> ChannelMember {
+        var nickmask = rawName[...]
+        var modes = Set<Character>()
+        while let first = nickmask.first, let mode = membership.mode(for: first) {
+            modes.insert(mode)
+            nickmask = nickmask.dropFirst()
+        }
+
+        let identity = String(nickmask)
+        let nicknameAndUser = identity.split(
+            separator: "!",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        let nickname = String(nicknameAndUser[0])
+        guard nicknameAndUser.count == 2 else {
+            return ChannelMember(nickname: nickname, modes: modes, membership: membership)
+        }
+
+        let userAndHost = nicknameAndUser[1].split(
+            separator: "@",
+            maxSplits: 1,
+            omittingEmptySubsequences: false
+        )
+        return ChannelMember(
+            nickname: nickname,
+            modes: modes,
+            membership: membership,
+            username: userAndHost.first.map(String.init),
+            hostname: userAndHost.count == 2 ? String(userAndHost[1]) : nil
+        )
     }
 }
 
@@ -139,7 +430,11 @@ enum IRCTextFraming {
 }
 
 enum IRCCommandTranslator {
-    static func onConnectWireCommand(from input: String) -> String? {
+    static func onConnectWireCommand(
+        from input: String,
+        channelTypes: Set<Character> = Set("#&+!"),
+        preferredChannelPrefix: Character = "#"
+    ) -> String? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         guard trimmed.hasPrefix("/") else { return trimmed }
@@ -171,7 +466,9 @@ enum IRCCommandTranslator {
         case "JOIN":
             let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
             guard let rawChannel = fields.first, !rawChannel.isEmpty else { return nil }
-            let channel = rawChannel.first.map { "#&+!".contains($0) } == true ? rawChannel : "#\(rawChannel)"
+            let channel = rawChannel.first.map(channelTypes.contains) == true
+                ? rawChannel
+                : "\(preferredChannelPrefix)\(rawChannel)"
             return fields.count == 2 ? "JOIN \(channel) \(fields[1])" : "JOIN \(channel)"
         default:
             return argument.isEmpty ? command : "\(command) \(argument)"
@@ -196,11 +493,22 @@ struct IRCMembershipModeChange: Equatable {
     var adding: Bool
 }
 
+struct IRCParsedChannelModeChange: Equatable {
+    var mode: Character
+    var adding: Bool
+    var argument: String?
+}
+
 enum IRCChannelModeParser {
-    static func membershipChanges(modeString: String, arguments: [String]) -> [IRCMembershipModeChange] {
+    static func changes(
+        modeString: String,
+        arguments: [String],
+        membership: IRCMembershipConfiguration = .common,
+        channelModes: IRCChannelModeCapabilities = .rfc1459
+    ) -> [IRCParsedChannelModeChange] {
         var adding = true
         var argumentIndex = 0
-        var changes: [IRCMembershipModeChange] = []
+        var changes: [IRCParsedChannelModeChange] = []
 
         for mode in modeString {
             switch mode {
@@ -214,26 +522,43 @@ enum IRCChannelModeParser {
                 break
             }
 
-            if "qaohv".contains(mode) {
-                guard argumentIndex < arguments.count else { continue }
-                changes.append(IRCMembershipModeChange(
-                    nickname: arguments[argumentIndex],
-                    mode: mode,
-                    adding: adding
-                ))
+            let consumesArgument = membership.modes.contains(mode)
+                || channelModes.consumesArgument(for: mode, adding: adding)
+            let argument: String?
+            if consumesArgument, argumentIndex < arguments.count {
+                argument = arguments[argumentIndex]
                 argumentIndex += 1
-            } else if channelModeConsumesArgument(mode, adding: adding) {
-                argumentIndex += 1
+            } else {
+                argument = nil
             }
+            changes.append(IRCParsedChannelModeChange(
+                mode: mode,
+                adding: adding,
+                argument: argument
+            ))
         }
         return changes
     }
 
-    private static func channelModeConsumesArgument(_ mode: Character, adding: Bool) -> Bool {
-        switch mode {
-        case "b", "e", "I", "k": true
-        case "l", "f", "j", "L": adding
-        default: false
+    static func membershipChanges(
+        modeString: String,
+        arguments: [String],
+        membership: IRCMembershipConfiguration = .common,
+        channelModes: IRCChannelModeCapabilities = .rfc1459
+    ) -> [IRCMembershipModeChange] {
+        changes(
+            modeString: modeString,
+            arguments: arguments,
+            membership: membership,
+            channelModes: channelModes
+        ).compactMap { change in
+            guard membership.modes.contains(change.mode),
+                  let nickname = change.argument else { return nil }
+            return IRCMembershipModeChange(
+                    nickname: nickname,
+                    mode: change.mode,
+                    adding: change.adding
+                )
         }
     }
 }

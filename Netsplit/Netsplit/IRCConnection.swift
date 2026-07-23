@@ -643,8 +643,7 @@ final class IRCConnection {
             // An asterisk after LS signals a multi-line capability list.
             let hasMore = message.parameters.dropFirst(2).contains("*")
             guard !hasMore else { return }
-            let preferred = ["message-tags", "server-time", "batch", "labeled-response", "echo-message"]
-            var supported = preferred.filter { advertisedCapabilities.contains($0) }
+            var supported = IRCCapability.preferred.filter { advertisedCapabilities.contains($0) }
             if saslCredentials != nil {
                 if advertisedCapabilities.contains("sasl") {
                     supported.append("sasl")

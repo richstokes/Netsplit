@@ -261,6 +261,17 @@ struct IRCModelsAndPolicyTests {
         #expect(channels == ["#operators", "#voiced", "#general", "&local", "+modeless"])
     }
 
+    @Test("WHOIS channel lists honor advertised channel and membership prefixes")
+    func parsesAdvertisedWhoisChannels() throws {
+        let membership = try #require(IRCMembershipConfiguration(advertisedValue: "(Yov)!@+"))
+        let channels = IRCWhoisChannelParser.channels(
+            from: "!$founders @$operators $general #standard &unsupported",
+            membership: membership,
+            channelTypes: ["$", "#"]
+        )
+        #expect(channels == ["$founders", "$operators", "$general", "#standard"])
+    }
+
     @Test("Internal channel links round-trip reserved channel characters")
     func roundTripsChannelLinks() {
         let channel = "#swift+macOS"
@@ -297,6 +308,30 @@ struct IRCModelsAndPolicyTests {
         #expect(!member.hasVoice)
     }
 
+    @Test("Moderation actions follow current operator and voice modes")
+    func tracksMemberModerationModes() {
+        var member = ChannelMember(nickname: "Alice")
+        var state = IRCMemberModerationState(member: member)
+        #expect(state.supportsOperator)
+        #expect(state.supportsVoice)
+        #expect(!state.hasOperator)
+        #expect(!state.hasVoice)
+
+        member.modes.formUnion(["o", "v"])
+        state = IRCMemberModerationState(member: member)
+        #expect(state.hasOperator)
+        #expect(state.hasVoice)
+
+        member.modes.remove("o")
+        state = IRCMemberModerationState(member: member)
+        #expect(!state.hasOperator)
+        #expect(state.hasVoice)
+
+        member.modes.remove("v")
+        state = IRCMemberModerationState(member: member)
+        #expect(!state.hasVoice)
+    }
+
     @Test("Only channel operators can moderate other current members")
     func gatesChannelModeration() {
         let members = [
@@ -330,6 +365,13 @@ struct IRCModelsAndPolicyTests {
             caseMapping: .rfc1459
         ))
         #expect(IRCChannelModerationPolicy.banMask(for: "Alice") == "Alice!*@*")
+
+        let identified = ChannelMember(
+            nickname: "Alice",
+            username: "~alice",
+            hostname: "cloak.example"
+        )
+        #expect(IRCChannelModerationPolicy.banMask(for: identified) == "*!~alice@cloak.example")
     }
 
     @Test("Parses single and multi-prefix NAMES entries without corrupting nicknames")
@@ -345,6 +387,23 @@ struct IRCModelsAndPolicyTests {
         #expect(multiPrefix.nickname == "Carol")
         #expect(multiPrefix.modes == ["o", "v"])
         #expect(multiPrefix.prefix == "@")
+    }
+
+    @Test("NAMES parsing honors PREFIX and userhost-in-names")
+    func parsesAdvertisedNamesMembers() throws {
+        let membership = try #require(IRCMembershipConfiguration(advertisedValue: "(Yov)!@+"))
+        let member = IRCMemberParser.member(
+            from: "!@Alice!~alice@cloak.example",
+            membership: membership
+        )
+
+        #expect(member.nickname == "Alice")
+        #expect(member.modes == ["Y", "o"])
+        #expect(member.prefix == "!")
+        #expect(member.role == "Mode +Y")
+        #expect(member.hasOperatorPrivileges)
+        #expect(member.username == "~alice")
+        #expect(member.hostname == "cloak.example")
     }
 
     @Test("Mixed channel modes consume arguments without shifting nicknames")
@@ -374,11 +433,115 @@ struct IRCModelsAndPolicyTests {
         ])
     }
 
+    @Test("Channel mode parsing uses advertised PREFIX and CHANMODES argument rules")
+    func parsesAdvertisedChannelModes() throws {
+        let membership = try #require(IRCMembershipConfiguration(advertisedValue: "(Yov)!@+"))
+        let channelModes = try #require(IRCChannelModeCapabilities(
+            advertisedValue: "beI,kf,l,imnst"
+        ))
+        let changes = IRCChannelModeParser.changes(
+            modeString: "+fYo-l",
+            arguments: ["forward-target", "Founder", "Operator"],
+            membership: membership,
+            channelModes: channelModes
+        )
+
+        #expect(changes == [
+            IRCParsedChannelModeChange(mode: "f", adding: true, argument: "forward-target"),
+            IRCParsedChannelModeChange(mode: "Y", adding: true, argument: "Founder"),
+            IRCParsedChannelModeChange(mode: "o", adding: true, argument: "Operator"),
+            IRCParsedChannelModeChange(mode: "l", adding: false, argument: nil)
+        ])
+        #expect(IRCChannelModeParser.membershipChanges(
+            modeString: "+fYo-l",
+            arguments: ["forward-target", "Founder", "Operator"],
+            membership: membership,
+            channelModes: channelModes
+        ) == [
+            IRCMembershipModeChange(nickname: "Founder", mode: "Y", adding: true),
+            IRCMembershipModeChange(nickname: "Operator", mode: "o", adding: true)
+        ])
+    }
+
+    @Test("ISUPPORT updates and resets server-advertised protocol features")
+    func parsesServerFeatures() throws {
+        var features = IRCServerFeatures.defaults
+        features.apply(parameters: [
+            "CASEMAPPING=ascii",
+            "PREFIX=(Yov)!@+",
+            "CHANMODES=beI,kf,l,imnst",
+            "CHANTYPES=#$",
+            "STATUSMSG=!@",
+            "NETWORK=ExampleNet",
+            "NICKLEN=24",
+            "CHANNELLEN=50",
+            "MODES=6"
+        ][...])
+
+        #expect(features.caseMapping == .ascii)
+        #expect(features.membership.entries.map(\.mode) == ["Y", "o", "v"])
+        #expect(features.membership.entries.map(\.prefix) == ["!", "@", "+"])
+        #expect(features.channelModes.listModes == Set("beI"))
+        #expect(features.channelTypes == ["#", "$"])
+        #expect(features.statusMessagePrefixes == ["!", "@"])
+        #expect(features.channelName(fromMessageTarget: "!$staff") == "$staff")
+        #expect(features.channelName(fromMessageTarget: "@#general") == "#general")
+        #expect(features.channelName(fromMessageTarget: "&local") == nil)
+        #expect(features.networkName == "ExampleNet")
+        #expect(features.maximumNicknameLength == 24)
+        #expect(features.maximumChannelLength == 50)
+        #expect(features.maximumModesPerCommand == 6)
+
+        features.apply(parameters: [
+            "-CASEMAPPING", "-PREFIX", "-CHANMODES", "-CHANTYPES",
+            "-STATUSMSG", "-NETWORK", "-NICKLEN", "-CHANNELLEN", "-MODES"
+        ][...])
+        #expect(features == .defaults)
+    }
+
+    @Test("Ban-list numerics preserve the exact mask and optional metadata")
+    func parsesBanListNumerics() throws {
+        let reply = try #require(IRCWireMessage(
+            line: ":irc.example 367 NetsplitUser #swift *!~alice@cloak.example Oper 1720000000"
+        ))
+        let end = try #require(IRCWireMessage(
+            line: ":irc.example 368 NetsplitUser #swift :End of channel ban list"
+        ))
+        let entry = try #require(IRCBanListParser.entry(from: reply))
+
+        #expect(entry.channel == "#swift")
+        #expect(entry.mask == "*!~alice@cloak.example")
+        #expect(entry.setBy == "Oper")
+        #expect(entry.setAt == Date(timeIntervalSince1970: 1_720_000_000))
+        #expect(IRCBanListParser.endChannel(from: end) == "#swift")
+    }
+
     @Test("Normalizes capability modifiers and advertised values")
     func parsesCapabilityNames() {
         #expect(IRCCapability.name(from: "sasl=PLAIN,EXTERNAL") == "sasl")
         #expect(IRCCapability.name(from: "-echo-message") == "echo-message")
         #expect(IRCCapability.name(from: "server-time") == "server-time")
+        #expect(IRCCapability.preferred == [
+            "message-tags",
+            "server-time",
+            "multi-prefix",
+            "userhost-in-names",
+            "chghost",
+            "echo-message"
+        ])
+        #expect(!IRCCapability.preferred.contains("batch"))
+        #expect(!IRCCapability.preferred.contains("labeled-response"))
+    }
+
+    @Test("Parses IRCv3 server-time tags with or without fractional seconds")
+    func parsesServerTimeTags() {
+        let fractional = IRCServerTimeParser.date(from: "2026-07-17T20:00:00.125Z")
+        let wholeSeconds = IRCServerTimeParser.date(from: "2026-07-17T20:00:00Z")
+
+        #expect(fractional != nil)
+        #expect(wholeSeconds != nil)
+        #expect(fractional?.timeIntervalSince(wholeSeconds!) == 0.125)
+        #expect(IRCServerTimeParser.date(from: "not-a-date") == nil)
     }
 
     @Test("Reconnect backoff is exponential and capped")
@@ -715,6 +878,23 @@ struct IRCModelsAndPolicyTests {
         #expect(try link(for: "word#tag", occurrence: 0, in: rendered) == nil)
         #expect(try link(for: "C++", occurrence: 0, in: rendered) == nil)
         #expect(try link(for: "https://example.com/#fragment", occurrence: 0, in: rendered) == URL(string: "https://example.com/#fragment"))
+    }
+
+    @Test("Message rendering honors server-advertised custom channel types")
+    func linkifiesAdvertisedChannelTypes() {
+        let message = IRCMessage(
+            sender: "Alice",
+            text: "Try $staff and #ordinary.",
+            channelTypes: ["$"]
+        )
+        let rendered = IRCMessageTextRenderer.linkifiedText(for: message)
+        let links = rendered.runs.compactMap(\.link)
+
+        #expect(links.contains(IRCInternalLink.channelURL(for: "$staff")!))
+        #expect(!links.contains(IRCInternalLink.channelURL(for: "#ordinary")!))
+        #expect(IRCInternalLink.channelName(
+            from: IRCInternalLink.channelURL(for: "$staff")!
+        ) == "$staff")
     }
 
     @Test("Advertised channel links still handle membership-prefixed WHOIS output")

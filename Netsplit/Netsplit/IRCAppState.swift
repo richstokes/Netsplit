@@ -126,6 +126,9 @@ final class IRCAppState: ObservableObject {
     @Published var isChannelBrowserPresented = false
     @Published private var listedChannelsByServer: [UUID: [ChannelListing]] = [:]
     @Published private var channelListsInProgress: Set<UUID> = []
+    @Published private var channelBanLists: [UUID: [IRCBanEntry]] = [:]
+    @Published private var channelBanListRequests = Set<UUID>()
+    @Published private var channelBanListErrors: [UUID: String] = [:]
 
     private var conversations: [UUID: [IRCMessage]] = [:]
     private var conversationDrafts: [SidebarItem: String] = [:]
@@ -164,11 +167,15 @@ final class IRCAppState: ObservableObject {
     private var reconnectAttempts: [UUID: Int] = [:]
     private var scheduledReconnects: [UUID: UUID] = [:]
     private var registrationNicknameSuffixes: [UUID: Set<Int>] = [:]
-    private var caseMappings: [UUID: IRCCaseMapping] = [:]
+    private var serverFeatures: [UUID: IRCServerFeatures] = [:]
+    private var pendingChannelBanLists: [UUID: [IRCBanEntry]] = [:]
+    private var channelBanListRequestIDs: [UUID: UUID] = [:]
+    private var incomingMessageTimestamp: Date?
     private var sessionIDs: [UUID: UUID] = [:]
     private var sessionOnConnectCommands: [UUID: [String]] = [:]
     private let channelListCacheLifetime: TimeInterval = 120
     private let channelListRequestTimeout: TimeInterval = 30
+    private let channelBanListRequestTimeout: TimeInterval = 15
     private let favoriteJoinInterval: TimeInterval = 0.45
     private let onConnectCommandInterval: TimeInterval = 0.5
     private let favoriteJoinDelayAfterCommands: TimeInterval = 2
@@ -246,6 +253,11 @@ final class IRCAppState: ObservableObject {
     var selectedProfile: ServerProfile? {
         guard let selection else { return nil }
         return profile(for: selection)
+    }
+
+    var selectedChannel: Conversation? {
+        guard case .channel(let id) = selection else { return nil }
+        return channels.first(where: { $0.id == id })
     }
 
     var jumpDestinations: [IRCJumpDestination] {
@@ -678,7 +690,7 @@ final class IRCAppState: ObservableObject {
     func connect(_ profile: ServerProfile, selectConversation: Bool = true, isAutomaticRetry: Bool = false) {
         guard connections[profile.id] == nil else { return }
         if !isAutomaticRetry { cancelScheduledReconnect(for: profile.id, resetAttempts: true) }
-        caseMappings[profile.id] = .rfc1459
+        serverFeatures[profile.id] = .defaults
         sessionIDs[profile.id] = UUID()
         sessionOnConnectCommands[profile.id] = onConnectCommands(for: profile)
         prepareChannelsForDisconnectedSession(for: profile.id)
@@ -904,8 +916,19 @@ final class IRCAppState: ObservableObject {
 
     func members(for item: SidebarItem) -> [ChannelMember] {
         guard case .channel(let id) = item else { return [] }
-        let fallbackNickname = profile(for: item).map { nickname(for: $0) } ?? nickname
-        return channelMembers[id] ?? [ChannelMember(nickname: fallbackNickname, prefix: nil)]
+        guard let profile = profile(for: item) else { return [] }
+        return channelMembers[id] ?? [
+            ChannelMember(
+                nickname: nickname(for: profile),
+                membership: features(for: profile.id).membership
+            )
+        ]
+    }
+
+    func canManageChannel(in item: SidebarItem) -> Bool {
+        guard let profile = profile(for: item),
+              let localMember = member(named: nickname(for: profile), in: item) else { return false }
+        return localMember.hasOperatorPrivileges
     }
 
     func canModerate(_ targetNickname: String, in item: SidebarItem) -> Bool {
@@ -916,23 +939,24 @@ final class IRCAppState: ObservableObject {
             localNickname: nickname(for: profile),
             targetNickname: targetNickname,
             members: members,
-            caseMapping: caseMappings[profile.id] ?? .rfc1459
+            caseMapping: features(for: profile.id).caseMapping
         )
     }
 
-    func isVoiced(_ targetNickname: String, in item: SidebarItem) -> Bool {
-        member(named: targetNickname, in: item)?.hasVoice ?? false
-    }
-
-    func isOperator(_ targetNickname: String, in item: SidebarItem) -> Bool {
-        member(named: targetNickname, in: item)?.hasOperatorMode ?? false
+    func moderationState(
+        for targetNickname: String,
+        in item: SidebarItem
+    ) -> IRCMemberModerationState? {
+        member(named: targetNickname, in: item).map(IRCMemberModerationState.init(member:))
     }
 
     func setOperator(_ enabled: Bool, for targetNickname: String, in item: SidebarItem) {
         guard canModerate(targetNickname, in: item),
+              let profile = profile(for: item),
+              let operatorMode = features(for: profile.id).membership.operatorMode,
               case .channel(let channelID) = item,
               let channel = channels.first(where: { $0.id == channelID }) else { return }
-        executeCommand("/mode \(channel.name) \(enabled ? "+o" : "-o") \(targetNickname)", in: item)
+        executeCommand("/mode \(channel.name) \(enabled ? "+" : "-")\(operatorMode) \(targetNickname)", in: item)
     }
 
     private func member(named targetNickname: String, in item: SidebarItem) -> ChannelMember? {
@@ -947,9 +971,11 @@ final class IRCAppState: ObservableObject {
 
     func setVoice(_ enabled: Bool, for targetNickname: String, in item: SidebarItem) {
         guard canModerate(targetNickname, in: item),
+              let profile = profile(for: item),
+              let voiceMode = features(for: profile.id).membership.voiceMode,
               case .channel(let channelID) = item,
               let channel = channels.first(where: { $0.id == channelID }) else { return }
-        executeCommand("/mode \(channel.name) \(enabled ? "+v" : "-v") \(targetNickname)", in: item)
+        executeCommand("/mode \(channel.name) \(enabled ? "+" : "-")\(voiceMode) \(targetNickname)", in: item)
     }
 
     func kick(_ targetNickname: String, from item: SidebarItem) {
@@ -963,8 +989,62 @@ final class IRCAppState: ObservableObject {
         guard canModerate(targetNickname, in: item),
               case .channel(let channelID) = item,
               let channel = channels.first(where: { $0.id == channelID }) else { return }
-        let mask = IRCChannelModerationPolicy.banMask(for: targetNickname)
+        let mask = member(named: targetNickname, in: item)
+            .map(IRCChannelModerationPolicy.banMask(for:))
+            ?? IRCChannelModerationPolicy.banMask(for: targetNickname)
         executeCommand("/mode \(channel.name) +b \(mask)", in: item)
+    }
+
+    func banAndKick(_ targetNickname: String, from item: SidebarItem) {
+        guard canModerate(targetNickname, in: item) else { return }
+        ban(targetNickname, from: item)
+        kick(targetNickname, from: item)
+    }
+
+    func bans(for item: SidebarItem) -> [IRCBanEntry] {
+        guard case .channel(let channelID) = item else { return [] }
+        return channelBanLists[channelID] ?? []
+    }
+
+    func isRequestingBans(for item: SidebarItem) -> Bool {
+        guard case .channel(let channelID) = item else { return false }
+        return channelBanListRequests.contains(channelID)
+    }
+
+    func banListError(for item: SidebarItem) -> String? {
+        guard case .channel(let channelID) = item else { return nil }
+        return channelBanListErrors[channelID]
+    }
+
+    func requestBanList(for item: SidebarItem) {
+        guard case .channel(let channelID) = item,
+              let channel = channels.first(where: { $0.id == channelID }),
+              let profile = profile(for: item) else { return }
+        guard canSendMessages(on: profile, reportingTo: item) else {
+            channelBanListErrors[channelID] = "Connect to the server before requesting the ban list."
+            return
+        }
+        let requestID = UUID()
+        channelBanListRequestIDs[channelID] = requestID
+        pendingChannelBanLists[channelID] = []
+        channelBanListErrors.removeValue(forKey: channelID)
+        channelBanListRequests.insert(channelID)
+        connections[profile.id]?.send(command: "MODE \(channel.name) +b")
+        DispatchQueue.main.asyncAfter(deadline: .now() + channelBanListRequestTimeout) { [weak self] in
+            guard let self,
+                  self.channelBanListRequestIDs[channelID] == requestID,
+                  self.channelBanListRequests.remove(channelID) != nil else { return }
+            self.channelBanListRequestIDs.removeValue(forKey: channelID)
+            self.pendingChannelBanLists.removeValue(forKey: channelID)
+            self.channelBanListErrors[channelID] = "The server did not finish the ban-list response."
+        }
+    }
+
+    func removeBan(_ ban: IRCBanEntry, from item: SidebarItem) {
+        guard canManageChannel(in: item),
+              case .channel(let channelID) = item,
+              let channel = channels.first(where: { $0.id == channelID }) else { return }
+        executeCommand("/mode \(channel.name) -b \(ban.mask)", in: item)
     }
 
     func memberUpdates(for item: SidebarItem) -> IRCRevisionSignal {
@@ -987,6 +1067,10 @@ final class IRCAppState: ObservableObject {
               let topic = channelTopics[id]?.trimmingCharacters(in: .whitespacesAndNewlines),
               !topic.isEmpty else { return nil }
         return topic
+    }
+
+    func channelTypes(for item: SidebarItem) -> Set<Character> {
+        profile(for: item).map { features(for: $0.id).channelTypes } ?? Set("#&+!")
     }
 
     func channelListings(for profileID: UUID?) -> [ChannelListing] {
@@ -1036,7 +1120,7 @@ final class IRCAppState: ObservableObject {
     func joinChannel(named channelName: String, from item: SidebarItem) {
         guard let profile = profile(for: item) else { return }
         let channel = channelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isChannelName(channel) else { return }
+        guard isChannelName(channel, serverID: profile.id) else { return }
         join(
             ChannelListing(name: channel, userCount: 0, topic: ""),
             on: profile,
@@ -1047,8 +1131,15 @@ final class IRCAppState: ObservableObject {
 
     private func runPostRegistrationSequence(for profile: ServerProfile) {
         guard let sessionID = sessionIDs[profile.id] else { return }
+        let serverFeatures = features(for: profile.id)
         let commands = (sessionOnConnectCommands[profile.id] ?? [])
-            .compactMap(IRCCommandTranslator.onConnectWireCommand(from:))
+            .compactMap {
+                IRCCommandTranslator.onConnectWireCommand(
+                    from: $0,
+                    channelTypes: serverFeatures.channelTypes,
+                    preferredChannelPrefix: serverFeatures.preferredChannelPrefix
+                )
+            }
 
         if !commands.isEmpty {
             appendSystem(
@@ -1110,10 +1201,18 @@ final class IRCAppState: ObservableObject {
     }
 
     private func rejoin(_ channel: Conversation, on profile: ServerProfile) {
+        guard validateChannelName(channel.name, serverID: profile.id, reportingTo: .server(profile.id)) else {
+            return
+        }
         let key = joinKey(serverID: profile.id, channel: channel.name)
         guard pendingJoins[key] == nil else { return }
         channelTopics.removeValue(forKey: channel.id)
-        channelMembers[channel.id] = [ChannelMember(nickname: nickname(for: profile), prefix: nil)]
+        channelMembers[channel.id] = [
+            ChannelMember(
+                nickname: nickname(for: profile),
+                membership: features(for: profile.id).membership
+            )
+        ]
         let statusMessage = IRCMessage(sender: "System", text: "Rejoining \(channel.name)…", isSystem: true)
         conversations[channel.id, default: []].append(statusMessage)
         pendingJoins[key] = PendingJoin(
@@ -1135,6 +1234,9 @@ final class IRCAppState: ObservableObject {
             appendSystem("Wait for the server to finish connecting before joining a channel.", for: destination)
             return
         }
+        guard validateChannelName(listing.name, serverID: profile.id, reportingTo: destination) else {
+            return
+        }
         if let channel = channels.first(where: { $0.serverID == profile.id && identifiersEqual($0.name, listing.name, serverID: profile.id) }) {
             if selectConversation { selection = .channel(channel.id) }
             return
@@ -1145,7 +1247,12 @@ final class IRCAppState: ObservableObject {
         if !listedTopic.isEmpty {
             channelTopics[channel.id] = listedTopic
         }
-        channelMembers[channel.id] = [ChannelMember(nickname: nickname(for: profile), prefix: nil)]
+        channelMembers[channel.id] = [
+            ChannelMember(
+                nickname: nickname(for: profile),
+                membership: features(for: profile.id).membership
+            )
+        ]
         let joiningMessage = IRCMessage(sender: "System", text: "Joining \(listing.name)…", isSystem: true)
         conversations[channel.id] = [joiningMessage]
         pendingJoins[joinKey(serverID: profile.id, channel: listing.name)] = PendingJoin(
@@ -1248,7 +1355,10 @@ final class IRCAppState: ObservableObject {
                 appendSystem("Usage: /join channel", for: item)
                 return
             }
-            let channel = rawChannel.first.map { "#&+!".contains($0) } == true ? rawChannel : "#\(rawChannel)"
+            let serverFeatures = features(for: profile.id)
+            let channel = serverFeatures.isChannelName(rawChannel)
+                ? rawChannel
+                : "\(serverFeatures.preferredChannelPrefix)\(rawChannel)"
             join(
                 ChannelListing(name: channel, userCount: 0, topic: ""),
                 on: profile,
@@ -1416,6 +1526,18 @@ final class IRCAppState: ObservableObject {
                 appendSystem("Usage: /nick nickname", for: item)
                 return
             }
+            if let error = IRCIdentityValidation.nicknameError(newNickname) {
+                appendSystem(error, for: item)
+                return
+            }
+            if let maximumLength = features(for: profile.id).maximumNicknameLength,
+               newNickname.count > maximumLength {
+                appendSystem(
+                    "This server limits nicknames to \(maximumLength) characters.",
+                    for: item
+                )
+                return
+            }
             pendingNickDestinations[profile.id] = item
             connections[profile.id]?.send(command: "NICK \(newNickname)")
             appendSystem("Changing nickname to \(newNickname)…", for: item)
@@ -1450,7 +1572,7 @@ final class IRCAppState: ObservableObject {
             newTopic = nil
         } else {
             let fields = trimmedArgument.split(separator: " ", maxSplits: 1).map(String.init)
-            if isChannelName(fields[0]) {
+            if isChannelName(fields[0], serverID: profile.id) {
                 guard let namedChannel = existingChannel(named: fields[0], serverID: profile.id) else {
                     appendSystem("You are not joined to \(fields[0]).", for: item)
                     return
@@ -1489,7 +1611,7 @@ final class IRCAppState: ObservableObject {
             return
         }
         let fields = trimmed.split(separator: " ", maxSplits: 1).map(String.init)
-        if isChannelName(fields[0]) {
+        if isChannelName(fields[0], serverID: profile.id) {
             guard let namedChannel = existingChannel(named: fields[0], serverID: profile.id) else {
                 appendSystem("You are not joined to \(fields[0]).", for: item)
                 return
@@ -1550,6 +1672,9 @@ final class IRCAppState: ObservableObject {
     }
 
     private func handle(_ wire: IRCWireMessage, profile: ServerProfile) {
+        let previousIncomingMessageTimestamp = incomingMessageTimestamp
+        incomingMessageTimestamp = IRCServerTimeParser.date(from: wire.tags["time"] ?? nil)
+        defer { incomingMessageTimestamp = previousIncomingMessageTimestamp }
         let sender = wire.prefix?.split(separator: "!").first.map(String.init) ?? profile.name
         switch wire.command {
         case "001":
@@ -1563,7 +1688,7 @@ final class IRCAppState: ObservableObject {
             appendSystem(wire.trailing ?? "Connected.", for: .server(profile.id))
             runPostRegistrationSequence(for: profile)
         case "005":
-            updateCaseMapping(from: wire, serverID: profile.id)
+            updateServerFeatures(from: wire, serverID: profile.id)
         case "NOTICE":
             guard let target = wire.parameters.first, let text = wire.trailing else { return }
             guard !isMuted(sender, on: profile) else { return }
@@ -1572,9 +1697,9 @@ final class IRCAppState: ObservableObject {
             // IRC notices are delivered as a distinct message type, but they
             // still belong beside the conversation they address. Server notices
             // and recognized network service broadcasts remain in the server log.
-            if isChannelName(target) {
+            if let channelTarget = features(for: profile.id).channelName(fromMessageTarget: target) {
                 guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
-                let channel = channel(named: target, serverID: profile.id)
+                let channel = channel(named: channelTarget, serverID: profile.id)
                 append(
                     IRCMessage(sender: "\(sender) (notice)", text: text, isNotice: true, nicknameColorKey: sender),
                     for: .channel(channel.id),
@@ -1591,7 +1716,7 @@ final class IRCAppState: ObservableObject {
                 switch IRCNoticeRoutingPolicy.fallbackDestination(
                     sender: sender,
                     prefix: wire.prefix,
-                    caseMapping: caseMappings[profile.id] ?? .rfc1459
+                    caseMapping: features(for: profile.id).caseMapping
                 ) {
                 case .server:
                     if wire.prefix?.contains("!") == true {
@@ -1627,8 +1752,8 @@ final class IRCAppState: ObservableObject {
                consumeOutgoingEcho(serverID: profile.id, target: target, text: text) {
                 return
             }
-            if isChannelName(target) {
-                let channel = channel(named: target, serverID: profile.id)
+            if let channelTarget = features(for: profile.id).channelName(fromMessageTarget: target) {
+                let channel = channel(named: channelTarget, serverID: profile.id)
                 let isOwnMessage = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
                 append(
                     IRCMessage(sender: sender, text: text),
@@ -1644,7 +1769,8 @@ final class IRCAppState: ObservableObject {
             guard let invite = IRCIncomingInvite(
                 wire: wire,
                 localNickname: nickname(for: profile),
-                caseMapping: caseMappings[profile.id] ?? .rfc1459
+                caseMapping: features(for: profile.id).caseMapping,
+                channelTypes: features(for: profile.id).channelTypes
             ), !isMuted(invite.inviter, on: profile) else { return }
 
             append(
@@ -1659,10 +1785,14 @@ final class IRCAppState: ObservableObject {
                 unreadInviteCountsByServer[profile.id, default: 0] += 1
             }
         case "JOIN":
-            let channelName = wire.trailing ?? wire.parameters.last ?? ""
-            if isChannelName(channelName) {
+            let channelName = wire.parameters.first ?? wire.trailing ?? ""
+            if isChannelName(channelName, serverID: profile.id) {
                 let channel = channel(named: channelName, serverID: profile.id)
-                addMember(ChannelMember(nickname: sender, prefix: nil), to: channel.id)
+                let member = IRCMemberParser.member(
+                    from: wire.prefix ?? sender,
+                    membership: features(for: profile.id).membership
+                )
+                addMember(member, to: channel.id)
                 if identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                     let pendingJoin = pendingJoins.removeValue(forKey: joinKey(serverID: profile.id, channel: channelName))
                     if let pendingJoin {
@@ -1774,6 +1904,7 @@ final class IRCAppState: ObservableObject {
             let destination = pendingModeDestinations.removeValue(forKey: key)
             if let channel = existingChannel(named: target, serverID: profile.id) {
                 applyMembershipModes(modeString, arguments: modeArguments, to: channel.id)
+                applyBanModes(modeString, arguments: modeArguments, to: channel)
                 appendChannelEvent("\(sender) set mode \(changes) on \(target).", kind: .mode, channelID: channel.id)
                 if let destination, destination != .channel(channel.id) {
                     appendSystem("Modes for \(target) changed: \(changes)", for: destination)
@@ -1781,14 +1912,30 @@ final class IRCAppState: ObservableObject {
             } else {
                 appendSystem("Modes for \(target) changed: \(changes)", for: destination ?? .server(profile.id))
             }
+        case "CHGHOST":
+            guard wire.parameters.count >= 2 else { return }
+            updateMemberIdentity(
+                named: sender,
+                username: wire.parameters[0],
+                hostname: wire.parameters[1],
+                serverID: profile.id
+            )
         case "353":
             guard wire.parameters.count >= 3 else { return }
             let channel = channel(named: wire.parameters[2], serverID: profile.id)
-            stageMembers((wire.trailing ?? "").split(separator: " ").map(String.init).map(IRCMemberParser.member(from:)), for: channel.id)
+            let membership = features(for: profile.id).membership
+            let members = (wire.trailing ?? "").split(separator: " ").map {
+                IRCMemberParser.member(from: String($0), membership: membership)
+            }
+            stageMembers(members, for: channel.id)
         case "366":
             guard wire.parameters.count >= 2,
                   let channel = existingChannel(named: wire.parameters[1], serverID: profile.id) else { return }
             finishStagingMembers(for: channel.id)
+        case "367":
+            handleBanListEntry(wire, serverID: profile.id)
+        case "368":
+            handleBanListEnd(wire, serverID: profile.id)
         case "351":
             handleVersionReply(wire, serverID: profile.id)
         case "331", "332":
@@ -1839,7 +1986,7 @@ final class IRCAppState: ObservableObject {
             handleJoinError(wire, serverID: profile.id)
         case "442", "443", "482":
             if !handleInviteError(wire, serverID: profile.id) { handleModerationError(wire, serverID: profile.id) }
-        case "441", "481":
+        case "441", "472", "478", "481":
             handleModerationError(wire, serverID: profile.id)
         case "437":
             if !handleJoinError(wire, serverID: profile.id) {
@@ -1925,7 +2072,12 @@ final class IRCAppState: ObservableObject {
         case "317": message = "\(target) has been idle \(formatIdle(wire.parameters.count > 2 ? Int(wire.parameters[2]) ?? 0 : 0))."
         case "319":
             let channels = wire.trailing ?? "no visible channels"
-            channelLinks = IRCWhoisChannelParser.channels(from: channels)
+            let serverFeatures = features(for: serverID)
+            channelLinks = IRCWhoisChannelParser.channels(
+                from: channels,
+                membership: serverFeatures.membership,
+                channelTypes: serverFeatures.channelTypes
+            )
             message = "\(target) is on: \(channels)"
         case "330": message = "\(target) is logged in as \(wire.parameters.count > 2 ? wire.parameters[2] : "an account")."
         case "671": message = "\(target) is using a secure connection."
@@ -1980,9 +2132,18 @@ final class IRCAppState: ObservableObject {
         default: nil
         }
         let channel: String? = switch wire.command {
-        case "403", "442", "482": wire.parameters.count > 1 ? wire.parameters[1] : nil
+        case "403", "442", "478", "482": wire.parameters.count > 1 ? wire.parameters[1] : nil
         case "441": wire.parameters.count > 2 ? wire.parameters[2] : nil
         default: nil
+        }
+
+        if let channel,
+           let conversation = existingChannel(named: channel, serverID: serverID),
+           channelBanListRequests.remove(conversation.id) != nil {
+            pendingChannelBanLists.removeValue(forKey: conversation.id)
+            channelBanListRequestIDs.removeValue(forKey: conversation.id)
+            channelBanListErrors[conversation.id] = wire.trailing ?? "The server rejected the ban-list request."
+            return true
         }
 
         if let (key, kick) = pendingKicks.first(where: { _, kick in
@@ -1993,6 +2154,26 @@ final class IRCAppState: ObservableObject {
         }) {
             pendingKicks.removeValue(forKey: key)
             appendSystem("Kick failed: \(wire.trailing ?? "The server rejected the kick.")", for: kick.destination)
+            return true
+        }
+
+        if let channel {
+            let key = modeKey(serverID: serverID, target: channel)
+            if let destination = pendingModeDestinations.removeValue(forKey: key) {
+                appendSystem("Mode change failed: \(wire.trailing ?? "The server rejected the mode change.")", for: destination)
+                return true
+            }
+        }
+
+        if wire.command == "472",
+           let (key, destination) = pendingModeDestinations.first(where: { _, destination in
+               profile(for: destination)?.id == serverID
+           }) {
+            pendingModeDestinations.removeValue(forKey: key)
+            appendSystem(
+                "Mode change failed: \(wire.trailing ?? "The server does not support that mode.")",
+                for: destination
+            )
             return true
         }
 
@@ -2040,6 +2221,31 @@ final class IRCAppState: ObservableObject {
         guard let destination = pendingModeDestinations.removeValue(forKey: key) else { return }
         let suffix = arguments.isEmpty ? "" : " \(arguments)"
         appendSystem("Modes for \(target): \(modes)\(suffix)", for: destination)
+    }
+
+    private func handleBanListEntry(_ wire: IRCWireMessage, serverID: UUID) {
+        guard var entry = IRCBanListParser.entry(from: wire),
+              let channel = existingChannel(named: entry.channel, serverID: serverID) else { return }
+        entry.channel = channel.name
+        var entries = pendingChannelBanLists[channel.id] ?? []
+        if let index = entries.firstIndex(where: {
+            $0.mask.caseInsensitiveCompare(entry.mask) == .orderedSame
+        }) {
+            entries[index] = entry
+        } else {
+            entries.append(entry)
+        }
+        pendingChannelBanLists[channel.id] = entries
+    }
+
+    private func handleBanListEnd(_ wire: IRCWireMessage, serverID: UUID) {
+        guard let channelName = IRCBanListParser.endChannel(from: wire),
+              let channel = existingChannel(named: channelName, serverID: serverID) else { return }
+        channelBanLists[channel.id] = (pendingChannelBanLists.removeValue(forKey: channel.id) ?? [])
+            .sorted { $0.mask.localizedCaseInsensitiveCompare($1.mask) == .orderedAscending }
+        channelBanListRequests.remove(channel.id)
+        channelBanListRequestIDs.removeValue(forKey: channel.id)
+        channelBanListErrors.removeValue(forKey: channel.id)
     }
 
     private func handleWhoReply(_ wire: IRCWireMessage, serverID: UUID) {
@@ -2166,8 +2372,8 @@ final class IRCAppState: ObservableObject {
                 return true
             }
             let message = IRCMessage(sender: "* \(sender)", text: command[1], nicknameColorKey: sender)
-            if let first = target.first, "#&+!".contains(first) {
-                let channel = channel(named: target, serverID: profile.id)
+            if let channelTarget = features(for: profile.id).channelName(fromMessageTarget: target) {
+                let channel = channel(named: channelTarget, serverID: profile.id)
                 let isOwnAction = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
                 append(
                     message,
@@ -2278,7 +2484,12 @@ final class IRCAppState: ObservableObject {
         let conversation = Conversation(name: name, serverID: serverID)
         channels.append(conversation)
         let profileNickname = profiles.first(where: { $0.id == serverID }).map { nickname(for: $0) } ?? nickname
-        channelMembers[conversation.id] = [ChannelMember(nickname: profileNickname, prefix: nil)]
+        channelMembers[conversation.id] = [
+            ChannelMember(
+                nickname: profileNickname,
+                membership: features(for: serverID).membership
+            )
+        ]
         resolvePendingMentionNotificationDestination()
         return conversation
     }
@@ -2289,7 +2500,7 @@ final class IRCAppState: ObservableObject {
               let channelID = IRCMentionNotificationPolicy.channelID(
                 for: destination,
                 in: channels,
-                caseMapping: caseMappings[destination.serverID] ?? .rfc1459
+                caseMapping: features(for: destination.serverID).caseMapping
               ) else { return false }
         pendingMentionNotificationDestination = nil
         selection = .channel(channelID)
@@ -2307,6 +2518,11 @@ final class IRCAppState: ObservableObject {
         channelTopics.removeValue(forKey: channel.id)
         channelMembers.removeValue(forKey: channel.id)
         pendingChannelMembers.removeValue(forKey: channel.id)
+        channelBanLists.removeValue(forKey: channel.id)
+        pendingChannelBanLists.removeValue(forKey: channel.id)
+        channelBanListRequests.remove(channel.id)
+        channelBanListRequestIDs.removeValue(forKey: channel.id)
+        channelBanListErrors.removeValue(forKey: channel.id)
         pendingJoins.removeValue(forKey: joinKey(serverID: channel.serverID, channel: channel.name))
         if selection == .channel(channel.id) { selection = .server(channel.serverID) }
         messagesDidChange(for: channel.id)
@@ -2322,6 +2538,11 @@ final class IRCAppState: ObservableObject {
         for channel in retainedChannels {
             channelMembers[channel.id] = []
             pendingChannelMembers.removeValue(forKey: channel.id)
+            channelBanLists.removeValue(forKey: channel.id)
+            pendingChannelBanLists.removeValue(forKey: channel.id)
+            channelBanListRequests.remove(channel.id)
+            channelBanListRequestIDs.removeValue(forKey: channel.id)
+            channelBanListErrors.removeValue(forKey: channel.id)
         }
         pendingJoins = pendingJoins.filter { $0.value.serverID != serverID }
         membersDidChange(for: retainedChannels.map(\.id))
@@ -2340,6 +2561,11 @@ final class IRCAppState: ObservableObject {
             channelTopics.removeValue(forKey: conversationID)
             channelMembers.removeValue(forKey: conversationID)
             pendingChannelMembers.removeValue(forKey: conversationID)
+            channelBanLists.removeValue(forKey: conversationID)
+            pendingChannelBanLists.removeValue(forKey: conversationID)
+            channelBanListRequests.remove(conversationID)
+            channelBanListRequestIDs.removeValue(forKey: conversationID)
+            channelBanListErrors.removeValue(forKey: conversationID)
         }
         conversationDrafts = conversationDrafts.filter { item, _ in
             guard let conversationID = conversationID(for: item) else { return true }
@@ -2402,8 +2628,29 @@ final class IRCAppState: ObservableObject {
         return true
     }
 
-    private func isChannelName(_ value: String) -> Bool {
-        value.first.map { "#&+!".contains($0) } == true
+    private func isChannelName(_ value: String, serverID: UUID) -> Bool {
+        features(for: serverID).isChannelName(value)
+    }
+
+    private func validateChannelName(
+        _ channelName: String,
+        serverID: UUID,
+        reportingTo destination: SidebarItem
+    ) -> Bool {
+        let serverFeatures = features(for: serverID)
+        guard serverFeatures.isChannelName(channelName) else {
+            appendSystem("This server does not recognize \(channelName) as a channel name.", for: destination)
+            return false
+        }
+        if let maximumLength = serverFeatures.maximumChannelLength,
+           channelName.count > maximumLength {
+            appendSystem(
+                "This server limits channel names to \(maximumLength) characters.",
+                for: destination
+            )
+            return false
+        }
+        return true
     }
 
     /// Some networks deliver channel welcome notices to the user's nickname
@@ -2415,7 +2662,7 @@ final class IRCAppState: ObservableObject {
         guard trimmedText.first == "[",
               let closingBracket = trimmedText.firstIndex(of: "]") else { return nil }
         let channelName = String(trimmedText[trimmedText.index(after: trimmedText.startIndex)..<closingBracket])
-        guard isChannelName(channelName) else { return nil }
+        guard isChannelName(channelName, serverID: serverID) else { return nil }
         return existingChannel(named: channelName, serverID: serverID)
     }
 
@@ -2518,7 +2765,9 @@ final class IRCAppState: ObservableObject {
         guard let serverID = channels.first(where: { $0.id == channelID })?.serverID else { return false }
         let normalizedOldNickname = normalizedIdentifier(oldNickname, serverID: serverID)
         if var pending = pendingChannelMembers[channelID], let member = pending.removeValue(forKey: normalizedOldNickname) {
-            pending[normalizedIdentifier(newNickname, serverID: serverID)] = ChannelMember(nickname: newNickname, modes: member.modes)
+            var renamedMember = member
+            renamedMember.nickname = newNickname
+            pending[normalizedIdentifier(newNickname, serverID: serverID)] = renamedMember
             pendingChannelMembers[channelID] = pending
         }
         guard var members = channelMembers[channelID], let index = members.firstIndex(where: {
@@ -2534,8 +2783,77 @@ final class IRCAppState: ObservableObject {
     /// member list. Non-membership modes consume their IRC parameters so a
     /// mixed MODE command (for example +klo key 50 nick) stays aligned.
     private func applyMembershipModes(_ modeString: String, arguments: [String], to channelID: UUID) {
-        for change in IRCChannelModeParser.membershipChanges(modeString: modeString, arguments: arguments) {
+        guard let serverID = channels.first(where: { $0.id == channelID })?.serverID else { return }
+        let serverFeatures = features(for: serverID)
+        for change in IRCChannelModeParser.membershipChanges(
+            modeString: modeString,
+            arguments: arguments,
+            membership: serverFeatures.membership,
+            channelModes: serverFeatures.channelModes
+        ) {
             updateMembershipMode(change.mode, for: change.nickname, adding: change.adding, in: channelID)
+        }
+    }
+
+    private func applyBanModes(_ modeString: String, arguments: [String], to channel: Conversation) {
+        guard channelBanLists[channel.id] != nil else { return }
+        let serverFeatures = features(for: channel.serverID)
+        let changes = IRCChannelModeParser.changes(
+            modeString: modeString,
+            arguments: arguments,
+            membership: serverFeatures.membership,
+            channelModes: serverFeatures.channelModes
+        )
+        var bans = channelBanLists[channel.id] ?? []
+        var didChange = false
+        for change in changes where change.mode == "b" {
+            guard let mask = change.argument else { continue }
+            if change.adding {
+                guard !bans.contains(where: {
+                    $0.mask.caseInsensitiveCompare(mask) == .orderedSame
+                }) else { continue }
+                bans.append(IRCBanEntry(channel: channel.name, mask: mask))
+                didChange = true
+            } else if let index = bans.firstIndex(where: {
+                $0.mask.caseInsensitiveCompare(mask) == .orderedSame
+            }) {
+                bans.remove(at: index)
+                didChange = true
+            }
+        }
+        guard didChange else { return }
+        channelBanLists[channel.id] = bans.sorted {
+            $0.mask.localizedCaseInsensitiveCompare($1.mask) == .orderedAscending
+        }
+    }
+
+    private func updateMemberIdentity(
+        named nickname: String,
+        username: String,
+        hostname: String,
+        serverID: UUID
+    ) {
+        let normalizedNickname = normalizedIdentifier(nickname, serverID: serverID)
+        for channel in channels where channel.serverID == serverID {
+            var didChange = false
+            if var members = channelMembers[channel.id],
+               let index = members.firstIndex(where: {
+                   normalizedIdentifier($0.nickname, serverID: serverID) == normalizedNickname
+               }) {
+                members[index].username = username
+                members[index].hostname = hostname
+                channelMembers[channel.id] = members
+                didChange = true
+            }
+            if var pending = pendingChannelMembers[channel.id],
+               var member = pending[normalizedNickname] {
+                member.username = username
+                member.hostname = hostname
+                pending[normalizedNickname] = member
+                pendingChannelMembers[channel.id] = pending
+                didChange = true
+            }
+            if didChange { membersDidChange(for: channel.id) }
         }
     }
 
@@ -2590,7 +2908,9 @@ final class IRCAppState: ObservableObject {
 
     private func sortedMembers(_ members: [ChannelMember]) -> [ChannelMember] {
         members.sorted { lhs, rhs in
-            if (lhs.role != nil) != (rhs.role != nil) { return lhs.role != nil }
+            let lhsRank = lhs.privilegeRank ?? Int.max
+            let rhsRank = rhs.privilegeRank ?? Int.max
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
             return lhs.nickname.localizedCaseInsensitiveCompare(rhs.nickname) == .orderedAscending
         }
     }
@@ -2651,21 +2971,25 @@ final class IRCAppState: ObservableObject {
         let currentProfile = profiles.first(where: { $0.id == profile.id }) ?? profile
         let snapshot = IRCMuteSnapshot(
             nicknames: currentProfile.mutedNicknames ?? [],
-            caseMapping: caseMappings[profile.id] ?? .rfc1459
+            caseMapping: features(for: profile.id).caseMapping
         )
         muteSnapshotsByServer[profile.id] = snapshot
         return snapshot
     }
 
     private func normalizedIdentifier(_ value: String, serverID: UUID) -> String {
-        (caseMappings[serverID] ?? .rfc1459).normalize(value)
+        features(for: serverID).caseMapping.normalize(value)
+    }
+
+    private func features(for serverID: UUID) -> IRCServerFeatures {
+        serverFeatures[serverID] ?? .defaults
     }
 
     private func messageMentionsLocalNickname(_ message: String, on profile: ServerProfile) -> Bool {
         IRCMentionPolicy.containsMention(
             of: nickname(for: profile),
             in: message,
-            caseMapping: caseMappings[profile.id] ?? .rfc1459
+            caseMapping: features(for: profile.id).caseMapping
         )
     }
 
@@ -2673,18 +2997,33 @@ final class IRCAppState: ObservableObject {
         normalizedIdentifier(lhs, serverID: serverID) == normalizedIdentifier(rhs, serverID: serverID)
     }
 
-    private func updateCaseMapping(from wire: IRCWireMessage, serverID: UUID) {
-        guard let token = wire.parameters.dropFirst().first(where: {
-            $0.uppercased().hasPrefix("CASEMAPPING=")
-        }), let rawValue = token.split(separator: "=", maxSplits: 1).last else { return }
-
-        switch rawValue.lowercased() {
-        case "ascii": caseMappings[serverID] = .ascii
-        case "strict-rfc1459": caseMappings[serverID] = .strictRFC1459
-        case "rfc1459": caseMappings[serverID] = .rfc1459
-        default: break
-        }
+    private func updateServerFeatures(from wire: IRCWireMessage, serverID: UUID) {
+        let previous = features(for: serverID)
+        var updated = previous
+        updated.apply(parameters: wire.parameters.dropFirst())
+        serverFeatures[serverID] = updated
         muteSnapshotsByServer.removeValue(forKey: serverID)
+
+        guard updated.membership != previous.membership
+                || updated.caseMapping != previous.caseMapping else { return }
+        let channelIDs = channels.filter { $0.serverID == serverID }.map(\.id)
+        for channelID in channelIDs {
+            if var members = channelMembers[channelID] {
+                for index in members.indices {
+                    members[index].membership = updated.membership
+                }
+                channelMembers[channelID] = sortedMembers(members)
+            }
+            if let pending = pendingChannelMembers[channelID] {
+                var rekeyed: [String: ChannelMember] = [:]
+                for var member in pending.values {
+                    member.membership = updated.membership
+                    rekeyed[updated.caseMapping.normalize(member.nickname)] = member
+                }
+                pendingChannelMembers[channelID] = rekeyed
+            }
+        }
+        membersDidChange(for: channelIDs)
     }
 
     private func configuredNickname(for profile: ServerProfile) -> String {
@@ -2801,8 +3140,15 @@ final class IRCAppState: ObservableObject {
         markMention shouldMarkMention: Bool = false
     ) {
         guard let id = conversationID(for: item) else { return }
-        IRCConversationHistory.append(message, to: &conversations[id, default: []])
-        if selection != item, !message.isSystem {
+        var resolvedMessage = message
+        if let incomingMessageTimestamp {
+            resolvedMessage.timestamp = incomingMessageTimestamp
+        }
+        if resolvedMessage.channelTypes == nil, let profile = profile(for: item) {
+            resolvedMessage.channelTypes = features(for: profile.id).channelTypes
+        }
+        IRCConversationHistory.append(resolvedMessage, to: &conversations[id, default: []])
+        if selection != item, !resolvedMessage.isSystem {
             if shouldMarkMention {
                 markMention(item)
             } else if shouldMarkUnread {
@@ -2810,7 +3156,7 @@ final class IRCAppState: ObservableObject {
             }
         }
         if shouldMarkMention {
-            postMentionNotification(for: message, in: item)
+            postMentionNotification(for: resolvedMessage, in: item)
         }
         messagesDidChange(for: id)
     }

@@ -74,6 +74,17 @@ struct IRCFramingAndCommandTests {
         for (input, expected) in cases {
             #expect(IRCCommandTranslator.onConnectWireCommand(from: input) == expected, "Input: \(input)")
         }
+
+        #expect(IRCCommandTranslator.onConnectWireCommand(
+            from: "/join staff",
+            channelTypes: ["$"],
+            preferredChannelPrefix: "$"
+        ) == "JOIN $staff")
+        #expect(IRCCommandTranslator.onConnectWireCommand(
+            from: "/join $staff",
+            channelTypes: ["$"],
+            preferredChannelPrefix: "$"
+        ) == "JOIN $staff")
     }
 
     @Test("Builds SASL PLAIN payloads and emits the required terminal chunk")

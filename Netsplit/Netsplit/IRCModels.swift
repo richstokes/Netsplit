@@ -157,7 +157,8 @@ struct IRCIncomingInvite: Equatable {
     init?(
         wire: IRCWireMessage,
         localNickname: String,
-        caseMapping: IRCCaseMapping
+        caseMapping: IRCCaseMapping,
+        channelTypes: Set<Character> = Set("#&+!")
     ) {
         guard wire.command == "INVITE",
               let target = wire.parameters.first,
@@ -170,7 +171,7 @@ struct IRCIncomingInvite: Equatable {
 
         let rawChannel = wire.trailing ?? wire.parameters.dropFirst().first
         let channel = rawChannel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard channel.first.map({ "#&+!".contains($0) }) == true else { return nil }
+        guard channel.first.map(channelTypes.contains) == true else { return nil }
 
         self.inviter = inviter
         self.channel = channel
@@ -402,6 +403,9 @@ struct IRCMessage: Identifiable, Hashable {
     var isSystem = false
     var isNotice = false
     var channelLinks: [String] = []
+    /// The channel-name prefixes advertised by the originating server. Nil
+    /// keeps the broad legacy defaults for messages created outside a session.
+    var channelTypes: Set<Character>?
     var channelEventKind: IRCChannelEventKind?
     var channelMemberCount: Int?
     var nicknameColorKey: String?
@@ -481,7 +485,10 @@ enum IRCMessageTextRenderer {
             }
         }
 
-        for reference in IRCChannelReferenceParser.references(in: text) {
+        for reference in IRCChannelReferenceParser.references(
+            in: text,
+            channelTypes: message.channelTypes ?? Set("#&+!")
+        ) {
             applyChannelLink(reference.name, range: reference.range, to: &attributedText)
         }
         return attributedText
@@ -710,6 +717,7 @@ final class IRCMessageTextCache {
         let text: String
         let isSystem: Bool
         let channelLinks: [String]
+        let channelTypes: Set<Character>?
         let rendersIRCFormatting: Bool
 
         init(message: IRCMessage, rendersIRCFormatting: Bool) {
@@ -717,6 +725,7 @@ final class IRCMessageTextCache {
             text = message.text
             isSystem = message.isSystem
             channelLinks = message.channelLinks
+            channelTypes = message.channelTypes
             self.rendersIRCFormatting = rendersIRCFormatting
         }
     }
@@ -927,25 +936,35 @@ struct IRCMentionNotificationDestination: Equatable {
 }
 
 enum IRCWhoisChannelParser {
-    static func channels(from value: String) -> [String] {
+    static func channels(
+        from value: String,
+        membership: IRCMembershipConfiguration = .common,
+        channelTypes: Set<Character> = Set("#&+!")
+    ) -> [String] {
         var seen = Set<String>()
         return value.split(whereSeparator: { $0.isWhitespace }).compactMap { token in
-            guard let channel = channelName(from: String(token)), seen.insert(channel).inserted else { return nil }
+            guard let channel = channelName(
+                from: String(token),
+                membership: membership,
+                channelTypes: channelTypes
+            ), seen.insert(channel).inserted else { return nil }
             return channel
         }
     }
 
-    private static func channelName(from token: String) -> String? {
+    private static func channelName(
+        from token: String,
+        membership: IRCMembershipConfiguration,
+        channelTypes: Set<Character>
+    ) -> String? {
         var channel = token
-        while channel.count > 1 {
-            let first = channel.first!
-            let second = channel[channel.index(after: channel.startIndex)]
-            let isUnambiguousMembershipPrefix = "~@%".contains(first)
-                || ((first == "+" || first == "&") && "#&+!".contains(second))
-            guard isUnambiguousMembershipPrefix else { break }
+        while channel.count > 1, let first = channel.first {
+            let remainder = channel.dropFirst()
+            guard membership.prefixes.contains(first),
+                  remainder.first.map(channelTypes.contains) == true else { break }
             channel.removeFirst()
         }
-        guard let first = channel.first, "#&+!".contains(first) else { return nil }
+        guard let first = channel.first, channelTypes.contains(first) else { return nil }
         return channel
     }
 }
@@ -956,16 +975,19 @@ struct IRCChannelReference {
 }
 
 enum IRCChannelReferenceParser {
-    private static let prefixes = "#&+!"
     private static let trailingPunctuation = ".;:!?)]}>\"'”’"
     private static let disallowedLeadingNeighbors = "-_[]\\`^{|}/@#&+!"
 
-    static func references(in text: String) -> [IRCChannelReference] {
+    static func references(
+        in text: String,
+        channelTypes: Set<Character> = Set("#&+!")
+    ) -> [IRCChannelReference] {
         var references: [IRCChannelReference] = []
         var index = text.startIndex
 
         while index < text.endIndex {
-            guard prefixes.contains(text[index]), hasLeadingBoundary(at: index, in: text) else {
+            guard channelTypes.contains(text[index]),
+                  hasLeadingBoundary(at: index, in: text, channelTypes: channelTypes) else {
                 index = text.index(after: index)
                 continue
             }
@@ -992,12 +1014,17 @@ enum IRCChannelReferenceParser {
         return references
     }
 
-    private static func hasLeadingBoundary(at index: String.Index, in text: String) -> Bool {
+    private static func hasLeadingBoundary(
+        at index: String.Index,
+        in text: String,
+        channelTypes: Set<Character>
+    ) -> Bool {
         guard index > text.startIndex else { return true }
         let previous = text[text.index(before: index)]
         return !previous.isLetter
             && !previous.isNumber
             && !disallowedLeadingNeighbors.contains(previous)
+            && !channelTypes.contains(previous)
     }
 
     private static func isChannelCharacter(_ character: Character) -> Bool {
@@ -1024,8 +1051,11 @@ enum IRCInternalLink {
               url.host?.lowercased() == joinChannelHost,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let channel = components.queryItems?.first(where: { $0.name == "name" })?.value,
-              let first = channel.first,
-              "#&+!".contains(first) else { return nil }
+              !channel.isEmpty,
+              !channel.unicodeScalars.contains(where: {
+                  CharacterSet.whitespacesAndNewlines.contains($0)
+                      || CharacterSet.controlCharacters.contains($0)
+              }) else { return nil }
         return channel
     }
 }
@@ -1043,12 +1073,25 @@ struct ChannelMember: Identifiable, Hashable {
     /// followed by +o). Keep every role so a later -o correctly falls back to
     /// the remaining privilege in the member list.
     var modes: Set<Character>
+    var membership: IRCMembershipConfiguration
+    var username: String?
+    var hostname: String?
 
-    init(nickname: String, prefix: Character? = nil, modes: Set<Character>? = nil) {
+    init(
+        nickname: String,
+        prefix: Character? = nil,
+        modes: Set<Character>? = nil,
+        membership: IRCMembershipConfiguration = .common,
+        username: String? = nil,
+        hostname: String? = nil
+    ) {
         self.nickname = nickname
+        self.membership = membership
+        self.username = username
+        self.hostname = hostname
         if let modes {
             self.modes = modes
-        } else if let prefix, let mode = Self.modeByPrefix[prefix] {
+        } else if let prefix, let mode = membership.mode(for: prefix) {
             self.modes = [mode]
         } else {
             self.modes = []
@@ -1060,42 +1103,42 @@ struct ChannelMember: Identifiable, Hashable {
     var id: String { nickname }
 
     var prefix: Character? {
-        for mode in Self.rolePriority where modes.contains(mode) {
-            return Self.prefixByMode[mode]
-        }
-        return nil
+        membership.highestEntry(in: modes)?.prefix
     }
 
     var role: String? {
-        switch prefix {
-        case "~": "Owner"
-        case "&": "Admin"
-        case "@": "Operator"
-        case "%": "Half-op"
-        case "+": "Voice"
-        default: nil
-        }
+        membership.highestEntry(in: modes).map { membership.roleName(for: $0.mode) }
     }
 
     var hasOperatorPrivileges: Bool {
-        !modes.isDisjoint(with: ["q", "a", "o"])
+        membership.hasOperatorPrivileges(modes)
     }
 
     var hasOperatorMode: Bool {
-        modes.contains("o")
+        membership.operatorMode.map(modes.contains) ?? false
     }
 
     var hasVoice: Bool {
-        modes.contains("v")
+        membership.voiceMode.map(modes.contains) ?? false
     }
 
-    private static let modeByPrefix: [Character: Character] = [
-        "~": "q", "&": "a", "@": "o", "%": "h", "+": "v"
-    ]
-    private static let prefixByMode: [Character: Character] = [
-        "q": "~", "a": "&", "o": "@", "h": "%", "v": "+"
-    ]
-    private static let rolePriority: [Character] = ["q", "a", "o", "h", "v"]
+    var privilegeRank: Int? {
+        membership.rank(of: modes)
+    }
+}
+
+struct IRCMemberModerationState: Equatable {
+    var supportsOperator: Bool
+    var supportsVoice: Bool
+    var hasOperator: Bool
+    var hasVoice: Bool
+
+    init(member: ChannelMember) {
+        supportsOperator = member.membership.operatorMode != nil
+        supportsVoice = member.membership.voiceMode != nil
+        hasOperator = member.hasOperatorMode
+        hasVoice = member.hasVoice
+    }
 }
 
 enum IRCChannelModerationPolicy {
@@ -1117,6 +1160,43 @@ enum IRCChannelModerationPolicy {
 
     static func banMask(for nickname: String) -> String {
         "\(nickname)!*@*"
+    }
+
+    static func banMask(for member: ChannelMember) -> String {
+        if let username = member.username, !username.isEmpty,
+           let hostname = member.hostname, !hostname.isEmpty {
+            return "*!\(username)@\(hostname)"
+        }
+        return banMask(for: member.nickname)
+    }
+}
+
+struct IRCBanEntry: Identifiable, Hashable {
+    var channel: String
+    var mask: String
+    var setBy: String?
+    var setAt: Date?
+
+    var id: String { mask }
+}
+
+enum IRCBanListParser {
+    static func entry(from wire: IRCWireMessage) -> IRCBanEntry? {
+        guard wire.command == "367", wire.parameters.count >= 3 else { return nil }
+        let timestamp = wire.parameters.count > 4
+            ? Double(wire.parameters[4]).map { Date(timeIntervalSince1970: $0) }
+            : nil
+        return IRCBanEntry(
+            channel: wire.parameters[1],
+            mask: wire.parameters[2],
+            setBy: wire.parameters.count > 3 ? wire.parameters[3] : nil,
+            setAt: timestamp
+        )
+    }
+
+    static func endChannel(from wire: IRCWireMessage) -> String? {
+        guard wire.command == "368", wire.parameters.count >= 2 else { return nil }
+        return wire.parameters[1]
     }
 }
 

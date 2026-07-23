@@ -40,6 +40,7 @@ struct ContentView: View {
     @ObservedObject var state: IRCAppState
     @State private var showAddServer = false
     @State private var editingProfile: ServerProfile?
+    @State private var banListChannel: Conversation?
     @FocusState private var workspaceFocus: IRCWorkspaceFocus?
 
     private var textMetrics: IRCTextMetrics { IRCTextMetrics(bodySize: state.transcriptFontSize) }
@@ -99,6 +100,14 @@ struct ContentView: View {
                         .accessibilityHint("Shows the channel list for the selected server")
                     }
                     if hasSelectedChannel {
+                        Button {
+                            banListChannel = state.selectedChannel
+                        } label: {
+                            Label("Bans…", systemImage: "shield.slash")
+                        }
+                        .help("View and manage channel bans")
+                        .accessibilityHint("Shows the ban list for the selected channel")
+
                         Toggle(isOn: Binding(
                             get: { state.showsMemberList },
                             set: { _ in state.toggleMemberList() }
@@ -119,6 +128,9 @@ struct ContentView: View {
         }
         .sheet(item: $editingProfile) { profile in
             ServerProfileEditor(state: state, profileToEdit: profile)
+        }
+        .sheet(item: $banListChannel) { channel in
+            ChannelBanListView(state: state, channel: channel)
         }
         .sheet(isPresented: $state.isChannelBrowserPresented) {
             ChannelBrowser(state: state)
@@ -686,6 +698,7 @@ private struct ConversationView: View {
                             .popover(isPresented: $showsTopic, arrowEdge: .bottom) {
                                 ChannelTopicPopover(
                                     topic: channelTopic,
+                                    channelTypes: state.channelTypes(for: selection),
                                     rendersIRCFormatting: state.rendersIRCFormatting
                                 )
                             }
@@ -933,11 +946,12 @@ private struct ConversationView: View {
 
 private struct ChannelTopicPopover: View {
     let topic: String
+    let channelTypes: Set<Character>
     let rendersIRCFormatting: Bool
 
     private var renderedTopic: AttributedString {
         IRCMessageTextRenderer.linkifiedText(
-            for: IRCMessage(sender: "", text: topic),
+            for: IRCMessage(sender: "", text: topic, channelTypes: channelTypes),
             rendersIRCFormatting: rendersIRCFormatting
         )
     }
@@ -1413,10 +1427,27 @@ private struct ChannelMemberRow: View {
 private struct NicknameContextMenu: View {
     let nickname: String
     let isMuted: Bool
-    let state: IRCAppState
+    @ObservedObject var state: IRCAppState
     let selection: SidebarItem
+    @ObservedObject private var memberUpdates: IRCRevisionSignal
+
+    init(
+        nickname: String,
+        isMuted: Bool,
+        state: IRCAppState,
+        selection: SidebarItem
+    ) {
+        self.nickname = nickname
+        self.isMuted = isMuted
+        self.state = state
+        self.selection = selection
+        _memberUpdates = ObservedObject(wrappedValue: state.memberUpdates(for: selection))
+    }
 
     var body: some View {
+        let _ = memberUpdates.revision
+        let moderationState = state.moderationState(for: nickname, in: selection)
+
         Button("Message \(nickname)", systemImage: "message") {
             state.startDirectMessage(with: nickname, from: selection)
         }
@@ -1435,22 +1466,26 @@ private struct NicknameContextMenu: View {
         }
         if state.canModerate(nickname, in: selection) {
             Divider()
-            if state.isVoiced(nickname, in: selection) {
-                Button("Remove Voice from \(nickname)", systemImage: "speaker.slash") {
-                    state.setVoice(false, for: nickname, in: selection)
-                }
-            } else {
-                Button("Give Voice to \(nickname)", systemImage: "speaker.wave.2") {
-                    state.setVoice(true, for: nickname, in: selection)
+            if moderationState?.supportsVoice == true {
+                if moderationState?.hasVoice == true {
+                    Button("Remove Voice from \(nickname)", systemImage: "speaker.slash") {
+                        state.setVoice(false, for: nickname, in: selection)
+                    }
+                } else {
+                    Button("Give Voice to \(nickname)", systemImage: "speaker.wave.2") {
+                        state.setVoice(true, for: nickname, in: selection)
+                    }
                 }
             }
-            if state.isOperator(nickname, in: selection) {
-                Button("Remove Operator from \(nickname)", systemImage: "person.badge.minus") {
-                    state.setOperator(false, for: nickname, in: selection)
-                }
-            } else {
-                Button("Give Operator to \(nickname)", systemImage: "person.badge.plus") {
-                    state.setOperator(true, for: nickname, in: selection)
+            if moderationState?.supportsOperator == true {
+                if moderationState?.hasOperator == true {
+                    Button("Remove Operator from \(nickname)", systemImage: "person.badge.minus") {
+                        state.setOperator(false, for: nickname, in: selection)
+                    }
+                } else {
+                    Button("Give Operator to \(nickname)", systemImage: "person.badge.plus") {
+                        state.setOperator(true, for: nickname, in: selection)
+                    }
                 }
             }
             Divider()
@@ -1460,7 +1495,127 @@ private struct NicknameContextMenu: View {
             Button("Ban \(nickname)", systemImage: "nosign") {
                 state.ban(nickname, from: selection)
             }
+            Button("Ban and Kick \(nickname)", systemImage: "person.crop.circle.badge.xmark") {
+                state.banAndKick(nickname, from: selection)
+            }
         }
+    }
+}
+
+private struct ChannelBanListView: View {
+    @ObservedObject var state: IRCAppState
+    let channel: Conversation
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    private var selection: SidebarItem { .channel(channel.id) }
+    private var bans: [IRCBanEntry] { state.bans(for: selection) }
+    private var isLoading: Bool { state.isRequestingBans(for: selection) }
+    private var canRemoveBans: Bool { state.canManageChannel(in: selection) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: textMetrics.spacing(4)) {
+                    Text("Channel Bans")
+                        .font(.system(size: textMetrics.size(22), weight: .semibold))
+                    Text(channel.name)
+                        .font(.system(size: textMetrics.size(14)))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Loading channel bans")
+                }
+            }
+            .padding(textMetrics.spacing(20))
+
+            Divider()
+
+            Group {
+                if let error = state.banListError(for: selection), !isLoading {
+                    ContentUnavailableView {
+                        Label("Couldn’t Load Bans", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(error)
+                    } actions: {
+                        Button("Try Again") {
+                            state.requestBanList(for: selection)
+                        }
+                    }
+                } else if bans.isEmpty, !isLoading {
+                    ContentUnavailableView(
+                        "No Bans",
+                        systemImage: "shield.checkered",
+                        description: Text("The server reported no ban masks for \(channel.name).")
+                    )
+                } else {
+                    List(bans) { ban in
+                        HStack(spacing: textMetrics.spacing(12)) {
+                            VStack(alignment: .leading, spacing: textMetrics.spacing(4)) {
+                                Text(ban.mask)
+                                    .font(.system(
+                                        size: textMetrics.size(14),
+                                        design: .monospaced
+                                    ))
+                                    .textSelection(.enabled)
+                                if ban.setBy != nil || ban.setAt != nil {
+                                    Text(banDetails(ban))
+                                        .font(.system(size: textMetrics.size(12)))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer(minLength: textMetrics.spacing(16))
+                            Button("Unban", systemImage: "trash") {
+                                state.removeBan(ban, from: selection)
+                            }
+                            .labelStyle(.iconOnly)
+                            .buttonStyle(.borderless)
+                            .disabled(!canRemoveBans)
+                            .help(canRemoveBans
+                                ? "Remove \(ban.mask)"
+                                : "Operator privileges are required to remove bans")
+                        }
+                        .padding(.vertical, textMetrics.spacing(4))
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+
+            HStack {
+                if !canRemoveBans {
+                    Label("Operator privileges are required to unban.", systemImage: "lock")
+                        .font(.system(size: textMetrics.size(12)))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh") {
+                    state.requestBanList(for: selection)
+                }
+                .disabled(isLoading)
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(textMetrics.spacing(16))
+        }
+        .frame(minWidth: textMetrics.spacing(560), minHeight: textMetrics.spacing(390))
+        .task(id: channel.id) {
+            state.requestBanList(for: selection)
+        }
+    }
+
+    private func banDetails(_ ban: IRCBanEntry) -> String {
+        let setter = ban.setBy.map { "Set by \($0)" }
+        let date = ban.setAt.map {
+            $0.formatted(date: .abbreviated, time: .shortened)
+        }
+        return [setter, date].compactMap { $0 }.joined(separator: " · ")
     }
 }
 
