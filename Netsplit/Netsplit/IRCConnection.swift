@@ -171,7 +171,14 @@ final class IRCConnection {
         }
         self.serverPassword = serverPassword.isEmpty ? nil : serverPassword
         if profile.useSASL == true, !saslPassword.isEmpty {
-            self.saslCredentials = (saslUsername?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? saslUsername!.trimmingCharacters(in: .whitespacesAndNewlines) : nickname, saslPassword)
+            let username: String
+            if let saslUsername = saslUsername?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !saslUsername.isEmpty {
+                username = saslUsername
+            } else {
+                username = nickname
+            }
+            self.saslCredentials = (username, saslPassword)
         } else {
             self.saslCredentials = nil
         }

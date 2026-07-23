@@ -75,4 +75,14 @@ struct IRCTransportBoundaryTests {
         #expect(IRCGracefulQuitPolicy.shouldFinish(after: .peerClosed))
         #expect(IRCGracefulQuitPolicy.shouldFinish(after: .timedOut))
     }
+
+    @Test("SSH host-key pinning rejects a malformed saved identity")
+    func rejectsMalformedPinnedSSHHostKey() {
+        #expect(throws: SSHTunnelError.self) {
+            _ = try PinnedSSHHostKeyValidator(
+                trustedKey: "not-an-openssh-public-key",
+                onFirstSeen: { _ in }
+            )
+        }
+    }
 }

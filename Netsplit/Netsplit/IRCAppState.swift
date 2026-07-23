@@ -544,7 +544,12 @@ final class IRCAppState: ObservableObject {
 
     func leave(_ channel: Conversation, reason: String? = nil) {
         guard let profile = profiles.first(where: { $0.id == channel.serverID }) else { return }
-        let part = reason?.isEmpty == false ? "PART \(channel.name) :\(reason!)" : "PART \(channel.name)"
+        let part: String
+        if let reason, !reason.isEmpty {
+            part = "PART \(channel.name) :\(reason)"
+        } else {
+            part = "PART \(channel.name)"
+        }
         connections[profile.id]?.send(command: part)
         removeChannelConversation(channel)
     }
@@ -754,11 +759,17 @@ final class IRCAppState: ObservableObject {
             }
         }
 
-        group.notify(queue: .main) {
+        var didComplete = false
+        let completeOnce = {
+            guard !didComplete else { return }
+            didComplete = true
             completion()
         }
+        group.notify(queue: .main) {
+            completeOnce()
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
-            completion()
+            completeOnce()
         }
     }
 

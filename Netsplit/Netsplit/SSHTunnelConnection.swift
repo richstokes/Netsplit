@@ -29,6 +29,7 @@ enum SSHTunnelError: LocalizedError {
     case missingAuthentication
     case authenticationFailed
     case hostKeyChanged
+    case invalidTrustedHostKey
 
     var preventsAutomaticReconnect: Bool { true }
 
@@ -44,6 +45,8 @@ enum SSHTunnelError: LocalizedError {
             "SSH authentication failed. Verify the username and password, or make sure the selected public key is installed in the server account's ~/.ssh/authorized_keys file. If you use an RSA key, the server may require RSA-SHA2; try Ed25519 or password authentication."
         case .hostKeyChanged:
             "The SSH server's host key has changed. The connection was stopped to protect your credentials. Verify the server, then forget the saved host identity in this server profile before reconnecting."
+        case .invalidTrustedHostKey:
+            "The saved SSH server identity could not be read. The connection was stopped to protect your credentials. Forget the saved host identity in this server profile before reconnecting."
         }
     }
 }
@@ -74,7 +77,7 @@ final class SSHTunnelConnection {
             do {
                 let authenticationAttempts = try Self.authenticationMethods(for: configuration)
                 let hostKeyValidator = SSHHostKeyValidator.custom(
-                    PinnedSSHHostKeyValidator(
+                    try PinnedSSHHostKeyValidator(
                         trustedKey: configuration.trustedHostKey,
                         onFirstSeen: { key in
                             Task { @MainActor [weak self] in
@@ -301,13 +304,21 @@ final class SSHTunnelConnection {
     }
 }
 
-private nonisolated final class PinnedSSHHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
+nonisolated final class PinnedSSHHostKeyValidator: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var trustedKey: NIOSSHPublicKey?
     private let onFirstSeen: @Sendable (String) -> Void
 
-    init(trustedKey: String?, onFirstSeen: @escaping @Sendable (String) -> Void) {
-        self.trustedKey = trustedKey.flatMap { try? NIOSSHPublicKey(openSSHPublicKey: $0) }
+    init(trustedKey: String?, onFirstSeen: @escaping @Sendable (String) -> Void) throws {
+        if let trustedKey {
+            do {
+                self.trustedKey = try NIOSSHPublicKey(openSSHPublicKey: trustedKey)
+            } catch {
+                throw SSHTunnelError.invalidTrustedHostKey
+            }
+        } else {
+            self.trustedKey = nil
+        }
         self.onFirstSeen = onFirstSeen
     }
 
