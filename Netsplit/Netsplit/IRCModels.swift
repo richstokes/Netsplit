@@ -1081,6 +1081,14 @@ struct ChannelMember: Identifiable, Hashable {
         !modes.isDisjoint(with: ["q", "a", "o"])
     }
 
+    var hasOperatorMode: Bool {
+        modes.contains("o")
+    }
+
+    var hasVoice: Bool {
+        modes.contains("v")
+    }
+
     private static let modeByPrefix: [Character: Character] = [
         "~": "q", "&": "a", "@": "o", "%": "h", "+": "v"
     ]

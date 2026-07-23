@@ -920,6 +920,38 @@ final class IRCAppState: ObservableObject {
         )
     }
 
+    func isVoiced(_ targetNickname: String, in item: SidebarItem) -> Bool {
+        member(named: targetNickname, in: item)?.hasVoice ?? false
+    }
+
+    func isOperator(_ targetNickname: String, in item: SidebarItem) -> Bool {
+        member(named: targetNickname, in: item)?.hasOperatorMode ?? false
+    }
+
+    func setOperator(_ enabled: Bool, for targetNickname: String, in item: SidebarItem) {
+        guard canModerate(targetNickname, in: item),
+              case .channel(let channelID) = item,
+              let channel = channels.first(where: { $0.id == channelID }) else { return }
+        executeCommand("/mode \(channel.name) \(enabled ? "+o" : "-o") \(targetNickname)", in: item)
+    }
+
+    private func member(named targetNickname: String, in item: SidebarItem) -> ChannelMember? {
+        guard case .channel(let channelID) = item,
+              let profile = profile(for: item),
+              let members = channelMembers[channelID] else { return nil }
+        let target = normalizedIdentifier(targetNickname, serverID: profile.id)
+        return members.first(where: {
+            normalizedIdentifier($0.nickname, serverID: profile.id) == target
+        })
+    }
+
+    func setVoice(_ enabled: Bool, for targetNickname: String, in item: SidebarItem) {
+        guard canModerate(targetNickname, in: item),
+              case .channel(let channelID) = item,
+              let channel = channels.first(where: { $0.id == channelID }) else { return }
+        executeCommand("/mode \(channel.name) \(enabled ? "+v" : "-v") \(targetNickname)", in: item)
+    }
+
     func kick(_ targetNickname: String, from item: SidebarItem) {
         guard canModerate(targetNickname, in: item),
               case .channel(let channelID) = item,

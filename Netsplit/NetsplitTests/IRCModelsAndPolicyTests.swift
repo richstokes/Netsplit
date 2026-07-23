@@ -276,16 +276,25 @@ struct IRCModelsAndPolicyTests {
         #expect(member.prefix == "@")
         #expect(member.role == "Operator")
         #expect(member.hasOperatorPrivileges)
+        #expect(member.hasOperatorMode)
+        #expect(member.hasVoice)
 
         member.modes.remove("o")
         #expect(member.prefix == "+")
         #expect(member.role == "Voice")
         #expect(!member.hasOperatorPrivileges)
+        #expect(!member.hasOperatorMode)
+        #expect(member.hasVoice)
 
         member.modes.formUnion(["a", "q"])
         #expect(member.prefix == "~")
         #expect(member.role == "Owner")
         #expect(member.hasOperatorPrivileges)
+        #expect(!member.hasOperatorMode)
+        #expect(member.hasVoice)
+
+        member.modes.remove("v")
+        #expect(!member.hasVoice)
     }
 
     @Test("Only channel operators can moderate other current members")

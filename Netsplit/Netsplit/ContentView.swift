@@ -1435,6 +1435,25 @@ private struct NicknameContextMenu: View {
         }
         if state.canModerate(nickname, in: selection) {
             Divider()
+            if state.isVoiced(nickname, in: selection) {
+                Button("Remove Voice from \(nickname)", systemImage: "speaker.slash") {
+                    state.setVoice(false, for: nickname, in: selection)
+                }
+            } else {
+                Button("Give Voice to \(nickname)", systemImage: "speaker.wave.2") {
+                    state.setVoice(true, for: nickname, in: selection)
+                }
+            }
+            if state.isOperator(nickname, in: selection) {
+                Button("Remove Operator from \(nickname)", systemImage: "person.badge.minus") {
+                    state.setOperator(false, for: nickname, in: selection)
+                }
+            } else {
+                Button("Give Operator to \(nickname)", systemImage: "person.badge.plus") {
+                    state.setOperator(true, for: nickname, in: selection)
+                }
+            }
+            Divider()
             Button("Kick \(nickname)", systemImage: "rectangle.portrait.and.arrow.right") {
                 state.kick(nickname, from: selection)
             }
