@@ -1433,6 +1433,15 @@ private struct NicknameContextMenu: View {
                 state.mute(nickname, from: selection)
             }
         }
+        if state.canModerate(nickname, in: selection) {
+            Divider()
+            Button("Kick \(nickname)", systemImage: "rectangle.portrait.and.arrow.right") {
+                state.kick(nickname, from: selection)
+            }
+            Button("Ban \(nickname)", systemImage: "nosign") {
+                state.ban(nickname, from: selection)
+            }
+        }
     }
 }
 

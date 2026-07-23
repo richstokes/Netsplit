@@ -275,14 +275,52 @@ struct IRCModelsAndPolicyTests {
         var member = ChannelMember(nickname: "Alice", modes: ["v", "o"])
         #expect(member.prefix == "@")
         #expect(member.role == "Operator")
+        #expect(member.hasOperatorPrivileges)
 
         member.modes.remove("o")
         #expect(member.prefix == "+")
         #expect(member.role == "Voice")
+        #expect(!member.hasOperatorPrivileges)
 
         member.modes.formUnion(["a", "q"])
         #expect(member.prefix == "~")
         #expect(member.role == "Owner")
+        #expect(member.hasOperatorPrivileges)
+    }
+
+    @Test("Only channel operators can moderate other current members")
+    func gatesChannelModeration() {
+        let members = [
+            ChannelMember(nickname: "[Local]", modes: ["o"]),
+            ChannelMember(nickname: "Alice"),
+            ChannelMember(nickname: "Voiced", modes: ["v"])
+        ]
+
+        #expect(IRCChannelModerationPolicy.canModerate(
+            localNickname: "{local}",
+            targetNickname: "Alice",
+            members: members,
+            caseMapping: .rfc1459
+        ))
+        #expect(!IRCChannelModerationPolicy.canModerate(
+            localNickname: "[Local]",
+            targetNickname: "{local}",
+            members: members,
+            caseMapping: .rfc1459
+        ))
+        #expect(!IRCChannelModerationPolicy.canModerate(
+            localNickname: "Voiced",
+            targetNickname: "Alice",
+            members: members,
+            caseMapping: .rfc1459
+        ))
+        #expect(!IRCChannelModerationPolicy.canModerate(
+            localNickname: "[Local]",
+            targetNickname: "Departed",
+            members: members,
+            caseMapping: .rfc1459
+        ))
+        #expect(IRCChannelModerationPolicy.banMask(for: "Alice") == "Alice!*@*")
     }
 
     @Test("Parses single and multi-prefix NAMES entries without corrupting nicknames")

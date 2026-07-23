@@ -1077,6 +1077,10 @@ struct ChannelMember: Identifiable, Hashable {
         }
     }
 
+    var hasOperatorPrivileges: Bool {
+        !modes.isDisjoint(with: ["q", "a", "o"])
+    }
+
     private static let modeByPrefix: [Character: Character] = [
         "~": "q", "&": "a", "@": "o", "%": "h", "+": "v"
     ]
@@ -1084,6 +1088,28 @@ struct ChannelMember: Identifiable, Hashable {
         "q": "~", "a": "&", "o": "@", "h": "%", "v": "+"
     ]
     private static let rolePriority: [Character] = ["q", "a", "o", "h", "v"]
+}
+
+enum IRCChannelModerationPolicy {
+    static func canModerate(
+        localNickname: String,
+        targetNickname: String,
+        members: [ChannelMember],
+        caseMapping: IRCCaseMapping
+    ) -> Bool {
+        let local = caseMapping.normalize(localNickname)
+        let target = caseMapping.normalize(targetNickname)
+        guard local != target,
+              members.contains(where: { caseMapping.normalize($0.nickname) == target }),
+              let localMember = members.first(where: {
+                  caseMapping.normalize($0.nickname) == local
+              }) else { return false }
+        return localMember.hasOperatorPrivileges
+    }
+
+    static func banMask(for nickname: String) -> String {
+        "\(nickname)!*@*"
+    }
 }
 
 enum SidebarItem: Hashable {

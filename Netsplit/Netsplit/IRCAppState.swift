@@ -908,6 +908,33 @@ final class IRCAppState: ObservableObject {
         return channelMembers[id] ?? [ChannelMember(nickname: fallbackNickname, prefix: nil)]
     }
 
+    func canModerate(_ targetNickname: String, in item: SidebarItem) -> Bool {
+        guard case .channel(let channelID) = item,
+              let profile = profile(for: item),
+              let members = channelMembers[channelID] else { return false }
+        return IRCChannelModerationPolicy.canModerate(
+            localNickname: nickname(for: profile),
+            targetNickname: targetNickname,
+            members: members,
+            caseMapping: caseMappings[profile.id] ?? .rfc1459
+        )
+    }
+
+    func kick(_ targetNickname: String, from item: SidebarItem) {
+        guard canModerate(targetNickname, in: item),
+              case .channel(let channelID) = item,
+              let channel = channels.first(where: { $0.id == channelID }) else { return }
+        executeCommand("/kick \(channel.name) \(targetNickname)", in: item)
+    }
+
+    func ban(_ targetNickname: String, from item: SidebarItem) {
+        guard canModerate(targetNickname, in: item),
+              case .channel(let channelID) = item,
+              let channel = channels.first(where: { $0.id == channelID }) else { return }
+        let mask = IRCChannelModerationPolicy.banMask(for: targetNickname)
+        executeCommand("/mode \(channel.name) +b \(mask)", in: item)
+    }
+
     func memberUpdates(for item: SidebarItem) -> IRCRevisionSignal {
         let channelID: UUID?
         if case .channel(let id) = item {
