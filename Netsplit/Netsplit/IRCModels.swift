@@ -1200,6 +1200,45 @@ enum IRCBanListParser {
     }
 }
 
+enum IRCBanListRequestErrorPolicy {
+    /// Errors that can result from asking for `MODE #channel +b` without a
+    /// mask. Numeric 478 is deliberately excluded: it means a list mutation
+    /// failed because the list is full, so it belongs to the pending +b change.
+    static func isListRequestFailure(_ command: String) -> Bool {
+        ["403", "442", "482"].contains(command)
+    }
+}
+
+enum IRCBanListMutation {
+    static func applying(
+        _ changes: [IRCParsedChannelModeChange],
+        to existingBans: [IRCBanEntry],
+        channelName: String
+    ) -> [IRCBanEntry] {
+        var bans = existingBans
+        var didChange = false
+        for change in changes where change.mode == "b" {
+            guard let mask = change.argument else { continue }
+            if change.adding {
+                guard !bans.contains(where: {
+                    $0.mask.caseInsensitiveCompare(mask) == .orderedSame
+                }) else { continue }
+                bans.append(IRCBanEntry(channel: channelName, mask: mask))
+                didChange = true
+            } else if let index = bans.firstIndex(where: {
+                $0.mask.caseInsensitiveCompare(mask) == .orderedSame
+            }) {
+                bans.remove(at: index)
+                didChange = true
+            }
+        }
+        guard didChange else { return existingBans }
+        return bans.sorted {
+            $0.mask.localizedCaseInsensitiveCompare($1.mask) == .orderedAscending
+        }
+    }
+}
+
 enum SidebarItem: Hashable {
     case connectionCenter
     case server(UUID)

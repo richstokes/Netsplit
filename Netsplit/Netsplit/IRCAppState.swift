@@ -2137,7 +2137,8 @@ final class IRCAppState: ObservableObject {
         default: nil
         }
 
-        if let channel,
+        if IRCBanListRequestErrorPolicy.isListRequestFailure(wire.command),
+           let channel,
            let conversation = existingChannel(named: channel, serverID: serverID),
            channelBanListRequests.remove(conversation.id) != nil {
             pendingChannelBanLists.removeValue(forKey: conversation.id)
@@ -2796,34 +2797,30 @@ final class IRCAppState: ObservableObject {
     }
 
     private func applyBanModes(_ modeString: String, arguments: [String], to channel: Conversation) {
-        guard channelBanLists[channel.id] != nil else { return }
+        guard channelBanLists[channel.id] != nil
+                || pendingChannelBanLists[channel.id] != nil else { return }
         let serverFeatures = features(for: channel.serverID)
         let changes = IRCChannelModeParser.changes(
             modeString: modeString,
             arguments: arguments,
             membership: serverFeatures.membership,
             channelModes: serverFeatures.channelModes
-        )
-        var bans = channelBanLists[channel.id] ?? []
-        var didChange = false
-        for change in changes where change.mode == "b" {
-            guard let mask = change.argument else { continue }
-            if change.adding {
-                guard !bans.contains(where: {
-                    $0.mask.caseInsensitiveCompare(mask) == .orderedSame
-                }) else { continue }
-                bans.append(IRCBanEntry(channel: channel.name, mask: mask))
-                didChange = true
-            } else if let index = bans.firstIndex(where: {
-                $0.mask.caseInsensitiveCompare(mask) == .orderedSame
-            }) {
-                bans.remove(at: index)
-                didChange = true
-            }
+        ).filter { $0.mode == "b" && $0.argument != nil }
+        guard !changes.isEmpty else { return }
+
+        if let cached = channelBanLists[channel.id] {
+            channelBanLists[channel.id] = IRCBanListMutation.applying(
+                changes,
+                to: cached,
+                channelName: channel.name
+            )
         }
-        guard didChange else { return }
-        channelBanLists[channel.id] = bans.sorted {
-            $0.mask.localizedCaseInsensitiveCompare($1.mask) == .orderedAscending
+        if let pending = pendingChannelBanLists[channel.id] {
+            pendingChannelBanLists[channel.id] = IRCBanListMutation.applying(
+                changes,
+                to: pending,
+                channelName: channel.name
+            )
         }
     }
 

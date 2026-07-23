@@ -187,10 +187,14 @@ struct IRCMembershipConfiguration: Hashable {
 }
 
 struct IRCChannelModeCapabilities: Equatable {
-    static let rfc1459 = IRCChannelModeCapabilities(
-        listModes: ["b"],
+    static let legacyFallback = IRCChannelModeCapabilities(
+        // Preserve the conservative pre-ISUPPORT behavior for older servers.
+        // e/I and f/j/L are common extensions rather than RFC 1459 modes, but
+        // treating them as parameterized prevents later nickname arguments in
+        // a mixed MODE command from becoming misaligned.
+        listModes: Set("beI"),
         alwaysParameterizedModes: ["k"],
-        setOnlyParameterizedModes: ["l"],
+        setOnlyParameterizedModes: Set("lfjL"),
         parameterlessModes: Set("imnpst")
     )
 
@@ -232,7 +236,7 @@ struct IRCServerFeatures: Equatable {
 
     var caseMapping: IRCCaseMapping = .rfc1459
     var membership: IRCMembershipConfiguration = .rfc1459
-    var channelModes: IRCChannelModeCapabilities = .rfc1459
+    var channelModes: IRCChannelModeCapabilities = .legacyFallback
     var channelTypes: Set<Character> = ["#", "&"]
     var statusMessagePrefixes: Set<Character> = []
     var networkName: String?
@@ -504,7 +508,7 @@ enum IRCChannelModeParser {
         modeString: String,
         arguments: [String],
         membership: IRCMembershipConfiguration = .common,
-        channelModes: IRCChannelModeCapabilities = .rfc1459
+        channelModes: IRCChannelModeCapabilities = .legacyFallback
     ) -> [IRCParsedChannelModeChange] {
         var adding = true
         var argumentIndex = 0
@@ -544,7 +548,7 @@ enum IRCChannelModeParser {
         modeString: String,
         arguments: [String],
         membership: IRCMembershipConfiguration = .common,
-        channelModes: IRCChannelModeCapabilities = .rfc1459
+        channelModes: IRCChannelModeCapabilities = .legacyFallback
     ) -> [IRCMembershipModeChange] {
         changes(
             modeString: modeString,

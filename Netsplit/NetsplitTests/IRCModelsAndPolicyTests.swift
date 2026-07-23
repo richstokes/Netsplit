@@ -431,6 +431,18 @@ struct IRCModelsAndPolicyTests {
         #expect(removalWithoutArgument == [
             IRCMembershipModeChange(nickname: "Dana", mode: "o", adding: true)
         ])
+
+        let legacyFallback = IRCChannelModeParser.membershipChanges(
+            modeString: "+eIofjL-v",
+            arguments: [
+                "*!*@excepted", "*!*@invited", "Alice",
+                "#forward", "3:10", "#redirect", "Bob"
+            ]
+        )
+        #expect(legacyFallback == [
+            IRCMembershipModeChange(nickname: "Alice", mode: "o", adding: true),
+            IRCMembershipModeChange(nickname: "Bob", mode: "v", adding: false)
+        ])
     }
 
     @Test("Channel mode parsing uses advertised PREFIX and CHANMODES argument rules")
@@ -514,6 +526,30 @@ struct IRCModelsAndPolicyTests {
         #expect(entry.setBy == "Oper")
         #expect(entry.setAt == Date(timeIntervalSince1970: 1_720_000_000))
         #expect(IRCBanListParser.endChannel(from: end) == "#swift")
+        #expect(IRCBanListRequestErrorPolicy.isListRequestFailure("482"))
+        #expect(!IRCBanListRequestErrorPolicy.isListRequestFailure("478"))
+
+        let added = IRCBanListMutation.applying(
+            [IRCParsedChannelModeChange(
+                mode: "b",
+                adding: true,
+                argument: "*!*@new.example"
+            )],
+            to: [entry],
+            channelName: "#swift"
+        )
+        #expect(added.map(\.mask) == ["*!*@new.example", "*!~alice@cloak.example"])
+
+        let removed = IRCBanListMutation.applying(
+            [IRCParsedChannelModeChange(
+                mode: "b",
+                adding: false,
+                argument: "*!*@NEW.EXAMPLE"
+            )],
+            to: added,
+            channelName: "#swift"
+        )
+        #expect(removed == [entry])
     }
 
     @Test("Normalizes capability modifiers and advertised values")
