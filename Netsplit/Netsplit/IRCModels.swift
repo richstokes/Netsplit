@@ -194,7 +194,8 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     var mentionNotificationsOverride: Bool?
     var isPresetModified: Bool?
     var favoriteChannels: [String]?
-    var mutedNicknames: [String]?
+    var ignoredNicknames: [String]?
+    var mutedConversationNames: [String]?
     var useSASL: Bool?
     var saslUsername: String?
     var useSSHTunnel: Bool?
@@ -222,7 +223,8 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         mentionNotificationsOverride: Bool? = nil,
         isPresetModified: Bool? = nil,
         favoriteChannels: [String]? = nil,
-        mutedNicknames: [String]? = nil,
+        ignoredNicknames: [String]? = nil,
+        mutedConversationNames: [String]? = nil,
         useSASL: Bool? = nil,
         saslUsername: String? = nil,
         useSSHTunnel: Bool? = nil,
@@ -244,7 +246,8 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         self.mentionNotificationsOverride = mentionNotificationsOverride
         self.isPresetModified = isPresetModified
         self.favoriteChannels = favoriteChannels
-        self.mutedNicknames = mutedNicknames
+        self.ignoredNicknames = ignoredNicknames
+        self.mutedConversationNames = mutedConversationNames
         self.useSASL = useSASL
         self.saslUsername = saslUsername
         self.useSSHTunnel = useSSHTunnel
@@ -258,12 +261,19 @@ struct ServerProfile: Identifiable, Codable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, hostname, port, useTLS, autoConnect, isBuiltIn
-        case nicknameOverride, mentionNotificationsOverride, isPresetModified, favoriteChannels, mutedNicknames, useSASL, saslUsername
+        case nicknameOverride, mentionNotificationsOverride, isPresetModified, favoriteChannels
+        case ignoredNicknames, mutedConversationNames
+        case useSASL, saslUsername
         case useSSHTunnel, sshHostname, sshPort, sshUsername, sshKeyFilename, sshTrustedHostKey, presetID
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case mutedNicknames
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let legacyContainer = try decoder.container(keyedBy: LegacyCodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try container.decode(String.self, forKey: .name)
         hostname = try container.decode(String.self, forKey: .hostname)
@@ -275,7 +285,9 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         mentionNotificationsOverride = try container.decodeIfPresent(Bool.self, forKey: .mentionNotificationsOverride)
         isPresetModified = try container.decodeIfPresent(Bool.self, forKey: .isPresetModified)
         favoriteChannels = try container.decodeIfPresent([String].self, forKey: .favoriteChannels)
-        mutedNicknames = try container.decodeIfPresent([String].self, forKey: .mutedNicknames)
+        ignoredNicknames = try container.decodeIfPresent([String].self, forKey: .ignoredNicknames)
+            ?? legacyContainer.decodeIfPresent([String].self, forKey: .mutedNicknames)
+        mutedConversationNames = try container.decodeIfPresent([String].self, forKey: .mutedConversationNames)
         useSASL = try container.decodeIfPresent(Bool.self, forKey: .useSASL)
         saslUsername = try container.decodeIfPresent(String.self, forKey: .saslUsername)
         useSSHTunnel = try container.decodeIfPresent(Bool.self, forKey: .useSSHTunnel)
@@ -372,7 +384,8 @@ enum ServerProfileStore {
             current.autoConnect = profile.autoConnect
             current.mentionNotificationsOverride = profile.mentionNotificationsOverride
             current.favoriteChannels = profile.favoriteChannels
-            current.mutedNicknames = profile.mutedNicknames
+            current.ignoredNicknames = profile.ignoredNicknames
+            current.mutedConversationNames = profile.mutedConversationNames
             current.useSASL = profile.useSASL
             current.saslUsername = profile.saslUsername
             current.useSSHTunnel = profile.useSSHTunnel
@@ -491,7 +504,7 @@ enum IRCCaseMapping: String {
     }
 }
 
-struct IRCMuteSnapshot {
+struct IRCIgnoreSnapshot {
     private let normalizedNicknames: Set<String>
     private let caseMapping: IRCCaseMapping
 
@@ -965,6 +978,17 @@ struct Conversation: Identifiable, Hashable {
     var hasUnread = false
     var hasMention = false
     var mentionRevision = 0
+}
+
+enum IRCConversationActivityPolicy {
+    static func mergedUnreadState(
+        existingHasUnread: Bool,
+        incomingHasUnread: Bool,
+        conversationIsMuted: Bool
+    ) -> Bool {
+        guard !conversationIsMuted else { return false }
+        return existingHasUnread || incomingHasUnread
+    }
 }
 
 struct IRCServerActivity: Equatable {

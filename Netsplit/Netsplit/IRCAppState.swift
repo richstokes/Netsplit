@@ -141,7 +141,7 @@ final class IRCAppState: ObservableObject {
     private var channelMembers: [UUID: [ChannelMember]] = [:]
     private var messageUpdateSignals: [UUID: IRCRevisionSignal] = [:]
     private var memberUpdateSignals: [UUID: IRCRevisionSignal] = [:]
-    private var muteSnapshotsByServer: [UUID: IRCMuteSnapshot] = [:]
+    private var ignoreSnapshotsByServer: [UUID: IRCIgnoreSnapshot] = [:]
     private let inactiveUpdateSignal = IRCRevisionSignal()
     private var pendingChannelMembers: [UUID: [String: ChannelMember]] = [:]
     private var connections: [UUID: IRCConnection] = [:]
@@ -470,7 +470,7 @@ final class IRCAppState: ObservableObject {
     func activity(for profile: ServerProfile) -> IRCServerActivity {
         IRCServerActivity(
             serverID: profile.id,
-            conversations: channels + directMessages
+            conversations: (channels + directMessages).filter { !isMuted($0) }
         )
     }
 
@@ -532,51 +532,95 @@ final class IRCAppState: ObservableObject {
         saveProfiles()
     }
 
-    func isMuted(_ nickname: String, from item: SidebarItem) -> Bool {
-        muteSnapshot(for: item)?.contains(nickname) ?? false
+    func isIgnored(_ nickname: String, from item: SidebarItem) -> Bool {
+        ignoreSnapshot(for: item)?.contains(nickname) ?? false
     }
 
-    func mute(_ nickname: String, from item: SidebarItem) {
-        setMute(nickname, muted: true, from: item)
+    func ignore(_ nickname: String, from item: SidebarItem) {
+        setIgnore(nickname, ignored: true, from: item)
     }
 
-    func unmute(_ nickname: String, from item: SidebarItem) {
-        setMute(nickname, muted: false, from: item)
+    func unignore(_ nickname: String, from item: SidebarItem) {
+        setIgnore(nickname, ignored: false, from: item)
     }
 
-    private func setMute(_ targetNickname: String, muted: Bool, from item: SidebarItem) {
+    private func setIgnore(_ targetNickname: String, ignored: Bool, from item: SidebarItem) {
         guard let profile = profile(for: item),
               let profileIndex = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         let cleanNickname = targetNickname.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanNickname.isEmpty else { return }
 
         if identifiersEqual(cleanNickname, nickname(for: profiles[profileIndex]), serverID: profile.id) {
-            appendSystem("You cannot mute your own nickname.", for: item)
+            appendSystem("You cannot ignore your own nickname.", for: item)
             return
         }
 
-        var mutedNicknames = profiles[profileIndex].mutedNicknames ?? []
-        if muted {
-            guard !mutedNicknames.contains(where: { identifiersEqual($0, cleanNickname, serverID: profile.id) }) else {
-                appendSystem("\(cleanNickname) is already muted.", for: item)
+        var ignoredNicknames = profiles[profileIndex].ignoredNicknames ?? []
+        if ignored {
+            guard !ignoredNicknames.contains(where: { identifiersEqual($0, cleanNickname, serverID: profile.id) }) else {
+                appendSystem("\(cleanNickname) is already ignored.", for: item)
                 return
             }
-            mutedNicknames.append(cleanNickname)
-            appendSystem("Muted \(cleanNickname) on \(profiles[profileIndex].name).", for: item)
+            ignoredNicknames.append(cleanNickname)
+            appendSystem("Ignored \(cleanNickname) on \(profiles[profileIndex].name).", for: item)
         } else {
-            guard let index = mutedNicknames.firstIndex(where: { identifiersEqual($0, cleanNickname, serverID: profile.id) }) else {
-                appendSystem("\(cleanNickname) is not muted.", for: item)
+            guard let index = ignoredNicknames.firstIndex(where: { identifiersEqual($0, cleanNickname, serverID: profile.id) }) else {
+                appendSystem("\(cleanNickname) is not ignored.", for: item)
                 return
             }
-            mutedNicknames.remove(at: index)
-            appendSystem("Unmuted \(cleanNickname) on \(profiles[profileIndex].name).", for: item)
+            ignoredNicknames.remove(at: index)
+            appendSystem("Stopped ignoring \(cleanNickname) on \(profiles[profileIndex].name).", for: item)
         }
-        profiles[profileIndex].mutedNicknames = mutedNicknames.isEmpty ? nil : mutedNicknames
+        profiles[profileIndex].ignoredNicknames = ignoredNicknames.isEmpty ? nil : ignoredNicknames
         saveProfiles()
     }
 
-    private func isMuted(_ nickname: String, on profile: ServerProfile) -> Bool {
-        muteSnapshot(for: profile).contains(nickname)
+    private func isIgnored(_ nickname: String, on profile: ServerProfile) -> Bool {
+        ignoreSnapshot(for: profile).contains(nickname)
+    }
+
+    func isMuted(_ conversation: Conversation) -> Bool {
+        guard let profile = profiles.first(where: { $0.id == conversation.serverID }) else { return false }
+        return profile.mutedConversationNames?.contains {
+            identifiersEqual($0, conversation.name, serverID: conversation.serverID)
+        } ?? false
+    }
+
+    func mute(_ conversation: Conversation) {
+        setMuted(true, for: conversation)
+    }
+
+    func unmute(_ conversation: Conversation) {
+        setMuted(false, for: conversation)
+    }
+
+    private func setMuted(_ muted: Bool, for conversation: Conversation) {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == conversation.serverID }) else { return }
+        var mutedNames = profiles[profileIndex].mutedConversationNames ?? []
+        if muted {
+            guard !mutedNames.contains(where: {
+                identifiersEqual($0, conversation.name, serverID: conversation.serverID)
+            }) else { return }
+            mutedNames.append(conversation.name)
+            clearActivity(for: conversation)
+        } else {
+            guard let index = mutedNames.firstIndex(where: {
+                identifiersEqual($0, conversation.name, serverID: conversation.serverID)
+            }) else { return }
+            mutedNames.remove(at: index)
+        }
+        profiles[profileIndex].mutedConversationNames = mutedNames.isEmpty ? nil : mutedNames
+        saveProfiles()
+    }
+
+    private func clearActivity(for conversation: Conversation) {
+        if let index = channels.firstIndex(where: { $0.id == conversation.id }) {
+            channels[index].hasUnread = false
+            channels[index].hasMention = false
+        }
+        if let index = directMessages.firstIndex(where: { $0.id == conversation.id }) {
+            directMessages[index].hasUnread = false
+        }
     }
 
     func leave(_ channel: Conversation, reason: String? = nil) {
@@ -603,8 +647,8 @@ final class IRCAppState: ObservableObject {
         messageUpdateSignals.removeValue(forKey: directMessage.id)
     }
 
-    func muteAndClose(_ directMessage: Conversation) {
-        mute(directMessage.name, from: .directMessage(directMessage.id))
+    func ignoreAndClose(_ directMessage: Conversation) {
+        ignore(directMessage.name, from: .directMessage(directMessage.id))
         close(directMessage)
     }
 
@@ -791,7 +835,7 @@ final class IRCAppState: ObservableObject {
             conversations.removeValue(forKey: profile.id)
             messageUpdateSignals.removeValue(forKey: profile.id)
             serverFeatures.removeValue(forKey: profile.id)
-            muteSnapshotsByServer.removeValue(forKey: profile.id)
+            ignoreSnapshotsByServer.removeValue(forKey: profile.id)
             profiles.removeAll { $0.id == profile.id }
         }
     }
@@ -907,7 +951,8 @@ final class IRCAppState: ObservableObject {
         preset.autoConnect = profile.autoConnect
         preset.mentionNotificationsOverride = profile.mentionNotificationsOverride
         preset.favoriteChannels = profile.favoriteChannels
-        preset.mutedNicknames = profile.mutedNicknames
+        preset.ignoredNicknames = profile.ignoredNicknames
+        preset.mutedConversationNames = profile.mutedConversationNames
         preset.useSASL = profile.useSASL
         preset.saslUsername = profile.saslUsername
         preset.useSSHTunnel = profile.useSSHTunnel
@@ -1111,9 +1156,9 @@ final class IRCAppState: ObservableObject {
         return updateSignal(for: channelID, in: &memberUpdateSignals)
     }
 
-    func muteSnapshot(for item: SidebarItem) -> IRCMuteSnapshot? {
+    func ignoreSnapshot(for item: SidebarItem) -> IRCIgnoreSnapshot? {
         guard let profile = profile(for: item) else { return nil }
-        return muteSnapshot(for: profile)
+        return ignoreSnapshot(for: profile)
     }
 
     func topic(for item: SidebarItem) -> String? {
@@ -1382,32 +1427,54 @@ final class IRCAppState: ObservableObject {
             return
         }
         guard let profile = profile(for: item) else { return }
-        let localCommands: Set<String> = ["SHOWMUTES", "MUTE", "UNMUTE", "QUIT", "DISCONNECT"]
+        let localCommands: Set<String> = [
+            "SHOWIGNORES", "IGNORE", "UNIGNORE",
+            "SHOWMUTES", "MUTE", "UNMUTE",
+            "QUIT", "DISCONNECT"
+        ]
         if !localCommands.contains(command), !canSendMessages(on: profile, reportingTo: item) {
             return
         }
         let sessionID = sessionIDs[profile.id]
         switch command {
-        case "SHOWMUTES":
-            let mutedNicknames = (profile.mutedNicknames ?? [])
+        case "SHOWIGNORES":
+            let ignoredNicknames = (profile.ignoredNicknames ?? [])
                 .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-            if mutedNicknames.isEmpty {
-                appendSystem("No users are muted on \(profile.name).", for: item)
+            if ignoredNicknames.isEmpty {
+                appendSystem("No users are ignored on \(profile.name).", for: item)
             } else {
-                appendSystem("Muted on \(profile.name): \(mutedNicknames.joined(separator: ", ")).", for: item)
+                appendSystem("Ignored on \(profile.name): \(ignoredNicknames.joined(separator: ", ")).", for: item)
             }
-        case "MUTE":
+        case "IGNORE":
             guard !argument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                appendSystem("Usage: /mute nickname", for: item)
+                appendSystem("Usage: /ignore nickname", for: item)
                 return
             }
-            mute(argument, from: item)
-        case "UNMUTE":
+            ignore(argument, from: item)
+        case "UNIGNORE":
             guard !argument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                appendSystem("Usage: /unmute nickname", for: item)
+                appendSystem("Usage: /unignore nickname", for: item)
                 return
             }
-            unmute(argument, from: item)
+            unignore(argument, from: item)
+        case "SHOWMUTES":
+            let mutedNames = (profile.mutedConversationNames ?? [])
+                .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            if mutedNames.isEmpty {
+                appendSystem("No conversations are muted on \(profile.name).", for: item)
+            } else {
+                appendSystem("Muted on \(profile.name): \(mutedNames.joined(separator: ", ")).", for: item)
+            }
+        case "MUTE", "UNMUTE":
+            guard argument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                appendSystem("Usage: /\(command.lowercased())", for: item)
+                return
+            }
+            guard let conversation = conversation(for: item) else {
+                appendSystem("Select a channel or direct message first.", for: item)
+                return
+            }
+            setMuted(command == "MUTE", for: conversation)
         case "JOIN":
             let rawChannel = argument.split(separator: " ").first.map(String.init) ?? ""
             guard !rawChannel.isEmpty else {
@@ -1750,7 +1817,7 @@ final class IRCAppState: ObservableObject {
             updateServerFeatures(from: wire, serverID: profile.id)
         case "NOTICE":
             guard let target = wire.parameters.first, let text = wire.trailing else { return }
-            guard !isMuted(sender, on: profile) else { return }
+            guard !isIgnored(sender, on: profile) else { return }
             guard !handleCTCP(text, from: sender, target: target, profile: profile, canReplyToRequest: false) else { return }
 
             // IRC notices are delivered as a distinct message type, but they
@@ -1804,7 +1871,7 @@ final class IRCAppState: ObservableObject {
             }
         case "PRIVMSG":
             guard let target = wire.parameters.first, let text = wire.trailing else { return }
-            guard !isMuted(sender, on: profile) else { return }
+            guard !isIgnored(sender, on: profile) else { return }
             if handleCTCP(text, from: sender, target: target, profile: profile, canReplyToRequest: true) { return }
             // Servers with IRCv3 echo-message send our own PRIVMSG back to us.
             // The optimistic local row is already visible, so consume that echo.
@@ -1835,7 +1902,7 @@ final class IRCAppState: ObservableObject {
                 localNickname: nickname(for: profile),
                 caseMapping: features(for: profile.id).caseMapping,
                 channelTypes: features(for: profile.id).channelTypes
-            ), !isMuted(invite.inviter, on: profile) else { return }
+            ), !isIgnored(invite.inviter, on: profile) else { return }
 
             append(
                 IRCMessage(
@@ -2534,6 +2601,17 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    private func conversation(for item: SidebarItem) -> Conversation? {
+        switch item {
+        case .channel(let id):
+            return channels.first { $0.id == id }
+        case .directMessage(let id):
+            return directMessages.first { $0.id == id }
+        case .connectionCenter, .server:
+            return nil
+        }
+    }
+
     private func conversationID(for item: SidebarItem) -> UUID? {
         switch item {
         case .connectionCenter: return nil
@@ -2744,6 +2822,11 @@ final class IRCAppState: ObservableObject {
         }) else { return }
 
         let oldConversation = directMessages[oldIndex]
+        renameMutedConversation(
+            from: oldNickname,
+            to: newNickname,
+            serverID: serverID
+        )
         var affectedConversationIDs = [oldConversation.id]
         var retiresOldConversation = false
         if let newIndex = directMessages.firstIndex(where: {
@@ -2767,7 +2850,13 @@ final class IRCAppState: ObservableObject {
                 conversationDrafts[newDraftKey] = oldDraft
             }
             conversationDrafts.removeValue(forKey: oldDraftKey)
-            directMessages[newIndex].hasUnread = directMessages[newIndex].hasUnread || oldConversation.hasUnread
+            let mergedConversationIsMuted = isMuted(directMessages[newIndex])
+            let existingHasUnread = directMessages[newIndex].hasUnread
+            directMessages[newIndex].hasUnread = IRCConversationActivityPolicy.mergedUnreadState(
+                existingHasUnread: existingHasUnread,
+                incomingHasUnread: oldConversation.hasUnread,
+                conversationIsMuted: mergedConversationIsMuted
+            )
             directMessages.removeAll { $0.id == oldConversation.id }
             if selection == .directMessage(oldConversation.id) {
                 selection = .directMessage(newConversation.id)
@@ -2779,6 +2868,24 @@ final class IRCAppState: ObservableObject {
         if retiresOldConversation {
             messageUpdateSignals.removeValue(forKey: oldConversation.id)
         }
+    }
+
+    private func renameMutedConversation(from oldName: String, to newName: String, serverID: UUID) {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == serverID }),
+              var mutedNames = profiles[profileIndex].mutedConversationNames,
+              let oldIndex = mutedNames.firstIndex(where: {
+                  identifiersEqual($0, oldName, serverID: serverID)
+              }) else { return }
+
+        if mutedNames.indices.contains(where: {
+            $0 != oldIndex && identifiersEqual(mutedNames[$0], newName, serverID: serverID)
+        }) {
+            mutedNames.remove(at: oldIndex)
+        } else {
+            mutedNames[oldIndex] = newName
+        }
+        profiles[profileIndex].mutedConversationNames = mutedNames.isEmpty ? nil : mutedNames
+        saveProfiles()
     }
 
     private func stageMembers(_ newMembers: [ChannelMember], for channelID: UUID) {
@@ -3027,14 +3134,14 @@ final class IRCAppState: ObservableObject {
         }
     }
 
-    private func muteSnapshot(for profile: ServerProfile) -> IRCMuteSnapshot {
-        if let snapshot = muteSnapshotsByServer[profile.id] { return snapshot }
+    private func ignoreSnapshot(for profile: ServerProfile) -> IRCIgnoreSnapshot {
+        if let snapshot = ignoreSnapshotsByServer[profile.id] { return snapshot }
         let currentProfile = profiles.first(where: { $0.id == profile.id }) ?? profile
-        let snapshot = IRCMuteSnapshot(
-            nicknames: currentProfile.mutedNicknames ?? [],
+        let snapshot = IRCIgnoreSnapshot(
+            nicknames: currentProfile.ignoredNicknames ?? [],
             caseMapping: features(for: profile.id).caseMapping
         )
-        muteSnapshotsByServer[profile.id] = snapshot
+        ignoreSnapshotsByServer[profile.id] = snapshot
         return snapshot
     }
 
@@ -3063,7 +3170,7 @@ final class IRCAppState: ObservableObject {
         var updated = previous
         updated.apply(parameters: wire.parameters.dropFirst())
         serverFeatures[serverID] = updated
-        muteSnapshotsByServer.removeValue(forKey: serverID)
+        ignoreSnapshotsByServer.removeValue(forKey: serverID)
 
         guard updated.membership != previous.membership
                 || updated.caseMapping != previous.caseMapping else { return }
@@ -3210,17 +3317,18 @@ final class IRCAppState: ObservableObject {
             resolvedMessage.channelTypes = features(for: profile.id).channelTypes
         }
         IRCConversationHistory.append(resolvedMessage, to: &conversations[id, default: []])
-        if selection != item, !resolvedMessage.isSystem {
+        let conversationIsMuted = conversation(for: item).map(isMuted) ?? false
+        if !conversationIsMuted, selection != item, !resolvedMessage.isSystem {
             if shouldMarkMention {
                 markMention(item)
             } else if shouldMarkUnread {
                 markUnread(item)
             }
         }
-        if shouldMarkMention {
+        if shouldMarkMention, !conversationIsMuted {
             postMentionNotification(for: resolvedMessage, in: item)
         }
-        if shouldNotifyDirectMessage {
+        if shouldNotifyDirectMessage, !conversationIsMuted {
             postDirectMessageNotification(for: resolvedMessage, in: item)
         }
         messagesDidChange(for: id)
@@ -3447,7 +3555,7 @@ final class IRCAppState: ObservableObject {
     }
 
     private func saveProfiles() {
-        muteSnapshotsByServer.removeAll(keepingCapacity: true)
+        ignoreSnapshotsByServer.removeAll(keepingCapacity: true)
         ServerProfileStore.save(storedProfiles, to: .standard)
     }
 

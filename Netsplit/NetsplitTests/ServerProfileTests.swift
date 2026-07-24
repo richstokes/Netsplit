@@ -29,11 +29,21 @@ struct ServerProfileTests {
         #expect(!profile.isBuiltIn)
         #expect(profile.mentionNotificationsOverride == nil)
         #expect(profile.favoriteChannels == nil)
+        #expect(profile.ignoredNicknames == nil)
+        #expect(profile.mutedConversationNames == nil)
         #expect(profile.useSASL == nil)
         #expect(profile.useSSHTunnel == nil)
     }
 
-    @Test("Round-trips security and connection settings")
+    @Test("Decodes legacy muted nicknames as ignored users")
+    func migratesLegacyMutedNicknames() throws {
+        let json = Data(#"{"name":"Legacy","hostname":"irc.example.com","port":6697,"useTLS":true,"mutedNicknames":["bot"]}"#.utf8)
+        let profile = try JSONDecoder().decode(ServerProfile.self, from: json)
+
+        #expect(profile.ignoredNicknames == ["bot"])
+    }
+
+    @Test("Round-trips security, connection, and conversation settings")
     func roundTripsProfile() throws {
         let id = UUID(uuidString: "ED696929-B866-420D-AD08-03F2C29EA516")!
         let original = ServerProfile(
@@ -46,7 +56,8 @@ struct ServerProfileTests {
             nicknameOverride: "Alice",
             mentionNotificationsOverride: true,
             favoriteChannels: ["#swift"],
-            mutedNicknames: ["bot"],
+            ignoredNicknames: ["bot"],
+            mutedConversationNames: ["#quiet", "Bob"],
             useSASL: true,
             saslUsername: "alice",
             useSSHTunnel: true,

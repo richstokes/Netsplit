@@ -190,14 +190,14 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCCaseMapping.rfc1459.normalize("").isEmpty)
     }
 
-    @Test("Mute snapshots normalize once and honor the server case mapping")
-    func matchesMutedNicknames() {
-        let rfcSnapshot = IRCMuteSnapshot(nicknames: ["[Nick]", "Alice"], caseMapping: .rfc1459)
+    @Test("Ignore snapshots normalize once and honor the server case mapping")
+    func matchesIgnoredNicknames() {
+        let rfcSnapshot = IRCIgnoreSnapshot(nicknames: ["[Nick]", "Alice"], caseMapping: .rfc1459)
         #expect(rfcSnapshot.contains("{nick}"))
         #expect(rfcSnapshot.contains("ALICE"))
         #expect(!rfcSnapshot.contains("Bob"))
 
-        let asciiSnapshot = IRCMuteSnapshot(nicknames: ["[Nick]"], caseMapping: .ascii)
+        let asciiSnapshot = IRCIgnoreSnapshot(nicknames: ["[Nick]"], caseMapping: .ascii)
         #expect(!asciiSnapshot.contains("{nick}"))
     }
 
@@ -1055,6 +1055,25 @@ struct IRCModelsAndPolicyTests {
         #expect(activity.accessibilityDescription == nil)
     }
 
+    @Test("Muted conversation merges discard unread activity")
+    func discardsUnreadActivityWhenMergingMutedConversations() {
+        #expect(!IRCConversationActivityPolicy.mergedUnreadState(
+            existingHasUnread: false,
+            incomingHasUnread: true,
+            conversationIsMuted: true
+        ))
+        #expect(!IRCConversationActivityPolicy.mergedUnreadState(
+            existingHasUnread: true,
+            incomingHasUnread: false,
+            conversationIsMuted: true
+        ))
+        #expect(IRCConversationActivityPolicy.mergedUnreadState(
+            existingHasUnread: false,
+            incomingHasUnread: true,
+            conversationIsMuted: false
+        ))
+    }
+
     @Test("Message text cache invalidates when mutable render content changes")
     func invalidatesCachedMessageText() throws {
         let cache = IRCMessageTextCache(countLimit: 10)
@@ -1236,6 +1255,29 @@ struct IRCModelsAndPolicyTests {
 
         #expect(state.directMessages.isEmpty)
         #expect(state.selection == .server(profile.id))
+    }
+
+    @Test("Conversation mute state toggles with IRC case mapping")
+    @MainActor
+    func togglesConversationMuteStateUsingIRCCaseMapping() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        state.startDirectMessage(with: "Alice[Work]", from: .server(profile.id))
+        let directMessage = try #require(state.directMessages.first {
+            $0.serverID == profile.id && $0.name == "Alice[Work]"
+        })
+        let equivalentName = Conversation(name: "alice{work}", serverID: profile.id)
+
+        state.mute(directMessage)
+
+        #expect(state.isMuted(directMessage))
+        #expect(state.isMuted(equivalentName))
+        #expect(state.profiles.first(where: { $0.id == profile.id })?.mutedConversationNames == ["Alice[Work]"])
+
+        state.unmute(equivalentName)
+
+        #expect(!state.isMuted(directMessage))
+        #expect(state.profiles.first(where: { $0.id == profile.id })?.mutedConversationNames == nil)
     }
 
     @Test("Opening a direct message notification selects its conversation")

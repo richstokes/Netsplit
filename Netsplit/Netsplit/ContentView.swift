@@ -197,7 +197,8 @@ private struct SidebarView: View {
                         ForEach(state.channels(for: profile)) { channel in
                             SidebarChannelLabel(
                                 channel: channel,
-                                isFavorite: state.isFavorite(channel)
+                                isFavorite: state.isFavorite(channel),
+                                isMuted: state.isMuted(channel)
                             )
                                 .accessibilityElement(children: .combine)
                                 .accessibilityLabel(channel.name)
@@ -210,6 +211,13 @@ private struct SidebarView: View {
                                     Button(state.isFavorite(channel) ? "Unfavorite" : "Favorite", systemImage: state.isFavorite(channel) ? "star.slash" : "star") {
                                         state.toggleFavorite(channel)
                                     }
+                                    Button(state.isMuted(channel) ? "Unmute Channel" : "Mute Channel", systemImage: state.isMuted(channel) ? "bell" : "bell.slash") {
+                                        if state.isMuted(channel) {
+                                            state.unmute(channel)
+                                        } else {
+                                            state.mute(channel)
+                                        }
+                                    }
                                     Divider()
                                     Button("Leave Channel", systemImage: "rectangle.portrait.and.arrow.right") {
                                         state.leave(channel)
@@ -218,17 +226,33 @@ private struct SidebarView: View {
                         }
 
                         ForEach(state.directMessages(for: profile)) { message in
-                            Label(message.name, systemImage: "person.crop.circle")
+                            HStack(spacing: 6) {
+                                Label(message.name, systemImage: "person.crop.circle")
+                                Spacer(minLength: 0)
+                                if state.isMuted(message) {
+                                    Image(systemName: "bell.slash.fill")
+                                        .font(.system(size: textMetrics.size(10)))
+                                        .foregroundStyle(.tertiary)
+                                        .accessibilityHidden(true)
+                                }
+                            }
                                 .foregroundStyle(message.hasUnread ? .primary : .secondary)
                                 .font(.system(size: textMetrics.size(15), weight: message.hasUnread ? .semibold : .regular))
                                 .padding(.vertical, textMetrics.spacing(1.5))
                                 .tag(SidebarItem.directMessage(message.id))
-                                .accessibilityValue(message.hasUnread ? "Unread messages" : "No unread messages")
+                                .accessibilityValue(directMessageAccessibilityValue(message))
                                 .contextMenu {
-                                    Button("Mute and Close", systemImage: "speaker.slash") {
-                                        state.muteAndClose(message)
+                                    Button(state.isMuted(message) ? "Unmute Conversation" : "Mute Conversation", systemImage: state.isMuted(message) ? "bell" : "bell.slash") {
+                                        if state.isMuted(message) {
+                                            state.unmute(message)
+                                        } else {
+                                            state.mute(message)
+                                        }
                                     }
                                     Divider()
+                                    Button("Ignore \(message.name) and Close", systemImage: "person.slash") {
+                                        state.ignoreAndClose(message)
+                                    }
                                     Button("Close Conversation", systemImage: "xmark") {
                                         state.close(message)
                                     }
@@ -311,6 +335,13 @@ private struct SidebarView: View {
         values.append(channel.hasUnread ? "Unread messages" : "No unread messages")
         if channel.hasMention { values.append("Mentioned you") }
         if state.isFavorite(channel) { values.append("Favorite") }
+        if state.isMuted(channel) { values.append("Muted") }
+        return values.joined(separator: ", ")
+    }
+
+    private func directMessageAccessibilityValue(_ message: Conversation) -> String {
+        var values = [message.hasUnread ? "Unread messages" : "No unread messages"]
+        if state.isMuted(message) { values.append("Muted") }
         return values.joined(separator: ", ")
     }
 }
@@ -362,6 +393,7 @@ private struct SidebarServerHeader: View {
 private struct SidebarChannelLabel: View {
     let channel: Conversation
     let isFavorite: Bool
+    let isMuted: Bool
 
     @Environment(\.ircTextMetrics) private var textMetrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -378,6 +410,13 @@ private struct SidebarChannelLabel: View {
             .opacity(isPulseDimmed ? 0.42 : 1)
 
             Spacer(minLength: 0)
+
+            if isMuted {
+                Image(systemName: "bell.slash.fill")
+                    .font(.system(size: textMetrics.size(10)))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
 
             if isFavorite {
                 Image(systemName: "star.fill")
@@ -871,9 +910,10 @@ private struct ConversationView: View {
     }
 
     private static let supportedCommands = [
-        "AWAY", "CTCP", "DISCONNECT", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
+        "AWAY", "CTCP", "DISCONNECT", "IGNORE", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
         "MODE", "MOTD", "MSG", "MUTE", "NAMES", "NICK", "NOTICE", "PART",
-        "QUERY", "QUIT", "SERVER", "SHOWMUTES", "SLAP", "TOPIC", "UNMUTE", "VERSION",
+        "QUERY", "QUIT", "SERVER", "SHOWIGNORES", "SHOWMUTES", "SLAP", "TOPIC",
+        "UNIGNORE", "UNMUTE", "VERSION",
         "WHO", "WHOIS"
     ]
 
@@ -940,7 +980,7 @@ private struct ConversationView: View {
 
     private func recipientArgumentIndex(for command: String) -> Int? {
         switch command {
-        case "SLAP", "MSG", "QUERY", "NOTICE", "WHOIS", "CTCP", "VERSION", "MUTE", "UNMUTE", "INVITE", "KILL", "WHO", "MODE":
+        case "SLAP", "MSG", "QUERY", "NOTICE", "WHOIS", "CTCP", "VERSION", "IGNORE", "UNIGNORE", "INVITE", "KILL", "WHO", "MODE":
             return 0
         case "KICK":
             return 1
@@ -1109,6 +1149,13 @@ private struct ConversationTranscript: View {
                         )
                         .id(message.id)
                     }
+
+                    // Keep the target inside the lazy container so scrolling
+                    // to the tail materializes the final message rows instead
+                    // of relying on an estimated LazyVStack height.
+                    Color.clear
+                        .frame(height: textMetrics.spacing(18))
+                        .id(ScrollTarget.tail)
                 }
                 .padding(.horizontal, textMetrics.spacing(24))
                 .padding(.top, textMetrics.spacing(18))
@@ -1135,49 +1182,46 @@ private struct ConversationTranscript: View {
                         onDebugGeometry: debugGeometryHandler
                     )
                 }
-                Color.clear
-                    .frame(height: textMetrics.spacing(18))
-                    .id(ScrollTarget.tail)
-                    // Keep initial positioning independent of message IDs so a
-                    // burst cannot cancel it before the first layout completes.
-                    .task(id: messages.isEmpty) {
-                        guard !messages.isEmpty, !hasPositionedInitialMessages else { return }
+                // Keep initial positioning independent of message IDs so a
+                // burst cannot cancel it before the first layout completes.
+                .task(id: messages.isEmpty) {
+                    guard !messages.isEmpty, !hasPositionedInitialMessages else { return }
+#if DEBUG
+                    TranscriptDebugLog.state(
+                        "initial-scroll-yielding",
+                        context: debugContext,
+                        hasPositionedInitialMessages: hasPositionedInitialMessages,
+                        isFollowingTail: isFollowingTail
+                    )
+#endif
+                    await Task.yield()
+                    if Task.isCancelled {
 #if DEBUG
                         TranscriptDebugLog.state(
-                            "initial-scroll-yielding",
+                            "initial-scroll-cancelled",
                             context: debugContext,
                             hasPositionedInitialMessages: hasPositionedInitialMessages,
                             isFollowingTail: isFollowingTail
                         )
 #endif
-                        await Task.yield()
-                        if Task.isCancelled {
-#if DEBUG
-                            TranscriptDebugLog.state(
-                                "initial-scroll-cancelled",
-                                context: debugContext,
-                                hasPositionedInitialMessages: hasPositionedInitialMessages,
-                                isFollowingTail: isFollowingTail
-                            )
-#endif
-                            return
-                        }
-
-                        var transaction = Transaction()
-                        transaction.disablesAnimations = true
-                        withTransaction(transaction) {
-                            scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
-                        }
-                        hasPositionedInitialMessages = true
-#if DEBUG
-                        TranscriptDebugLog.state(
-                            "initial-scroll-requested",
-                            context: debugContext,
-                            hasPositionedInitialMessages: hasPositionedInitialMessages,
-                            isFollowingTail: isFollowingTail
-                        )
-#endif
+                        return
                     }
+
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
+                    }
+                    hasPositionedInitialMessages = true
+#if DEBUG
+                    TranscriptDebugLog.state(
+                        "initial-scroll-requested",
+                        context: debugContext,
+                        hasPositionedInitialMessages: hasPositionedInitialMessages,
+                        isFollowingTail: isFollowingTail
+                    )
+#endif
+                }
             }
             .accessibilityAddTraits(.updatesFrequently)
             .defaultScrollAnchor(.bottom)
@@ -1552,7 +1596,7 @@ private struct ChannelMemberList: View {
     var body: some View {
         let _ = updates.revision
         let members = state.members(for: selection)
-        let muteSnapshot = state.muteSnapshot(for: selection)
+        let ignoreSnapshot = state.ignoreSnapshot(for: selection)
 
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -1581,7 +1625,7 @@ private struct ChannelMemberList: View {
                     ForEach(filteredMembers(from: members)) { member in
                         ChannelMemberRow(
                             member: member,
-                            isMuted: muteSnapshot?.contains(member.nickname) ?? false,
+                            isIgnored: ignoreSnapshot?.contains(member.nickname) ?? false,
                             state: state,
                             selection: selection
                         )
@@ -1601,7 +1645,7 @@ private struct ChannelMemberList: View {
 
 private struct ChannelMemberRow: View {
     let member: ChannelMember
-    let isMuted: Bool
+    let isIgnored: Bool
     let state: IRCAppState
     let selection: SidebarItem
     @State private var isHovered = false
@@ -1610,20 +1654,20 @@ private struct ChannelMemberRow: View {
     var body: some View {
         HStack(spacing: textMetrics.spacing(8)) {
             Group {
-                if isMuted {
-                    Image(systemName: "speaker.slash.fill")
+                if isIgnored {
+                    Image(systemName: "person.slash.fill")
                         .font(.system(size: textMetrics.size(10)))
                 } else {
                     Text(member.prefix.map(String.init) ?? "")
                         .font(.system(size: textMetrics.size(12), weight: .bold, design: .monospaced))
                 }
             }
-            .foregroundStyle(member.role == nil || isMuted ? Color.secondary : Color.accentColor)
+            .foregroundStyle(member.role == nil || isIgnored ? Color.secondary : Color.accentColor)
             .frame(width: textMetrics.spacing(14), alignment: .center)
 
             Text(member.nickname)
                 .font(.system(size: textMetrics.size(14)))
-                .foregroundStyle(isMuted ? .secondary : .primary)
+                .foregroundStyle(isIgnored ? .secondary : .primary)
                 .lineLimit(1)
 
             Spacer(minLength: 4)
@@ -1657,14 +1701,14 @@ private struct ChannelMemberRow: View {
         .contextMenu {
             NicknameContextMenu(
                 nickname: member.nickname,
-                isMuted: isMuted,
+                isIgnored: isIgnored,
                 state: state,
                 selection: selection
             )
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(member.role.map { "\(member.nickname), \($0)" } ?? member.nickname)
-        .accessibilityValue(isMuted ? "Muted" : "Not muted")
+        .accessibilityValue(isIgnored ? "Ignored" : "Not ignored")
         .accessibilityHint("Starts a private message")
         .accessibilityAction {
             startDirectMessage()
@@ -1672,11 +1716,11 @@ private struct ChannelMemberRow: View {
         .accessibilityAction(named: "View Whois") {
             state.requestWhois(for: member.nickname, from: selection)
         }
-        .accessibilityAction(named: isMuted ? "Unmute" : "Mute") {
-            if isMuted {
-                state.unmute(member.nickname, from: selection)
+        .accessibilityAction(named: isIgnored ? "Unignore" : "Ignore") {
+            if isIgnored {
+                state.unignore(member.nickname, from: selection)
             } else {
-                state.mute(member.nickname, from: selection)
+                state.ignore(member.nickname, from: selection)
             }
         }
     }
@@ -1688,19 +1732,19 @@ private struct ChannelMemberRow: View {
 
 private struct NicknameContextMenu: View {
     let nickname: String
-    let isMuted: Bool
+    let isIgnored: Bool
     @ObservedObject var state: IRCAppState
     let selection: SidebarItem
     @ObservedObject private var memberUpdates: IRCRevisionSignal
 
     init(
         nickname: String,
-        isMuted: Bool,
+        isIgnored: Bool,
         state: IRCAppState,
         selection: SidebarItem
     ) {
         self.nickname = nickname
-        self.isMuted = isMuted
+        self.isIgnored = isIgnored
         self.state = state
         self.selection = selection
         _memberUpdates = ObservedObject(wrappedValue: state.memberUpdates(for: selection))
@@ -1717,13 +1761,13 @@ private struct NicknameContextMenu: View {
             state.requestWhois(for: nickname, from: selection)
         }
         Divider()
-        if isMuted {
-            Button("Unmute \(nickname)", systemImage: "speaker.wave.2") {
-                state.unmute(nickname, from: selection)
+        if isIgnored {
+            Button("Unignore \(nickname)", systemImage: "person") {
+                state.unignore(nickname, from: selection)
             }
         } else {
-            Button("Mute \(nickname)", systemImage: "speaker.slash") {
-                state.mute(nickname, from: selection)
+            Button("Ignore \(nickname)", systemImage: "person.slash") {
+                state.ignore(nickname, from: selection)
             }
         }
         if state.canModerate(nickname, in: selection) {
@@ -1981,7 +2025,7 @@ private struct MessageRow: View {
             senderText.contextMenu {
                 NicknameContextMenu(
                     nickname: nickname,
-                    isMuted: state.isMuted(nickname, from: selection),
+                    isIgnored: state.isIgnored(nickname, from: selection),
                     state: state,
                     selection: selection
                 )
