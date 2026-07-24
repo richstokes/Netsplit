@@ -136,7 +136,9 @@ struct ContentView: View {
         .sheet(isPresented: $state.isChannelBrowserPresented) {
             ChannelBrowser(state: state)
         }
-        .sheet(isPresented: $state.isJumpPalettePresented) {
+        .sheet(isPresented: $state.isJumpPalettePresented, onDismiss: {
+            state.jumpPaletteDidDismiss()
+        }) {
             JumpPalette(state: state)
         }
         .onChange(of: state.workspaceFocusRequest) { _, request in
@@ -785,6 +787,7 @@ private struct ConversationView: View {
                                 font: state.chatFont.nsFont(size: textMetrics.size(15)),
                                 workspaceFocus: $workspaceFocus,
                                 focusTarget: .composer(selection),
+                                focusRequestID: composerFocusRequestID,
                                 measuredHeight: $composerTextHeight,
                                 onSubmit: send,
                                 onTab: completeComposer
@@ -834,7 +837,7 @@ private struct ConversationView: View {
         .onAppear {
             state.markRead(selection)
             draft = state.boundedComposerDraft(state.draft(for: selection), for: selection)
-            workspaceFocus = .composer(selection)
+            state.requestComposerFocus()
         }
         .onChange(of: selection) { _, newSelection in
             state.markRead(newSelection)
@@ -889,6 +892,12 @@ private struct ConversationView: View {
 
     private var composerMaximumBytes: Int? {
         draft.first == "/" ? nil : state.maximumMessageBytes(for: selection)
+    }
+
+    private var composerFocusRequestID: UUID? {
+        guard let request = state.workspaceFocusRequest,
+              request.target == .composer(selection) else { return nil }
+        return request.id
     }
 
     private var remainingMessageBytes: Int? {
@@ -1028,6 +1037,7 @@ private struct IRCComposerTextView: NSViewRepresentable {
     let font: NSFont
     let workspaceFocus: FocusState<IRCWorkspaceFocus?>.Binding
     let focusTarget: IRCWorkspaceFocus
+    let focusRequestID: UUID?
     @Binding var measuredHeight: CGFloat
     let onSubmit: () -> Void
     let onTab: () -> Bool
@@ -1046,6 +1056,7 @@ private struct IRCComposerTextView: NSViewRepresentable {
 
         let textView = IRCComposerNativeTextView()
         textView.delegate = context.coordinator
+        textView.identifier = NSUserInterfaceItemIdentifier("IRCComposerTextView")
         textView.string = text
         textView.font = font
         textView.textColor = .labelColor
@@ -1065,10 +1076,15 @@ private struct IRCComposerTextView: NSViewRepresentable {
         )
         textView.onSubmit = onSubmit
         textView.onTab = onTab
+        textView.onDidMoveToWindow = { [weak textView, weak coordinator = context.coordinator] in
+            guard let textView, let coordinator else { return }
+            coordinator.scheduleFocusIfNeeded(for: textView)
+        }
         scrollView.documentView = textView
 
         DispatchQueue.main.async {
             context.coordinator.updateLayout(for: textView, in: scrollView)
+            context.coordinator.scheduleFocusIfNeeded(for: textView)
         }
         return scrollView
     }
@@ -1087,19 +1103,14 @@ private struct IRCComposerTextView: NSViewRepresentable {
             context.coordinator.isUpdatingProgrammatically = false
         }
         context.coordinator.updateLayout(for: textView, in: scrollView)
-
-        if workspaceFocus.wrappedValue == focusTarget {
-            guard textView.window?.firstResponder !== textView else { return }
-            DispatchQueue.main.async { [weak textView] in
-                guard let textView, textView.window != nil else { return }
-                textView.window?.makeFirstResponder(textView)
-            }
-        }
+        context.coordinator.scheduleFocusIfNeeded(for: textView)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: IRCComposerTextView
         var isUpdatingProgrammatically = false
+        private var handledFocusRequestID: UUID?
+        private var hasPendingFocusAttempt = false
 
         init(parent: IRCComposerTextView) {
             self.parent = parent
@@ -1114,6 +1125,40 @@ private struct IRCComposerTextView: NSViewRepresentable {
         func textDidEndEditing(_ notification: Notification) {
             if parent.workspaceFocus.wrappedValue == parent.focusTarget {
                 parent.workspaceFocus.wrappedValue = nil
+            }
+        }
+
+        func scheduleFocusIfNeeded(for textView: IRCComposerNativeTextView) {
+            if textView.window?.firstResponder === textView {
+                handledFocusRequestID = parent.focusRequestID
+                return
+            }
+            let hasUnprocessedRequest = parent.focusRequestID.map {
+                $0 != handledFocusRequestID
+            } ?? false
+            guard hasUnprocessedRequest || parent.workspaceFocus.wrappedValue == parent.focusTarget,
+                  !hasPendingFocusAttempt else { return }
+
+            hasPendingFocusAttempt = true
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.hasPendingFocusAttempt = false
+
+                let hasUnprocessedRequest = self.parent.focusRequestID.map {
+                    $0 != self.handledFocusRequestID
+                } ?? false
+                guard hasUnprocessedRequest
+                        || self.parent.workspaceFocus.wrappedValue == self.parent.focusTarget,
+                      let window = textView.window else { return }
+                if window.firstResponder === textView {
+                    self.handledFocusRequestID = self.parent.focusRequestID
+                    return
+                }
+
+                if window.makeFirstResponder(textView),
+                   let focusRequestID = self.parent.focusRequestID {
+                    self.handledFocusRequestID = focusRequestID
+                }
             }
         }
 
@@ -1203,6 +1248,12 @@ private struct IRCComposerTextView: NSViewRepresentable {
 private final class IRCComposerNativeTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onTab: (() -> Bool)?
+    var onDidMoveToWindow: (() -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onDidMoveToWindow?()
+    }
 
     override func keyDown(with event: NSEvent) {
         // Return and Tab belong to the input method while it is converting

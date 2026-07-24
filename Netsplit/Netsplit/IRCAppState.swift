@@ -148,6 +148,7 @@ final class IRCAppState: ObservableObject {
     private var disconnectingConnections: [UUID: IRCConnection] = [:]
     private var disconnectCompletionWaiters: [UUID: [@MainActor () -> Void]] = [:]
     private var oneOffServerIDs = Set<UUID>()
+    private var shouldFocusComposerAfterJumpPaletteDismissal = false
     private var pendingJoins: [String: PendingJoin] = [:]
     private var activeNicknames: [UUID: String] = [:]
     private var registeredServerIDs = Set<UUID>()
@@ -348,6 +349,7 @@ final class IRCAppState: ObservableObject {
     }
 
     func presentJumpPalette() {
+        shouldFocusComposerAfterJumpPaletteDismissal = false
         isJumpPalettePresented = true
     }
 
@@ -358,7 +360,14 @@ final class IRCAppState: ObservableObject {
     func jump(to destination: IRCJumpDestination) {
         guard isValidNavigationSelection(destination.selection) else { return }
         selection = destination.selection
+        shouldFocusComposerAfterJumpPaletteDismissal = true
         isJumpPalettePresented = false
+    }
+
+    func jumpPaletteDidDismiss() {
+        guard shouldFocusComposerAfterJumpPaletteDismissal else { return }
+        shouldFocusComposerAfterJumpPaletteDismissal = false
+        requestComposerFocus()
     }
 
     @discardableResult
@@ -376,6 +385,7 @@ final class IRCAppState: ObservableObject {
         } else {
             selection = .server(profile.id)
         }
+        requestComposerFocus()
     }
 
     func selectFromSidebar(_ newSelection: SidebarItem?) {
@@ -2861,6 +2871,7 @@ final class IRCAppState: ObservableObject {
         isNavigatingSelectionHistory = true
         selection = destination
         isNavigatingSelectionHistory = false
+        requestComposerFocus()
     }
 
     private func appendToBackHistory(_ item: SidebarItem) {

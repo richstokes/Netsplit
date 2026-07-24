@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import Netsplit
 
@@ -1413,6 +1414,47 @@ struct IRCModelsAndPolicyTests {
         #expect(reselectionRequest.id != secondRequest.id)
     }
 
+    @Test("Native composer becomes first responder when focus is requested")
+    @MainActor
+    func focusesNativeComposer() async throws {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+
+        let hostingController = NSHostingController(
+            rootView: ContentView(state: state)
+                .frame(width: 1_000, height: 700)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        let initialComposer = try #require(Self.composer(in: hostingController.view))
+        #expect(window.firstResponder === initialComposer)
+
+        #expect(window.makeFirstResponder(nil))
+        state.requestComposerFocus()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(window.firstResponder === initialComposer)
+
+        state.startDirectMessage(with: "Bob", from: .server(profile.id))
+        try await Task.sleep(for: .milliseconds(100))
+        let switchedComposer = try #require(Self.composer(in: hostingController.view))
+        #expect(switchedComposer !== initialComposer)
+        #expect(window.firstResponder === switchedComposer)
+    }
+
     @Test("Conversation drafts remain separate and clear when emptied")
     @MainActor
     func preservesConversationDrafts() {
@@ -1464,6 +1506,7 @@ struct IRCModelsAndPolicyTests {
 
         state.navigateBack()
         #expect(state.selection == alice)
+        #expect(state.workspaceFocusRequest?.target == alice.map(IRCWorkspaceFocus.composer))
         #expect(state.canNavigateForward)
 
         state.navigateBack()
@@ -1477,6 +1520,30 @@ struct IRCModelsAndPolicyTests {
         state.navigateBack()
         state.selection = .connectionCenter
         #expect(!state.canNavigateForward)
+    }
+
+    @Test("Jump palette selection requests composer focus")
+    @MainActor
+    func focusesComposerAfterJumping() throws {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let alice = try #require(state.selection)
+        state.presentJumpPalette()
+
+        state.jump(to: IRCJumpDestination(
+            selection: alice,
+            title: "Alice",
+            serverName: profile.name,
+            kind: .directMessage
+        ))
+
+        #expect(state.selection == alice)
+        #expect(!state.isJumpPalettePresented)
+        #expect(state.workspaceFocusRequest == nil)
+
+        state.jumpPaletteDidDismiss()
+        #expect(state.workspaceFocusRequest?.target == .composer(alice))
     }
 
     @Test("History shortcuts recognize Logitech command-arrow and auxiliary mouse events")
@@ -1536,8 +1603,10 @@ struct IRCModelsAndPolicyTests {
 
         state.selectServerRestoringLastConversation(firstProfile)
         #expect(state.selection == alice)
+        #expect(state.workspaceFocusRequest?.target == .composer(alice))
         state.selectServerRestoringLastConversation(secondProfile)
         #expect(state.selection == bob)
+        #expect(state.workspaceFocusRequest?.target == .composer(bob))
     }
 
     @Test("Connections selection preserves each server's remembered conversation")
@@ -1609,6 +1678,20 @@ struct IRCModelsAndPolicyTests {
         let stringRange = try #require(match)
         let attributedRange = try #require(Range(stringRange, in: attributedText))
         return attributedText[attributedRange].link
+    }
+
+    @MainActor
+    private static func composer(in view: NSView) -> NSTextView? {
+        if let textView = view as? NSTextView,
+           textView.identifier?.rawValue == "IRCComposerTextView" {
+            return textView
+        }
+        for subview in view.subviews {
+            if let composer = composer(in: subview) {
+                return composer
+            }
+        }
+        return nil
     }
 
     private func attributes(
