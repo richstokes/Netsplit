@@ -686,19 +686,23 @@ final class IRCAppState: ObservableObject {
     func toggleConnection(for profile: ServerProfile) {
         if connections[profile.id] != nil {
             if case .failed = status(for: profile) {
-                let wasOneOffServer = isOneOffServer(profile)
-                disconnect(profile)
-                if wasOneOffServer {
-                    oneOffServerIDs.insert(profile.id)
-                    profiles.append(profile)
-                }
-                connect(profile)
+                reconnect(profile)
             } else {
                 disconnect(profile)
             }
         } else {
             connect(profile)
         }
+    }
+
+    func reconnect(_ profile: ServerProfile) {
+        let wasOneOffServer = isOneOffServer(profile)
+        disconnect(profile)
+        if wasOneOffServer {
+            oneOffServerIDs.insert(profile.id)
+            profiles.append(profile)
+        }
+        connect(profile)
     }
 
     func connect(_ profile: ServerProfile, selectConversation: Bool = true, isAutomaticRetry: Bool = false) {

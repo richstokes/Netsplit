@@ -180,6 +180,9 @@ private struct SidebarView: View {
                             if case .failed = state.status(for: profile) {
                                 Button("Retry Now") { state.toggleConnection(for: profile) }
                             }
+                            Button("Reconnect") {
+                                state.reconnect(profile)
+                            }
                             Button(state.isWaitingToReconnect(profile) ? "Stop Reconnecting" : "Disconnect") {
                                 state.disconnect(profile)
                             }
