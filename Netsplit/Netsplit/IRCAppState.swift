@@ -233,11 +233,7 @@ final class IRCAppState: ObservableObject {
         let savedTranscriptFontSize = defaults.object(forKey: "transcriptFontSize") as? Double ?? 16
         transcriptFontSize = min(max(savedTranscriptFontSize, 12), 24)
 
-        if let data = defaults.data(forKey: "profiles"), let saved = try? JSONDecoder().decode([ServerProfile].self, from: data) {
-            profiles = Self.refreshedProfiles(from: saved)
-        } else {
-            profiles = ServerProfile.recommended
-        }
+        profiles = ServerProfileStore.load(from: defaults)
         selection = .connectionCenter
 
         if mentionNotificationsEnabled || profiles.contains(where: { $0.mentionNotificationsOverride == true }) {
@@ -890,7 +886,7 @@ final class IRCAppState: ObservableObject {
 
     func restorePreset(_ profile: ServerProfile) {
         guard profile.isBuiltIn,
-              var preset = Self.preset(matching: profile),
+              var preset = ServerProfileStore.preset(matching: profile),
               let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         preset.id = profile.id
         preset.autoConnect = profile.autoConnect
@@ -3403,8 +3399,7 @@ final class IRCAppState: ObservableObject {
 
     private func saveProfiles() {
         muteSnapshotsByServer.removeAll(keepingCapacity: true)
-        guard let data = try? JSONEncoder().encode(storedProfiles) else { return }
-        UserDefaults.standard.set(data, forKey: "profiles")
+        ServerProfileStore.save(storedProfiles, to: .standard)
     }
 
     private func saveCredentials(for profile: ServerProfile, serverPassword: String, saslPassword: String, onConnectCommands: [String], sshPassword: String, sshPrivateKey: String) {
@@ -3432,51 +3427,6 @@ final class IRCAppState: ObservableObject {
 
     private func credentialAccount(profile: ServerProfile, kind: String) -> String {
         "\(kind).\(profile.id.uuidString)"
-    }
-
-    private static func refreshedProfiles(from saved: [ServerProfile]) -> [ServerProfile] {
-        let refreshed = saved.map { profile -> ServerProfile in
-            guard profile.isBuiltIn, let matchedPreset = preset(matching: profile) else { return profile }
-            if profile.isPresetModified == true {
-                var migrated = profile
-                migrated.presetID = matchedPreset.presetID
-                return migrated
-            }
-            var current = matchedPreset
-            current.id = profile.id
-            current.autoConnect = profile.autoConnect
-            current.mentionNotificationsOverride = profile.mentionNotificationsOverride
-            current.favoriteChannels = profile.favoriteChannels
-            current.mutedNicknames = profile.mutedNicknames
-            current.useSASL = profile.useSASL
-            current.saslUsername = profile.saslUsername
-            current.useSSHTunnel = profile.useSSHTunnel
-            current.sshHostname = profile.sshHostname
-            current.sshPort = profile.sshPort
-            current.sshUsername = profile.sshUsername
-            current.sshKeyFilename = profile.sshKeyFilename
-            current.sshTrustedHostKey = profile.sshTrustedHostKey
-            return current
-        }
-        let missing = ServerProfile.recommended.filter { recommended in
-            !refreshed.contains { profile in
-                profile.isBuiltIn && profile.presetID == recommended.presetID
-            }
-        }
-        return refreshed + missing
-    }
-
-    private static func preset(matching profile: ServerProfile) -> ServerProfile? {
-        if let presetID = profile.presetID,
-           let preset = ServerProfile.recommended.first(where: { $0.presetID == presetID }) {
-            return preset
-        }
-        // Migrate profiles saved before stable preset IDs existed. Hostname is
-        // also checked so a renamed built-in can still recover its identity.
-        return ServerProfile.recommended.first {
-            $0.name.caseInsensitiveCompare(profile.name) == .orderedSame
-                || $0.hostname.caseInsensitiveCompare(profile.hostname) == .orderedSame
-        }
     }
 
     private static func anonymousNickname() -> String {

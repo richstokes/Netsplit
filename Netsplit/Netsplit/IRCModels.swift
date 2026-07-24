@@ -5,6 +5,7 @@
 
 import AppKit
 import Foundation
+import OSLog
 import SwiftUI
 
 enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
@@ -300,6 +301,138 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         .init(name: "HybridIRC", hostname: "irc.hybridirc.com", port: 6697, useTLS: true, isBuiltIn: true, presetID: "hybridirc"),
         .init(name: "MansionNET", hostname: "irc.inthemansion.com", port: 6697, useTLS: true, isBuiltIn: true, presetID: "mansionnet")
     ]
+}
+
+enum ServerProfileStore {
+    static let profilesKey = "profiles"
+    static let decodeFailureBackupKey = "profiles.decodeFailureBackup"
+
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Netsplit",
+        category: "ServerProfileStore"
+    )
+
+    static func load(
+        from defaults: UserDefaults,
+        recommended: [ServerProfile] = ServerProfile.recommended
+    ) -> [ServerProfile] {
+        guard let data = defaults.data(forKey: profilesKey) else {
+            return recommended
+        }
+
+        do {
+            let decoded = try decodeProfiles(from: data)
+            if decoded.droppedCount > 0 {
+                preserveDecodeFailureBackup(data, in: defaults)
+                logger.error(
+                    "Recovered \(decoded.profiles.count, privacy: .public) server profiles and skipped \(decoded.droppedCount, privacy: .public) invalid entries."
+                )
+            }
+
+            let refreshed = refreshedProfiles(from: decoded.profiles, recommended: recommended)
+            if decoded.droppedCount > 0 || refreshed != decoded.profiles {
+                save(refreshed, to: defaults)
+            }
+            return refreshed
+        } catch {
+            preserveDecodeFailureBackup(data, in: defaults)
+            logger.error("Could not decode saved server profiles: \(error.localizedDescription, privacy: .public)")
+            return recommended
+        }
+    }
+
+    @discardableResult
+    static func save(_ profiles: [ServerProfile], to defaults: UserDefaults) -> Bool {
+        do {
+            let data = try JSONEncoder().encode(profiles)
+            defaults.set(data, forKey: profilesKey)
+            return true
+        } catch {
+            logger.error("Could not encode server profiles: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    static func refreshedProfiles(
+        from saved: [ServerProfile],
+        recommended: [ServerProfile] = ServerProfile.recommended
+    ) -> [ServerProfile] {
+        let refreshed = saved.map { profile -> ServerProfile in
+            guard profile.isBuiltIn,
+                  let matchedPreset = preset(matching: profile, in: recommended) else {
+                return profile
+            }
+            if profile.isPresetModified == true {
+                var migrated = profile
+                migrated.presetID = matchedPreset.presetID
+                return migrated
+            }
+            var current = matchedPreset
+            current.id = profile.id
+            current.autoConnect = profile.autoConnect
+            current.mentionNotificationsOverride = profile.mentionNotificationsOverride
+            current.favoriteChannels = profile.favoriteChannels
+            current.mutedNicknames = profile.mutedNicknames
+            current.useSASL = profile.useSASL
+            current.saslUsername = profile.saslUsername
+            current.useSSHTunnel = profile.useSSHTunnel
+            current.sshHostname = profile.sshHostname
+            current.sshPort = profile.sshPort
+            current.sshUsername = profile.sshUsername
+            current.sshKeyFilename = profile.sshKeyFilename
+            current.sshTrustedHostKey = profile.sshTrustedHostKey
+            return current
+        }
+        let missing = recommended.filter { recommendedProfile in
+            !refreshed.contains { profile in
+                profile.isBuiltIn && profile.presetID == recommendedProfile.presetID
+            }
+        }
+        return refreshed + missing
+    }
+
+    private static func decodeProfiles(from data: Data) throws -> DecodedServerProfiles {
+        let entries = try JSONDecoder().decode([FailableServerProfile].self, from: data)
+        let profiles = entries.compactMap(\.profile)
+        return DecodedServerProfiles(
+            profiles: profiles,
+            droppedCount: entries.count - profiles.count
+        )
+    }
+
+    private static func preserveDecodeFailureBackup(_ data: Data, in defaults: UserDefaults) {
+        guard defaults.data(forKey: decodeFailureBackupKey) == nil else { return }
+        defaults.set(data, forKey: decodeFailureBackupKey)
+    }
+
+    static func preset(
+        matching profile: ServerProfile,
+        in recommended: [ServerProfile] = ServerProfile.recommended
+    ) -> ServerProfile? {
+        if let presetID = profile.presetID,
+           let preset = recommended.first(where: { $0.presetID == presetID }) {
+            return preset
+        }
+        // Migrate profiles saved before stable preset IDs existed. Hostname is
+        // also checked so a renamed built-in can still recover its identity.
+        return recommended.first {
+            $0.name.caseInsensitiveCompare(profile.name) == .orderedSame
+                || $0.hostname.caseInsensitiveCompare(profile.hostname) == .orderedSame
+        }
+    }
+}
+
+private struct FailableServerProfile: Decodable {
+    let profile: ServerProfile?
+
+    init(from decoder: Decoder) throws {
+        profile = try? ServerProfile(from: decoder)
+    }
+}
+
+private struct DecodedServerProfiles {
+    let profiles: [ServerProfile]
+    let droppedCount: Int
 }
 
 enum IRCServerOrdering {

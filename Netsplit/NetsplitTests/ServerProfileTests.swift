@@ -78,4 +78,120 @@ struct ServerProfileTests {
         #expect(ircnet?.port == 6697)
         #expect(ircnet?.useTLS == true)
     }
+
+    @Test("One invalid saved profile does not discard valid profiles")
+    func recoversValidProfilesAroundInvalidEntry() throws {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let originalData = Data(
+            """
+            [
+              {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "name": "First",
+                "hostname": "irc.first.example",
+                "port": 6697,
+                "useTLS": true
+              },
+              {
+                "id": "22222222-2222-2222-2222-222222222222",
+                "name": "Broken",
+                "hostname": "irc.broken.example",
+                "useTLS": true
+              },
+              {
+                "id": "33333333-3333-3333-3333-333333333333",
+                "name": "Third",
+                "hostname": "irc.third.example",
+                "port": 6667,
+                "useTLS": false
+              }
+            ]
+            """.utf8
+        )
+        defaults.set(originalData, forKey: ServerProfileStore.profilesKey)
+
+        let loaded = ServerProfileStore.load(from: defaults, recommended: [])
+        let persistedData = try #require(defaults.data(forKey: ServerProfileStore.profilesKey))
+        let persisted = try JSONDecoder().decode([ServerProfile].self, from: persistedData)
+
+        #expect(loaded.map(\.name) == ["First", "Third"])
+        #expect(persisted.map(\.name) == ["First", "Third"])
+        #expect(defaults.data(forKey: ServerProfileStore.decodeFailureBackupKey) == originalData)
+    }
+
+    @Test("Malformed profile storage is preserved instead of overwritten as first launch")
+    func preservesMalformedTopLevelData() {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let malformedData = Data(#"{"not":"an array"}"#.utf8)
+        defaults.set(malformedData, forKey: ServerProfileStore.profilesKey)
+
+        let loaded = ServerProfileStore.load(from: defaults)
+
+        #expect(loaded == ServerProfile.recommended)
+        #expect(defaults.data(forKey: ServerProfileStore.profilesKey) == malformedData)
+        #expect(defaults.data(forKey: ServerProfileStore.decodeFailureBackupKey) == malformedData)
+    }
+
+    @Test("New bundled presets are persisted with the UUID assigned on first load")
+    func persistsNewPresetIdentity() throws {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let existingID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let firstNewID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        let nextLaunchNewID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+        let existing = ServerProfile(
+            id: existingID,
+            name: "Existing",
+            hostname: "irc.existing.example",
+            port: 6697,
+            useTLS: true,
+            isBuiltIn: true,
+            presetID: "existing"
+        )
+        defaults.set(try JSONEncoder().encode([existing]), forKey: ServerProfileStore.profilesKey)
+
+        let firstLaunchRecommendations = [
+            existing,
+            ServerProfile(
+                id: firstNewID,
+                name: "New Network",
+                hostname: "irc.new.example",
+                port: 6697,
+                useTLS: true,
+                isBuiltIn: true,
+                presetID: "new-network"
+            )
+        ]
+        let firstLoad = ServerProfileStore.load(
+            from: defaults,
+            recommended: firstLaunchRecommendations
+        )
+        #expect(firstLoad.first { $0.presetID == "new-network" }?.id == firstNewID)
+
+        let nextLaunchRecommendations = [
+            existing,
+            ServerProfile(
+                id: nextLaunchNewID,
+                name: "New Network",
+                hostname: "irc.new.example",
+                port: 6697,
+                useTLS: true,
+                isBuiltIn: true,
+                presetID: "new-network"
+            )
+        ]
+        let secondLoad = ServerProfileStore.load(
+            from: defaults,
+            recommended: nextLaunchRecommendations
+        )
+
+        #expect(secondLoad.first { $0.presetID == "new-network" }?.id == firstNewID)
+    }
+
+    private func makeDefaults() -> (UserDefaults, String) {
+        let suiteName = "ServerProfileTests.\(UUID().uuidString)"
+        return (UserDefaults(suiteName: suiteName)!, suiteName)
+    }
 }
