@@ -161,7 +161,8 @@ struct IRCLineBufferOutput {
 struct IRCLineBuffer {
   private var buffer = Data()
   private let maximumLineBytes: Int
-  private static let delimiter = Data([13, 10])
+  private static let carriageReturn: UInt8 = 13
+  private static let lineFeed: UInt8 = 10
 
   init(maximumLineBytes: Int) {
     self.maximumLineBytes = maximumLineBytes
@@ -171,16 +172,26 @@ struct IRCLineBuffer {
     buffer.append(data)
     var output = IRCLineBufferOutput()
 
-    while let range = buffer.range(of: Self.delimiter) {
-      guard range.lowerBound <= maximumLineBytes else {
+    while let delimiterIndex = buffer.firstIndex(of: Self.lineFeed) {
+      var lineEnd = delimiterIndex
+      if lineEnd > buffer.startIndex {
+        let precedingIndex = buffer.index(before: lineEnd)
+        if buffer[precedingIndex] == Self.carriageReturn {
+          lineEnd = precedingIndex
+        }
+      }
+      let lineLength = buffer.distance(from: buffer.startIndex, to: lineEnd)
+      guard lineLength <= maximumLineBytes else {
         output.exceededMaximumLineLength = true
         return output
       }
-      output.lines.append(String(decoding: buffer[..<range.lowerBound], as: UTF8.self))
-      buffer.removeSubrange(..<range.upperBound)
+      output.lines.append(String(decoding: buffer[..<lineEnd], as: UTF8.self))
+      buffer.removeSubrange(...delimiterIndex)
     }
 
-    if buffer.count > maximumLineBytes {
+    let bufferedLineLength =
+      buffer.last == Self.carriageReturn ? buffer.count - 1 : buffer.count
+    if bufferedLineLength > maximumLineBytes {
       output.exceededMaximumLineLength = true
     }
     return output
@@ -207,6 +218,17 @@ enum IRCCapability {
   static func name(from advertisedValue: String) -> String {
     String(
       advertisedValue.drop(while: { $0 == "-" }).split(separator: "=", maxSplits: 1).first ?? "")
+  }
+
+  static func saslMechanisms(from advertisedValue: String) -> Set<String>? {
+    let normalizedValue = advertisedValue.drop(while: { $0 == "-" })
+    guard name(from: advertisedValue) == "sasl",
+      let separator = normalizedValue.firstIndex(of: "=")
+    else { return nil }
+    return Set(
+      normalizedValue[normalizedValue.index(after: separator)...]
+        .split(separator: ",")
+        .map { $0.uppercased() })
   }
 }
 
@@ -641,6 +663,10 @@ enum IRCCTCPEchoPolicy {
 }
 
 enum IRCSASL {
+  static func canUsePlain(advertisedMechanisms: Set<String>?) -> Bool {
+    advertisedMechanisms?.contains("PLAIN") ?? true
+  }
+
   static func plainAuthenticationChunks(username: String, password: String) -> [String] {
     let payload = Data(([0] + Array(username.utf8) + [0] + Array(password.utf8)))
       .base64EncodedString()

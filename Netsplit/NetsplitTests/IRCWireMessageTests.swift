@@ -29,6 +29,27 @@ struct IRCWireMessageTests {
         #expect(message.trailing == "token:with:colons")
     }
 
+    @Test("Drops a dangling tag escape and preserves unknown escaped characters")
+    func handlesEdgeCaseTagEscapes() throws {
+        let message = try #require(IRCWireMessage(
+            line: "@dangling=value\\;unknown=keep\\q PING :token"
+        ))
+
+        #expect(message.tags["dangling"] ?? nil == "value")
+        #expect(message.tags["unknown"] ?? nil == "keepq")
+    }
+
+    @Test("Recognizes both wire forms of a SASL continuation")
+    func recognizesSASLContinuations() throws {
+        let middle = try #require(IRCWireMessage(line: "AUTHENTICATE +"))
+        let trailing = try #require(IRCWireMessage(line: "AUTHENTICATE :+"))
+        let unrelated = try #require(IRCWireMessage(line: "PRIVMSG #swift :+"))
+
+        #expect(middle.isSASLContinuation)
+        #expect(trailing.isSASLContinuation)
+        #expect(!unrelated.isSASLContinuation)
+    }
+
     @Test("Normalizes commands and preserves ordinary parameters")
     func parsesCommandWithoutPrefix() throws {
         let message = try #require(IRCWireMessage(line: "mode #swift +ov Alice Bob"))

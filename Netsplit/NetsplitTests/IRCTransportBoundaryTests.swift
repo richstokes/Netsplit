@@ -26,6 +26,15 @@ struct IRCTransportBoundaryTests {
         #expect(second.lines == ["NOTICE nick :later"])
     }
 
+    @Test("Accepts bare LF delimiters and strips CR from standard delimiters")
+    func handlesBareAndStandardLineEndings() {
+        var buffer = IRCLineBuffer(maximumLineBytes: 510)
+        let output = buffer.append(Data("PING :bare\nNOTICE nick :standard\r\n".utf8))
+
+        #expect(output.lines == ["PING :bare", "NOTICE nick :standard"])
+        #expect(!output.exceededMaximumLineLength)
+    }
+
     @Test("Preserves empty protocol lines and replaces invalid UTF-8 bytes")
     func handlesEmptyAndLegacyEncodedLines() {
         var buffer = IRCLineBuffer(maximumLineBytes: 510)
@@ -44,6 +53,16 @@ struct IRCTransportBoundaryTests {
         var buffer = IRCLineBuffer(maximumLineBytes: 5)
         #expect(!buffer.append(Data("12345".utf8)).exceededMaximumLineLength)
         #expect(buffer.append(Data("6".utf8)).exceededMaximumLineLength)
+    }
+
+    @Test("Does not count a fragmented CRLF delimiter against the line limit")
+    func acceptsExactLimitBeforeFragmentedDelimiter() {
+        var buffer = IRCLineBuffer(maximumLineBytes: 5)
+        #expect(!buffer.append(Data("12345\r".utf8)).exceededMaximumLineLength)
+        let output = buffer.append(Data("\n".utf8))
+
+        #expect(output.lines == ["12345"])
+        #expect(!output.exceededMaximumLineLength)
     }
 
     @Test("Rejects an oversized terminated line without exposing it to the parser")

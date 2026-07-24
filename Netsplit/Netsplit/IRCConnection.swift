@@ -54,6 +54,12 @@ struct IRCWireMessage {
     var parameters: [String]
     var trailing: String?
 
+    var isSASLContinuation: Bool {
+        guard command == "AUTHENTICATE" else { return false }
+        return (parameters == ["+"] && trailing == nil)
+            || (parameters.isEmpty && trailing == "+")
+    }
+
     init?(line: String) {
         var remainder = line
         tags = [:]
@@ -114,7 +120,6 @@ struct IRCWireMessage {
                 result.append(character)
             }
         }
-        if escaped { result.append("\\") }
         return result
     }
 }
@@ -144,6 +149,7 @@ final class IRCConnection {
     private var hasReachedReadyState = false
     private var nickname = "netsplit"
     private var advertisedCapabilities = Set<String>()
+    private var advertisedSASLMechanisms: Set<String>?
     private var capabilityNegotiationEnded = false
     private var serverPassword: String?
     private var saslCredentials: (username: String, password: String)?
@@ -157,6 +163,7 @@ final class IRCConnection {
         disconnect()
         self.nickname = nickname
         advertisedCapabilities.removeAll()
+        advertisedSASLMechanisms = nil
         capabilityNegotiationEnded = false
         isWaitingForSASLResponse = false
         hasReportedFailure = false
@@ -638,15 +645,26 @@ final class IRCConnection {
         let subcommand = message.parameters[1].uppercased()
         switch subcommand {
         case "LS":
-            let capabilities = (message.trailing ?? "").split(separator: " ").map { IRCCapability.name(from: String($0)) }
-            advertisedCapabilities.formUnion(capabilities)
+            let advertisedValues = (message.trailing ?? "").split(separator: " ").map(String.init)
+            advertisedCapabilities.formUnion(
+                advertisedValues.map { IRCCapability.name(from: $0) }
+            )
+            for advertisedValue in advertisedValues {
+                guard let mechanisms = IRCCapability.saslMechanisms(from: advertisedValue) else {
+                    continue
+                }
+                advertisedSASLMechanisms = (advertisedSASLMechanisms ?? []).union(mechanisms)
+            }
             // An asterisk after LS signals a multi-line capability list.
             let hasMore = message.parameters.dropFirst(2).contains("*")
             guard !hasMore else { return }
             var supported = IRCCapability.preferred.filter { advertisedCapabilities.contains($0) }
             if saslCredentials != nil {
-                if advertisedCapabilities.contains("sasl") {
+                if advertisedCapabilities.contains("sasl"),
+                   IRCSASL.canUsePlain(advertisedMechanisms: advertisedSASLMechanisms) {
                     supported.append("sasl")
+                } else if advertisedCapabilities.contains("sasl") {
+                    eventHandler?(.notice("The server advertises SASL, but not the PLAIN mechanism required by this profile."))
                 } else {
                     eventHandler?(.notice("SASL is enabled for this profile, but the server does not advertise SASL."))
                 }
@@ -680,7 +698,7 @@ final class IRCConnection {
     }
 
     private func handleAuthenticationMessage(_ message: IRCWireMessage) {
-        guard message.parameters.first == "+", let credentials = saslCredentials, !isWaitingForSASLResponse else { return }
+        guard message.isSASLContinuation, let credentials = saslCredentials, !isWaitingForSASLResponse else { return }
         isWaitingForSASLResponse = true
         IRCSASL.plainAuthenticationChunks(username: credentials.username, password: credentials.password)
             .forEach { send(command: "AUTHENTICATE \($0)") }

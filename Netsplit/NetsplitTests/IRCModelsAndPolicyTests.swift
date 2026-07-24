@@ -579,6 +579,11 @@ struct IRCModelsAndPolicyTests {
     @Test("Normalizes capability modifiers and advertised values")
     func parsesCapabilityNames() {
         #expect(IRCCapability.name(from: "sasl=PLAIN,EXTERNAL") == "sasl")
+        #expect(IRCCapability.saslMechanisms(from: "sasl=PLAIN,EXTERNAL") == ["PLAIN", "EXTERNAL"])
+        #expect(IRCCapability.saslMechanisms(from: "sasl") == nil)
+        #expect(IRCSASL.canUsePlain(advertisedMechanisms: ["PLAIN", "EXTERNAL"]))
+        #expect(!IRCSASL.canUsePlain(advertisedMechanisms: ["EXTERNAL"]))
+        #expect(IRCSASL.canUsePlain(advertisedMechanisms: nil))
         #expect(IRCCapability.name(from: "-echo-message") == "echo-message")
         #expect(IRCCapability.name(from: "server-time") == "server-time")
         #expect(IRCCapability.preferred == [
