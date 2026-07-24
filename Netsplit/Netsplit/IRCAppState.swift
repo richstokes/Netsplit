@@ -222,7 +222,7 @@ final class IRCAppState: ObservableObject {
         mentionNotificationsEnabled = defaults.object(forKey: "mentionNotificationsEnabled") as? Bool ?? false
         applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
         messageSpacing = defaults.string(forKey: "messageSpacing").flatMap(IRCMessageSpacing.init(rawValue:)) ?? .comfortable
-        chatFont = defaults.string(forKey: "chatFont").flatMap(IRCChatFont.init(rawValue:)) ?? .system
+        chatFont = defaults.string(forKey: "chatFont").flatMap(IRCChatFont.init(rawValue:)) ?? .default
         usesColoredNicknames = defaults.object(forKey: "usesColoredNicknames") as? Bool ?? false
         usesMonospacedServerMessages = defaults.object(forKey: "usesMonospacedServerMessages") as? Bool ?? true
         rendersIRCFormatting = defaults.object(forKey: "rendersIRCFormatting") as? Bool ?? false

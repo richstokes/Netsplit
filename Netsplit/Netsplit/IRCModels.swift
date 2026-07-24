@@ -58,6 +58,8 @@ enum IRCChatFont: String, CaseIterable, Identifiable {
     case rounded
     case monospaced
 
+    static let `default`: IRCChatFont = .monospaced
+
     var id: Self { self }
 
     var label: String {

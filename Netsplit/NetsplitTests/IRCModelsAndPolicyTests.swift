@@ -893,9 +893,10 @@ struct IRCModelsAndPolicyTests {
         ) == CGSize(width: 300, height: 150))
     }
 
-    @Test("Chat typography keeps the system face as the first default choice")
+    @Test("Chat typography defaults to SF Mono")
     func exposesChatFonts() {
         #expect(IRCChatFont.allCases == [.system, .rounded, .monospaced])
+        #expect(IRCChatFont.default == .monospaced)
         #expect(IRCChatFont.system.label == "System (SF Pro)")
         #expect(IRCChatFont.monospaced.label == "SF Mono")
     }
