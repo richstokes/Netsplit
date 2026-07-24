@@ -1107,20 +1107,29 @@ private struct ConversationTranscript: View {
                 Color.clear
                     .frame(height: textMetrics.spacing(18))
                     .id(ScrollTarget.tail)
+                    // Keep initial positioning independent of message IDs so a
+                    // burst cannot cancel it before the first layout completes.
+                    .task(id: messages.isEmpty) {
+                        guard !messages.isEmpty, !hasPositionedInitialMessages else { return }
+                        await Task.yield()
+                        guard !Task.isCancelled else { return }
+
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
+                        }
+                        hasPositionedInitialMessages = true
+                    }
             }
             .accessibilityAddTraits(.updatesFrequently)
             .defaultScrollAnchor(.bottom)
             .ircCustomWindowBackground()
             .accessibilityLabel("Conversation messages")
             .task(id: lastMessageID) {
-                guard lastMessageID != nil else { return }
-                guard hasPositionedInitialMessages else {
-                    hasPositionedInitialMessages = true
-                    await Task.yield()
-                    scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
-                    return
-                }
-                guard isFollowingTail else { return }
+                guard lastMessageID != nil,
+                      hasPositionedInitialMessages,
+                      isFollowingTail else { return }
 
                 // Collapse bursts into one tail update after traffic briefly settles.
                 // This avoids overlapping animations and repeated lazy-stack ID scans.
