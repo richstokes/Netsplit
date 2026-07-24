@@ -6,6 +6,10 @@ I couldn't find a macOS client that I liked, so I built this one.
 
 [<img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83" alt="Download Netsplit on the App Store" height="50">](https://apps.apple.com/us/app/netsplit/id6792029007)
 
+<p align="center">
+  <img src="docs/screenshots/netsplit-dark.png" alt="Netsplit using the dark theme" width="900">
+</p>
+
 It's 100% free and open source. Contributions welcome, throw up a PR (assuming it broadly aligns with the goals below). If changing something graphical, include a screenshot showing what the change is/does. Similarly, feel free to open an issue here for bug reports/feature requests.
 
 If you enjoy using Netsplit and want to show your appreciation, [feel free to buy me a coffee](https://buymeacoffee.com/richstokes)!
