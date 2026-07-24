@@ -172,6 +172,81 @@ struct IRCModelsAndPolicyTests {
         #expect(!IRCSystemSleepPolicy.shouldRestoreConnection(status: .offline, reconnectWasScheduled: false))
     }
 
+    @Test("System sleep state coalesces duplicate notifications and honors manual removal")
+    func coalescesSystemSleepTransitions() throws {
+        let firstServerID = UUID()
+        let secondServerID = UUID()
+        var state = IRCSystemSleepStateMachine()
+
+        let firstSleepResult = state.beginSleep(
+            restoring: [firstServerID, secondServerID]
+        )
+        let firstSleep = try #require(firstSleepResult)
+        #expect(firstSleep == [firstServerID, secondServerID])
+        #expect(state.isSleeping)
+        let duplicateSleep = state.beginSleep(restoring: [firstServerID])
+        #expect(duplicateSleep == nil)
+
+        state.remove(firstServerID)
+        let firstWakeResult = state.beginWake()
+        let firstWake = try #require(firstWakeResult)
+        #expect(firstWake == [secondServerID])
+        #expect(!state.isSleeping)
+        let duplicateWake = state.beginWake()
+        #expect(duplicateWake == nil)
+
+        let secondSleep = state.beginSleep(restoring: [firstServerID])
+        #expect(secondSleep == [firstServerID])
+        let secondWake = state.beginWake()
+        #expect(secondWake == [firstServerID])
+    }
+
+    @Test("Wake recovery probes registered transports and waits out temporary path loss")
+    func choosesWakeRecoveryActions() {
+        #expect(IRCConnectionRecoveryPolicy.wakeAction(
+            hasTransport: true,
+            hasReportedFailure: false,
+            hasCompletedRegistration: true,
+            hasReachedReadyState: true,
+            isViable: true
+        ) == .probeEstablishedConnection)
+        #expect(IRCConnectionRecoveryPolicy.wakeAction(
+            hasTransport: true,
+            hasReportedFailure: false,
+            hasCompletedRegistration: true,
+            hasReachedReadyState: true,
+            isViable: false
+        ) == .waitForViability)
+        #expect(IRCConnectionRecoveryPolicy.wakeAction(
+            hasTransport: true,
+            hasReportedFailure: false,
+            hasCompletedRegistration: false,
+            hasReachedReadyState: true,
+            isViable: nil
+        ) == .resumeRegistrationTimeout)
+        #expect(IRCConnectionRecoveryPolicy.wakeAction(
+            hasTransport: true,
+            hasReportedFailure: false,
+            hasCompletedRegistration: false,
+            hasReachedReadyState: false,
+            isViable: nil
+        ) == .resumeConnectionTimeout)
+        #expect(IRCConnectionRecoveryPolicy.wakeAction(
+            hasTransport: true,
+            hasReportedFailure: true,
+            hasCompletedRegistration: true,
+            hasReachedReadyState: true,
+            isViable: true
+        ) == .none)
+        #expect(IRCConnectionRecoveryPolicy.wakeAction(
+            hasTransport: false,
+            hasReportedFailure: false,
+            hasCompletedRegistration: true,
+            hasReachedReadyState: true,
+            isViable: true
+        ) == .none)
+    }
+
     @Test("Nickname validation accepts IRC-safe names and rejects malformed identities")
     func validatesNicknames() {
         for nickname in ["Netsplit_User", "[Netsplit]", "rich-stokes", "Ålice42"] {
@@ -618,6 +693,24 @@ struct IRCModelsAndPolicyTests {
             IRCReconnectPolicy.delay(attempt: $0, initialDelay: 2, maximumDelay: 60)
         }
         #expect(delays == [0, 2, 4, 8, 16, 32, 60, 60, 60])
+    }
+
+    @Test("Reconnect jitter staggers retries without exceeding the backoff")
+    func jittersReconnectDelay() {
+        #expect(IRCReconnectPolicy.jitteredDelay(baseDelay: 60, randomUnit: 0) == 45)
+        #expect(IRCReconnectPolicy.jitteredDelay(baseDelay: 60, randomUnit: 0.5) == 52.5)
+        #expect(IRCReconnectPolicy.jitteredDelay(baseDelay: 60, randomUnit: 1) == 60)
+        #expect(IRCReconnectPolicy.jitteredDelay(baseDelay: 60, randomUnit: -1) == 45)
+        #expect(IRCReconnectPolicy.jitteredDelay(baseDelay: 60, randomUnit: 2) == 60)
+        #expect(IRCReconnectPolicy.jitteredDelay(baseDelay: 0, randomUnit: 0.5) == 0)
+    }
+
+    @Test("Sleep resumes the pending reconnect attempt without resetting backoff")
+    func preservesReconnectAttemptAcrossSleep() {
+        #expect(IRCReconnectPolicy.attempt(after: 0, reusingCurrent: false) == 1)
+        #expect(IRCReconnectPolicy.attempt(after: 4, reusingCurrent: false) == 5)
+        #expect(IRCReconnectPolicy.attempt(after: 4, reusingCurrent: true) == 4)
+        #expect(IRCReconnectPolicy.attempt(after: 0, reusingCurrent: true) == 1)
     }
 
     @Test("Channel event visibility treats 100 members as busy")
@@ -1348,13 +1441,19 @@ struct IRCModelsAndPolicyTests {
         }
         #expect(signal.revision == 1)
 
-        try await Task.sleep(for: .milliseconds(100))
+        var deadline = ContinuousClock().now.advanced(by: .seconds(1))
+        while signal.revision != 2, ContinuousClock().now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(signal.revision == 2)
 
         signal.advance()
         #expect(signal.revision == 2)
 
-        try await Task.sleep(for: .milliseconds(100))
+        deadline = ContinuousClock().now.advanced(by: .seconds(1))
+        while signal.revision != 3, ContinuousClock().now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(signal.revision == 3)
 
         try await Task.sleep(for: .milliseconds(80))

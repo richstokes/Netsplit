@@ -88,6 +88,70 @@ enum IRCSystemSleepPolicy {
   }
 }
 
+struct IRCSystemSleepStateMachine {
+  private(set) var isSleeping = false
+  private(set) var serverIDsToRestore = Set<UUID>()
+
+  mutating func beginSleep(restoring serverIDs: Set<UUID>) -> Set<UUID>? {
+    guard !isSleeping else { return nil }
+    isSleeping = true
+    serverIDsToRestore.formUnion(serverIDs)
+    return serverIDs
+  }
+
+  mutating func beginWake() -> Set<UUID>? {
+    guard isSleeping else { return nil }
+    isSleeping = false
+    let serverIDs = serverIDsToRestore
+    serverIDsToRestore.removeAll()
+    return serverIDs
+  }
+
+  mutating func remove(_ serverID: UUID) {
+    serverIDsToRestore.remove(serverID)
+  }
+}
+
+enum IRCWakeRecoveryAction: Equatable {
+  case none
+  case waitForViability
+  case probeEstablishedConnection
+  case resumeRegistrationTimeout
+  case resumeConnectionTimeout
+}
+
+enum IRCConnectionRecoveryPolicy {
+  static func wakeAction(
+    hasTransport: Bool,
+    hasReportedFailure: Bool,
+    hasCompletedRegistration: Bool,
+    hasReachedReadyState: Bool,
+    isViable: Bool?
+  ) -> IRCWakeRecoveryAction {
+    guard hasTransport, !hasReportedFailure else { return .none }
+    if hasCompletedRegistration {
+      return isViable == false ? .waitForViability : .probeEstablishedConnection
+    }
+    return hasReachedReadyState ? .resumeRegistrationTimeout : .resumeConnectionTimeout
+  }
+}
+
+enum IRCReconnectReason: String, Equatable {
+  case connectionStatus
+  case connectionState
+  case connectionTimeout
+  case heartbeatTimeout
+  case malformedInput
+  case networkViability
+  case receiveError
+  case registrationTimeout
+  case remoteClose
+  case sendError
+  case serverError
+  case sshTransport
+  case wakeProbeTimeout
+}
+
 struct IRCOneOffServerEndpoint: Equatable {
   var hostname: String
   var port: UInt16
@@ -820,11 +884,26 @@ enum IRCChannelModeParser {
 }
 
 enum IRCReconnectPolicy {
+  static func attempt(after currentAttempt: Int, reusingCurrent: Bool) -> Int {
+    reusingCurrent ? max(currentAttempt, 1) : max(currentAttempt, 0) + 1
+  }
+
   static func delay(attempt: Int, initialDelay: TimeInterval, maximumDelay: TimeInterval)
     -> TimeInterval
   {
     guard attempt > 0 else { return 0 }
     return min(initialDelay * pow(2, Double(attempt - 1)), maximumDelay)
+  }
+
+  static func jitteredDelay(
+    baseDelay: TimeInterval,
+    randomUnit: Double,
+    minimumMultiplier: Double = 0.75
+  ) -> TimeInterval {
+    guard baseDelay > 0 else { return 0 }
+    let unit = min(max(randomUnit, 0), 1)
+    let lowerBound = min(max(minimumMultiplier, 0), 1)
+    return baseDelay * (lowerBound + ((1 - lowerBound) * unit))
   }
 }
 

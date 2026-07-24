@@ -6,6 +6,7 @@
 import AppKit
 import Combine
 import Foundation
+import OSLog
 import UserNotifications
 
 @MainActor
@@ -56,6 +57,11 @@ final class IRCRevisionSignal: ObservableObject {
 
 @MainActor
 final class IRCAppState: ObservableObject {
+    private struct ScheduledReconnect {
+        let requestID: UUID
+        let reason: IRCReconnectReason
+    }
+
     @Published private(set) var profiles: [ServerProfile]
     @Published var nickname: String {
         didSet { UserDefaults.standard.set(nickname, forKey: "nickname") }
@@ -175,7 +181,7 @@ final class IRCAppState: ObservableObject {
     private var channelListCompletionDates: [UUID: Date] = [:]
     private var channelListRequestIDs: [UUID: UUID] = [:]
     private var reconnectAttempts: [UUID: Int] = [:]
-    private var scheduledReconnects: [UUID: UUID] = [:]
+    private var scheduledReconnects: [UUID: ScheduledReconnect] = [:]
     private var registrationNicknameSuffixes: [UUID: Set<Int>] = [:]
     private var serverFeatures: [UUID: IRCServerFeatures] = [:]
     private var pendingChannelBanLists: [UUID: [IRCBanEntry]] = [:]
@@ -193,17 +199,23 @@ final class IRCAppState: ObservableObject {
     private let automaticJoinCompletionTimeout: TimeInterval = 20
     private let initialReconnectDelay: TimeInterval = 2
     private let maximumReconnectDelay: TimeInterval = 60
+    private let wakeRecoveryStagger: TimeInterval = 0.2
     private static let defaultQuitMessage = "Closing macOS client"
     private var hasStartedLaunchConnections = false
-    private var isSystemSleeping = false
-    private var systemSleepServerIDs = Set<UUID>()
-    private var systemWakeGeneration: UUID?
+    private var systemSleepState = IRCSystemSleepStateMachine()
+    private var sleepPausedReconnectReasons: [UUID: IRCReconnectReason] = [:]
+    private var pendingWakeRestoreServerIDs = Set<UUID>()
+    private var wakeRestoreGeneration: UUID?
     private var backSelectionHistory: [SidebarItem] = []
     private var forwardSelectionHistory: [SidebarItem] = []
     private var isNavigatingSelectionHistory = false
     private let maximumSelectionHistoryCount = 100
     private var lastConversationSelectionByServerID: [UUID: SidebarItem] = [:]
     private var pendingMentionNotificationDestination: IRCMentionNotificationDestination?
+    private static let connectionLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Netsplit",
+        category: "ConnectionRecovery"
+    )
 
     init() {
         let defaults = UserDefaults.standard
@@ -465,6 +477,7 @@ final class IRCAppState: ObservableObject {
 
     func isWaitingToReconnect(_ profile: ServerProfile) -> Bool {
         scheduledReconnects[profile.id] != nil
+            || sleepPausedReconnectReasons[profile.id] != nil
     }
 
     func isActive(_ profile: ServerProfile) -> Bool {
@@ -719,58 +732,73 @@ final class IRCAppState: ObservableObject {
         selection = originalSelection
     }
 
-    /// A sleeping Mac can retain sockets that look active locally even though
-    /// their remote TCP/SSH state has expired. Close them before networking is
-    /// frozen, then recreate only the sessions that were active after wake.
+    /// Preserve established transports through sleep, but pause app-level
+    /// watchdogs and reconnect work until the system is fully awake. On wake,
+    /// each established session is validated with a staggered IRC heartbeat.
     func systemWillSleep() {
-        guard !isSystemSleeping else { return }
-        isSystemSleeping = true
-        systemWakeGeneration = nil
-
         let reconnectingServerIDs = Set(scheduledReconnects.keys)
         let serverIDsToRestore = Set(connections.keys.filter { serverID in
             IRCSystemSleepPolicy.shouldRestoreConnection(
                 status: connectionStatuses[serverID] ?? .offline,
                 reconnectWasScheduled: reconnectingServerIDs.contains(serverID)
             )
-        })
-        systemSleepServerIDs.formUnion(serverIDsToRestore)
+        }).union(pendingWakeRestoreServerIDs)
+        guard systemSleepState.beginSleep(restoring: serverIDsToRestore) != nil else { return }
 
-        for serverID in serverIDsToRestore {
-            cancelScheduledReconnect(for: serverID, resetAttempts: true)
-            let transport = connections.removeValue(forKey: serverID)
-            sessionIDs.removeValue(forKey: serverID)
-            sessionOnConnectCommands.removeValue(forKey: serverID)
-            sessionPendingAutomaticJoins.removeValue(forKey: serverID)
-            activeNicknames.removeValue(forKey: serverID)
-            registeredServerIDs.remove(serverID)
-            terminalServerErrors.removeValue(forKey: serverID)
-            registrationNicknameSuffixes.removeValue(forKey: serverID)
-            connectionStatuses[serverID] = .offline
-            prepareChannelsForDisconnectedSession(for: serverID)
-            resetChannelListingRequest(for: serverID)
-            transport?.disconnect()
+        wakeRestoreGeneration = nil
+        pendingWakeRestoreServerIDs.removeAll()
+        for (serverID, request) in scheduledReconnects {
+            // Invalidates the already-enqueued closure without resetting the
+            // attempt count. The same attempt resumes after wake.
+            sleepPausedReconnectReasons[serverID] = request.reason
         }
+        scheduledReconnects.removeAll()
+        for serverID in serverIDsToRestore {
+            connections[serverID]?.systemWillSleep()
+        }
+        Self.connectionLogger.info(
+            "System sleep paused sessions=\(serverIDsToRestore.count, privacy: .public) reconnects=\(reconnectingServerIDs.count, privacy: .public)"
+        )
     }
 
     func systemDidWake() {
-        guard isSystemSleeping else { return }
-        isSystemSleeping = false
+        guard let serverIDsToRestore = systemSleepState.beginWake() else { return }
+        let wakeGeneration = UUID()
+        wakeRestoreGeneration = wakeGeneration
+        let profilesToRestore = profiles
+            .filter { serverIDsToRestore.contains($0.id) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
-        let generation = UUID()
-        systemWakeGeneration = generation
-        let serverIDsToRestore = systemSleepServerIDs
-
-        // Give Wi-Fi and DNS a short opportunity to become usable. Normal
-        // reconnect backoff remains in force if the path needs longer.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self,
-                  !self.isSystemSleeping,
-                  self.systemWakeGeneration == generation else { return }
-            self.systemWakeGeneration = nil
-            for profile in self.profiles where serverIDsToRestore.contains(profile.id) {
-                guard self.systemSleepServerIDs.remove(profile.id) != nil else { continue }
-                self.connect(profile, selectConversation: false)
+        Self.connectionLogger.info(
+            "System wake resuming sessions=\(profilesToRestore.count, privacy: .public)"
+        )
+        for (index, profile) in profilesToRestore.enumerated() {
+            if let reason = sleepPausedReconnectReasons.removeValue(forKey: profile.id) {
+                scheduleReconnect(
+                    for: profile,
+                    reason: reason,
+                    reuseCurrentAttempt: true
+                )
+            } else if let transport = connections[profile.id] {
+                transport.systemDidWake(after: Double(index) * wakeRecoveryStagger)
+            } else {
+                // A desired session should normally retain its transport. If a
+                // framework callback removed it while sleeping, restore it with
+                // the same stagger used for wake probes.
+                let delay = Double(index) * wakeRecoveryStagger
+                pendingWakeRestoreServerIDs.insert(profile.id)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self,
+                          self.wakeRestoreGeneration == wakeGeneration,
+                          !self.systemSleepState.isSleeping,
+                          self.pendingWakeRestoreServerIDs.remove(profile.id) != nil,
+                          self.connections[profile.id] == nil,
+                          self.profiles.contains(where: { $0.id == profile.id }) else { return }
+                    Self.connectionLogger.info(
+                        "Restoring missing transport after wake server=\(profile.name, privacy: .public)"
+                    )
+                    self.connect(profile, selectConversation: false)
+                }
             }
         }
     }
@@ -853,7 +881,8 @@ final class IRCAppState: ObservableObject {
     }
 
     func disconnect(_ profile: ServerProfile, reason: String? = nil) {
-        systemSleepServerIDs.remove(profile.id)
+        systemSleepState.remove(profile.id)
+        pendingWakeRestoreServerIDs.remove(profile.id)
         cancelScheduledReconnect(for: profile.id, resetAttempts: true)
         resetChannelListingRequest(for: profile.id)
         prepareChannelsForDisconnectedSession(for: profile.id)
@@ -893,6 +922,9 @@ final class IRCAppState: ObservableObject {
         }
 
         cancelAllScheduledReconnects()
+        systemSleepState = IRCSystemSleepStateMachine()
+        wakeRestoreGeneration = nil
+        pendingWakeRestoreServerIDs.removeAll()
         connections.removeAll()
         sessionIDs.removeAll()
         sessionOnConnectCommands.removeAll()
@@ -2005,14 +2037,25 @@ final class IRCAppState: ObservableObject {
             switch status {
             case .failed(let message):
                 appendSystem(message, for: .server(profile.id))
-                scheduleReconnect(for: profile)
+                scheduleReconnect(for: profile, reason: .connectionStatus)
             case .offline:
                 appendSystem("Connection closed.", for: .server(profile.id))
-                scheduleReconnect(for: profile)
+                scheduleReconnect(for: profile, reason: .connectionStatus)
             case .connecting, .online:
                 break
             }
         case .notice(let text): appendSystem(text, for: .server(profile.id))
+        case .recoverableFailure(let message, let reason):
+            // IRC ERROR already records the server-provided explanation and
+            // schedules recovery. Suppress the transport's follow-on close so
+            // the same disconnect is not presented twice.
+            guard terminalServerErrors[profile.id] == nil else { return }
+            registeredServerIDs.remove(profile.id)
+            prepareChannelsForDisconnectedSession(for: profile.id)
+            resetChannelListingRequest(for: profile.id)
+            connectionStatuses[profile.id] = .failed(message)
+            appendSystem(message, for: .server(profile.id))
+            scheduleReconnect(for: profile, reason: reason)
         case .terminalFailure(let message):
             registeredServerIDs.remove(profile.id)
             prepareChannelsForDisconnectedSession(for: profile.id)
@@ -2337,7 +2380,7 @@ final class IRCAppState: ObservableObject {
             registeredServerIDs.remove(profile.id)
             prepareChannelsForDisconnectedSession(for: profile.id)
             resetChannelListingRequest(for: profile.id)
-            scheduleReconnect(for: profile)
+            scheduleReconnect(for: profile, reason: .serverError)
         case "322":
             guard wire.parameters.count >= 3, let users = Int(wire.parameters[2]) else { return }
             let listing = ChannelListing(name: wire.parameters[1], userCount: users, topic: wire.trailing ?? "")
@@ -3545,29 +3588,65 @@ final class IRCAppState: ObservableObject {
         }
     }
 
-    private func scheduleReconnect(for profile: ServerProfile) {
+    private func scheduleReconnect(
+        for profile: ServerProfile,
+        reason: IRCReconnectReason,
+        reuseCurrentAttempt: Bool = false
+    ) {
         guard reconnectAutomatically,
               connections[profile.id] != nil,
-              scheduledReconnects[profile.id] == nil else { return }
+              scheduledReconnects[profile.id] == nil,
+              sleepPausedReconnectReasons[profile.id] == nil else { return }
 
-        let attempt = reconnectAttempts[profile.id, default: 0] + 1
+        let attempt = IRCReconnectPolicy.attempt(
+            after: reconnectAttempts[profile.id, default: 0],
+            reusingCurrent: reuseCurrentAttempt
+        )
         reconnectAttempts[profile.id] = attempt
-        let delay = IRCReconnectPolicy.delay(
+        if systemSleepState.isSleeping {
+            sleepPausedReconnectReasons[profile.id] = reason
+            Self.connectionLogger.info(
+                "Reconnect paused until wake server=\(profile.name, privacy: .public) reason=\(reason.rawValue, privacy: .public) attempt=\(attempt, privacy: .public)"
+            )
+            appendSystem(
+                "Connection lost. Reconnect attempt \(attempt) will resume after system wake.",
+                for: .server(profile.id)
+            )
+            return
+        }
+
+        let baseDelay = IRCReconnectPolicy.delay(
             attempt: attempt,
             initialDelay: initialReconnectDelay,
             maximumDelay: maximumReconnectDelay
         )
+        let delay = IRCReconnectPolicy.jitteredDelay(
+            baseDelay: baseDelay,
+            randomUnit: Double.random(in: 0...1)
+        )
         let requestID = UUID()
-        scheduledReconnects[profile.id] = requestID
-        appendSystem("Connection lost. Reconnecting in \(Int(delay)) seconds (attempt \(attempt))…", for: .server(profile.id))
+        scheduledReconnects[profile.id] = ScheduledReconnect(
+            requestID: requestID,
+            reason: reason
+        )
+        Self.connectionLogger.info(
+            "Reconnect scheduled server=\(profile.name, privacy: .public) reason=\(reason.rawValue, privacy: .public) attempt=\(attempt, privacy: .public) delay=\(delay, privacy: .public)"
+        )
+        appendSystem(
+            "Connection lost. Reconnecting in \(Int(ceil(delay))) seconds (attempt \(attempt))…",
+            for: .server(profile.id)
+        )
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self,
                   self.reconnectAutomatically,
-                  self.scheduledReconnects[profile.id] == requestID,
+                  self.scheduledReconnects[profile.id]?.requestID == requestID,
                   let activeProfile = self.profiles.first(where: { $0.id == profile.id }),
                   let failedTransport = self.connections.removeValue(forKey: profile.id) else { return }
             self.scheduledReconnects.removeValue(forKey: profile.id)
+            Self.connectionLogger.info(
+                "Reconnect starting server=\(activeProfile.name, privacy: .public) reason=\(reason.rawValue, privacy: .public) attempt=\(attempt, privacy: .public)"
+            )
             self.sessionIDs.removeValue(forKey: profile.id)
             self.sessionOnConnectCommands.removeValue(forKey: profile.id)
             self.sessionPendingAutomaticJoins.removeValue(forKey: profile.id)
@@ -3581,11 +3660,13 @@ final class IRCAppState: ObservableObject {
 
     private func cancelScheduledReconnect(for serverID: UUID, resetAttempts: Bool) {
         scheduledReconnects.removeValue(forKey: serverID)
+        sleepPausedReconnectReasons.removeValue(forKey: serverID)
         if resetAttempts { reconnectAttempts.removeValue(forKey: serverID) }
     }
 
     private func cancelAllScheduledReconnects() {
         scheduledReconnects.removeAll()
+        sleepPausedReconnectReasons.removeAll()
         reconnectAttempts.removeAll()
     }
 

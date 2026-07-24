@@ -967,7 +967,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("Reconnect automatically", isOn: $state.reconnectAutomatically)
-                Text("After an unexpected disconnect, Netsplit retries after 2, 4, 8 seconds and so on, up to once per minute.")
+                Text("After an unexpected disconnect, Netsplit retries with increasing delays and slight random variation, capped at one minute.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("Netsplit requests standard IRCv3 capabilities when supported by the server, including server timestamps and message tags.")

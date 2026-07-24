@@ -5,9 +5,11 @@
 
 import Foundation
 import Network
+import OSLog
 
 enum IRCTransportEvent {
     case status(ConnectionStatus)
+    case recoverableFailure(String, IRCReconnectReason)
     case terminalFailure(String)
     case received(IRCWireMessage)
     case notice(String)
@@ -129,6 +131,7 @@ final class IRCConnection {
     private static let maximumBufferedLineBytes = 64 * 1024
     private static let heartbeatInterval: TimeInterval = 30
     private static let heartbeatTimeout: TimeInterval = 15
+    private static let viabilityGraceDuration: TimeInterval = 5
     // Network.framework or the SSH transport can remain in setup without
     // delivering a terminal state (for example, when TLS trust evaluation
     // stalls). Cover the entire DNS/TCP/SSH/TLS setup phase with a bound.
@@ -145,8 +148,16 @@ final class IRCConnection {
     private var connectionTimeoutGeneration: UUID?
     private var lastConnectionAttemptError: String?
     private var registrationTimeoutGeneration: UUID?
+    private var viabilityFailureGeneration: UUID?
+    private var wakeRecoveryGeneration: UUID?
     private var hasReportedFailure = false
     private var hasReachedReadyState = false
+    private var hasCompletedRegistration = false
+    private var isSystemSleeping = false
+    private var isAwaitingWakeRecovery = false
+    private var isConnectionViable: Bool?
+    private var heartbeatIsWakeProbe = false
+    private var diagnosticEndpoint = "unknown"
     private var nickname = "netsplit"
     private var advertisedCapabilities = Set<String>()
     private var advertisedSASLMechanisms: Set<String>?
@@ -159,9 +170,14 @@ final class IRCConnection {
     private var quitTimeoutGeneration: UUID?
     private var quitCompletion: (@MainActor () -> Void)?
     var eventHandler: (@MainActor (IRCTransportEvent) -> Void)?
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Netsplit",
+        category: "IRCConnection"
+    )
 
     func connect(profile: ServerProfile, nickname: String, realName: String, serverPassword: String, saslUsername: String?, saslPassword: String, sshPassword: String, sshPrivateKey: String) {
         disconnect()
+        diagnosticEndpoint = "\(profile.hostname):\(profile.port)"
         self.nickname = nickname
         advertisedCapabilities.removeAll()
         advertisedSASLMechanisms = nil
@@ -170,6 +186,11 @@ final class IRCConnection {
         isWaitingForSASLResponse = false
         hasReportedFailure = false
         hasReachedReadyState = false
+        hasCompletedRegistration = false
+        isSystemSleeping = false
+        isAwaitingWakeRecovery = false
+        isConnectionViable = nil
+        heartbeatIsWakeProbe = false
         guard IRCIdentityValidation.isValidNickname(nickname) else {
             eventHandler?(.terminalFailure(IRCIdentityValidation.nicknameError(nickname) ?? "The configured nickname is invalid."))
             return
@@ -239,11 +260,16 @@ final class IRCConnection {
                         let preventsReconnect = (error as? SSHTunnelError)?.preventsAutomaticReconnect == true
                         self.reportFailure(
                             "SSH tunnel failed: \(error.localizedDescription)",
+                            reason: .sshTransport,
                             cancelling: false,
                             automaticallyReconnect: !preventsReconnect
                         )
                     } else if !self.hasReportedFailure {
-                        self.eventHandler?(.status(.offline))
+                        self.reportFailure(
+                            "SSH tunnel closed.",
+                            reason: .remoteClose,
+                            cancelling: false
+                        )
                     }
                 },
                 onHostKeyLearned: { [weak self, weak tunnel] key in
@@ -268,7 +294,7 @@ final class IRCConnection {
             parameters = NWParameters(tls: nil, tcp: tcp)
         }
         guard let port = NWEndpoint.Port(rawValue: profile.port) else {
-            eventHandler?(.status(.failed("Invalid port")))
+            eventHandler?(.terminalFailure("Invalid port"))
             return
         }
         let connection = NWConnection(host: NWEndpoint.Host(profile.hostname), port: port, using: parameters)
@@ -285,21 +311,34 @@ final class IRCConnection {
                     self.lastConnectionAttemptError = error.localizedDescription
                     self.eventHandler?(.status(.connecting))
                 case .ready:
+                    let isInitialReadyState = !self.hasReachedReadyState
                     self.hasReachedReadyState = true
                     self.stopConnectionTimeout()
                     self.eventHandler?(.status(.online))
-                    self.register(nickname: nickname, realName: realName)
-                    self.startRegistrationTimeout()
-                    self.receiveNext(on: connection)
+                    if isInitialReadyState {
+                        self.register(nickname: nickname, realName: realName)
+                        self.startRegistrationTimeout()
+                        self.receiveNext(on: connection)
+                    }
                 case .failed(let error):
                     if !self.handleQuitEvent(.peerClosed) {
-                        self.reportFailure(error.localizedDescription, cancelling: false)
+                        self.reportFailure(
+                            error.localizedDescription,
+                            reason: .connectionState,
+                            cancelling: false
+                        )
                     }
                 case .cancelled:
                     self.stopHeartbeat()
                     if !self.handleQuitEvent(.peerClosed) {
                         self.connection = nil
-                        if !self.hasReportedFailure { self.eventHandler?(.status(.offline)) }
+                        if !self.hasReportedFailure {
+                            self.reportFailure(
+                                "The network connection was cancelled.",
+                                reason: .connectionState,
+                                cancelling: false
+                            )
+                        }
                     }
                 default: break
                 }
@@ -309,10 +348,8 @@ final class IRCConnection {
             Task { @MainActor [weak self, weak connection] in
                 guard let self,
                       let connection,
-                      self.connection === connection,
-                      self.hasReachedReadyState,
-                      !isViable else { return }
-                self.reportFailure("The network path became unavailable.")
+                      self.connection === connection else { return }
+                self.handleViabilityChange(isViable)
             }
         }
         eventHandler?(.status(.connecting))
@@ -328,7 +365,115 @@ final class IRCConnection {
         closeTransport()
     }
 
+    func systemWillSleep() {
+        guard !isSystemSleeping else { return }
+        isSystemSleeping = true
+        isAwaitingWakeRecovery = false
+        wakeRecoveryGeneration = nil
+        viabilityFailureGeneration = nil
+        stopHeartbeat()
+        stopConnectionTimeout()
+        stopRegistrationTimeout()
+        Self.logger.info(
+            "Paused connection watchdogs before sleep endpoint=\(self.diagnosticEndpoint, privacy: .public)"
+        )
+    }
+
+    func systemDidWake(after delay: TimeInterval = 0) {
+        guard isSystemSleeping else { return }
+        isSystemSleeping = false
+        isAwaitingWakeRecovery = true
+        let generation = UUID()
+        wakeRecoveryGeneration = generation
+
+        let recover: @MainActor @Sendable () -> Void = { [weak self] in
+            guard let self,
+                  self.wakeRecoveryGeneration == generation,
+                  !self.isSystemSleeping else { return }
+            self.wakeRecoveryGeneration = nil
+            self.resumeAfterWake()
+        }
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: recover)
+        } else {
+            recover()
+        }
+    }
+
+    private func resumeAfterWake() {
+        let action = IRCConnectionRecoveryPolicy.wakeAction(
+            hasTransport: connection != nil || sshTunnel != nil,
+            hasReportedFailure: hasReportedFailure,
+            hasCompletedRegistration: hasCompletedRegistration,
+            hasReachedReadyState: hasReachedReadyState,
+            isViable: isConnectionViable
+        )
+        Self.logger.info(
+            "Resuming after wake endpoint=\(self.diagnosticEndpoint, privacy: .public) action=\(String(describing: action), privacy: .public)"
+        )
+
+        switch action {
+        case .none:
+            isAwaitingWakeRecovery = false
+        case .waitForViability:
+            scheduleViabilityFailure()
+        case .probeEstablishedConnection:
+            isAwaitingWakeRecovery = false
+            startHeartbeat(probeImmediately: true, isWakeProbe: true)
+        case .resumeRegistrationTimeout:
+            isAwaitingWakeRecovery = false
+            startRegistrationTimeout()
+        case .resumeConnectionTimeout:
+            isAwaitingWakeRecovery = false
+            startConnectionTimeout()
+        }
+    }
+
+    private func handleViabilityChange(_ isViable: Bool) {
+        isConnectionViable = isViable
+        Self.logger.debug(
+            "Viability changed endpoint=\(self.diagnosticEndpoint, privacy: .public) viable=\(isViable, privacy: .public)"
+        )
+        if isViable {
+            viabilityFailureGeneration = nil
+            if isAwaitingWakeRecovery, !isSystemSleeping {
+                resumeAfterWake()
+            }
+            return
+        }
+
+        guard hasReachedReadyState,
+              !hasReportedFailure,
+              !isSystemSleeping else { return }
+        scheduleViabilityFailure()
+    }
+
+    private func scheduleViabilityFailure() {
+        guard isConnectionViable == false,
+              hasReachedReadyState,
+              !hasReportedFailure,
+              !isSystemSleeping else { return }
+        let generation = UUID()
+        viabilityFailureGeneration = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.viabilityGraceDuration) { [weak self] in
+            guard let self,
+                  self.viabilityFailureGeneration == generation,
+                  self.isConnectionViable == false,
+                  !self.isSystemSleeping else { return }
+            self.viabilityFailureGeneration = nil
+            self.reportFailure(
+                "The network path remained unavailable for \(Int(Self.viabilityGraceDuration)) seconds.",
+                reason: .networkViability
+            )
+        }
+    }
+
     private func closeTransport() {
+        isSystemSleeping = false
+        isAwaitingWakeRecovery = false
+        wakeRecoveryGeneration = nil
+        viabilityFailureGeneration = nil
+        isConnectionViable = nil
         stopHeartbeat()
         stopConnectionTimeout()
         stopRegistrationTimeout()
@@ -450,7 +595,10 @@ final class IRCConnection {
                     return
                 }
                 if let error {
-                    self.reportFailure("Send failed: \(error.localizedDescription)")
+                    self.reportFailure(
+                        "Send failed: \(error.localizedDescription)",
+                        reason: .sendError
+                    )
                     completion?(false)
                 } else {
                     completion?(sent)
@@ -469,7 +617,10 @@ final class IRCConnection {
                     return
                 }
                 if let error {
-                    self.reportFailure("Send failed: \(error.localizedDescription)")
+                    self.reportFailure(
+                        "Send failed: \(error.localizedDescription)",
+                        reason: .sendError
+                    )
                     completion?(false)
                 } else {
                     completion?(true)
@@ -504,13 +655,20 @@ final class IRCConnection {
                 if let data, !self.process(data) { return }
                 if let error {
                     if !self.handleQuitEvent(.peerClosed) {
-                        self.reportFailure(error.localizedDescription)
+                        self.reportFailure(
+                            error.localizedDescription,
+                            reason: .receiveError
+                        )
                     }
                 } else if isComplete {
                     self.stopHeartbeat()
                     if !self.handleQuitEvent(.peerClosed) {
                         self.connection = nil
-                        self.eventHandler?(.status(.offline))
+                        self.reportFailure(
+                            "Connection closed by the IRC server.",
+                            reason: .remoteClose,
+                            cancelling: false
+                        )
                     }
                 } else {
                     self.receiveNext(on: connection)
@@ -525,8 +683,11 @@ final class IRCConnection {
         for line in output.lines {
             guard let message = IRCWireMessage(line: line) else { continue }
             if message.command == "001" {
+                hasCompletedRegistration = true
                 stopRegistrationTimeout()
-                startHeartbeat()
+                if !isSystemSleeping {
+                    startHeartbeat()
+                }
             }
             if message.command == "PING" { send(command: "PONG :\(message.trailing ?? message.parameters.first ?? "")") }
             if message.command == "PONG" { handleHeartbeatReply(message) }
@@ -548,17 +709,26 @@ final class IRCConnection {
 
     private func failMalformedInput(_ message: String) {
         eventHandler?(.notice(message))
-        reportFailure(message)
+        reportFailure(message, reason: .malformedInput)
     }
 
     /// TCP can remain locally established through a network outage when no data
     /// is in flight. Probe the IRC peer so a silent half-open connection has a
     /// deterministic upper bound instead of waiting for the kernel's TCP timeout.
-    private func startHeartbeat() {
+    private func startHeartbeat(
+        probeImmediately: Bool = false,
+        isWakeProbe: Bool = false
+    ) {
+        guard !isSystemSleeping else { return }
         let generation = UUID()
         heartbeatGeneration = generation
         pendingHeartbeatToken = nil
-        scheduleHeartbeat(generation: generation)
+        heartbeatIsWakeProbe = isWakeProbe
+        if probeImmediately {
+            sendHeartbeatProbe(generation: generation)
+        } else {
+            scheduleHeartbeat(generation: generation)
+        }
     }
 
     private func scheduleHeartbeat(generation: UUID) {
@@ -567,12 +737,19 @@ final class IRCConnection {
                   self.heartbeatGeneration == generation,
                   self.connection != nil || self.sshTunnel != nil,
                   !self.hasReportedFailure else { return }
-
-            let token = "netsplit-\(UUID().uuidString)"
-            self.pendingHeartbeatToken = token
-            self.scheduleHeartbeatTimeout(token: token, generation: generation)
-            self.send(command: "PING :\(token)")
+            self.sendHeartbeatProbe(generation: generation)
         }
+    }
+
+    private func sendHeartbeatProbe(generation: UUID) {
+        guard heartbeatGeneration == generation,
+              connection != nil || sshTunnel != nil,
+              !hasReportedFailure,
+              !isSystemSleeping else { return }
+        let token = "netsplit-\(UUID().uuidString)"
+        pendingHeartbeatToken = token
+        scheduleHeartbeatTimeout(token: token, generation: generation)
+        send(command: "PING :\(token)")
     }
 
     private func scheduleHeartbeatTimeout(token: String, generation: UUID) {
@@ -580,7 +757,13 @@ final class IRCConnection {
             guard let self,
                   self.heartbeatGeneration == generation,
                   self.pendingHeartbeatToken == token else { return }
-            self.reportFailure("Connection heartbeat timed out after \(Int(Self.heartbeatTimeout)) seconds.")
+            let isWakeProbe = self.heartbeatIsWakeProbe
+            self.reportFailure(
+                isWakeProbe
+                    ? "The connection did not respond after system wake."
+                    : "Connection heartbeat timed out after \(Int(Self.heartbeatTimeout)) seconds.",
+                reason: isWakeProbe ? .wakeProbeTimeout : .heartbeatTimeout
+            )
         }
     }
 
@@ -589,12 +772,14 @@ final class IRCConnection {
         let isMatchingReply = message.trailing == token || message.parameters.contains(token)
         guard isMatchingReply, let generation = heartbeatGeneration else { return }
         pendingHeartbeatToken = nil
+        heartbeatIsWakeProbe = false
         scheduleHeartbeat(generation: generation)
     }
 
     private func stopHeartbeat() {
         heartbeatGeneration = nil
         pendingHeartbeatToken = nil
+        heartbeatIsWakeProbe = false
     }
 
     private func startConnectionTimeout() {
@@ -609,7 +794,8 @@ final class IRCConnection {
                   !self.hasReportedFailure else { return }
             let detail = self.lastConnectionAttemptError.map { " Last network error: \($0)" } ?? ""
             self.reportFailure(
-                "The connection could not be established within \(Int(Self.connectionTimeout)) seconds.\(detail)"
+                "The connection could not be established within \(Int(Self.connectionTimeout)) seconds.\(detail)",
+                reason: .connectionTimeout
             )
         }
     }
@@ -627,7 +813,10 @@ final class IRCConnection {
                   self.registrationTimeoutGeneration == generation,
                   self.connection != nil || self.sshTunnel != nil,
                   !self.hasReportedFailure else { return }
-            self.reportFailure("The IRC server did not complete registration within \(Int(Self.registrationTimeout)) seconds.")
+            self.reportFailure(
+                "The IRC server did not complete registration within \(Int(Self.registrationTimeout)) seconds.",
+                reason: .registrationTimeout
+            )
         }
     }
 
@@ -637,6 +826,7 @@ final class IRCConnection {
 
     private func reportFailure(
         _ message: String,
+        reason: IRCReconnectReason,
         cancelling: Bool = true,
         automaticallyReconnect: Bool = true
     ) {
@@ -645,8 +835,14 @@ final class IRCConnection {
         stopHeartbeat()
         stopConnectionTimeout()
         stopRegistrationTimeout()
+        viabilityFailureGeneration = nil
+        wakeRecoveryGeneration = nil
+        isAwaitingWakeRecovery = false
+        Self.logger.error(
+            "Connection failure endpoint=\(self.diagnosticEndpoint, privacy: .public) reason=\(reason.rawValue, privacy: .public) message=\(message, privacy: .public)"
+        )
         if automaticallyReconnect {
-            eventHandler?(.status(.failed(message)))
+            eventHandler?(.recoverableFailure(message, reason))
         } else {
             eventHandler?(.terminalFailure(message))
         }
