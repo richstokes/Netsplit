@@ -167,6 +167,7 @@ final class IRCAppState: ObservableObject {
     private var pendingUserPings: [String: PendingUserPing] = [:]
     private var terminalServerErrors: [UUID: String] = [:]
     private var pendingOutgoingEchoes: [UUID: [PendingOutgoingEcho]] = [:]
+    private var observedLocalSourcePrefixes: [UUID: String] = [:]
     private var pendingChannelListingsByServer: [UUID: [ChannelListing]] = [:]
     private var knownChannelNamesByServer: [UUID: Set<String>] = [:]
     private var scheduledChannelListFlushes: Set<UUID> = []
@@ -798,6 +799,7 @@ final class IRCAppState: ObservableObject {
         terminalServerErrors.removeValue(forKey: profile.id)
         registeredServerIDs.remove(profile.id)
         registrationNicknameSuffixes.removeValue(forKey: profile.id)
+        observedLocalSourcePrefixes.removeValue(forKey: profile.id)
         activeNicknames[profile.id] = configuredNickname(for: profile)
         let transport = IRCConnection()
         connections[profile.id] = transport
@@ -855,6 +857,7 @@ final class IRCAppState: ObservableObject {
         connectionStatuses.removeValue(forKey: profile.id)
         terminalServerErrors.removeValue(forKey: profile.id)
         registrationNicknameSuffixes.removeValue(forKey: profile.id)
+        observedLocalSourcePrefixes.removeValue(forKey: profile.id)
         if let transport {
             retainWhileQuitting(transport, reason: reason ?? resolvedQuitMessage())
         }
@@ -1669,7 +1672,8 @@ final class IRCAppState: ObservableObject {
             for chunk in outgoingTextChunks(
                 fields[1],
                 commandPrefix: "PRIVMSG \(fields[0]) :",
-                maximumLineLength: features(for: profile.id).maximumLineLength
+                maximumLineLength: features(for: profile.id).maximumLineLength,
+                sourcePrefix: localSourcePrefix(for: profile)
             ) {
                 let echoID = rememberOutgoingEcho(
                     serverID: profile.id,
@@ -1694,7 +1698,8 @@ final class IRCAppState: ObservableObject {
             for chunk in outgoingTextChunks(
                 fields[1],
                 commandPrefix: "NOTICE \(fields[0]) :",
-                maximumLineLength: features(for: profile.id).maximumLineLength
+                maximumLineLength: features(for: profile.id).maximumLineLength,
+                sourcePrefix: localSourcePrefix(for: profile)
             ) {
                 connections[profile.id]?.send(command: "NOTICE \(fields[0]) :\(chunk)") { [weak self] sent in
                     guard let self, sent,
@@ -1715,7 +1720,8 @@ final class IRCAppState: ObservableObject {
                 argument,
                 commandPrefix: "PRIVMSG \(target) :\u{01}ACTION ",
                 suffix: "\u{01}",
-                maximumLineLength: features(for: profile.id).maximumLineLength
+                maximumLineLength: features(for: profile.id).maximumLineLength,
+                sourcePrefix: localSourcePrefix(for: profile)
             ) {
                 let action = "\u{01}ACTION \(chunk)\u{01}"
                 let echoID = rememberOutgoingEcho(
@@ -1755,7 +1761,8 @@ final class IRCAppState: ObservableObject {
                 slap,
                 commandPrefix: "PRIVMSG \(target) :\u{01}ACTION ",
                 suffix: "\u{01}",
-                maximumLineLength: features(for: profile.id).maximumLineLength
+                maximumLineLength: features(for: profile.id).maximumLineLength,
+                sourcePrefix: localSourcePrefix(for: profile)
             ) {
                 let action = "\u{01}ACTION \(chunk)\u{01}"
                 let echoID = rememberOutgoingEcho(
@@ -2016,6 +2023,7 @@ final class IRCAppState: ObservableObject {
         incomingMessageTimestamp = IRCServerTimeParser.date(from: wire.tags["time"] ?? nil)
         defer { incomingMessageTimestamp = previousIncomingMessageTimestamp }
         let sender = wire.prefix?.split(separator: "!").first.map(String.init) ?? profile.name
+        rememberLocalSourcePrefix(wire.prefix, sender: sender, profile: profile)
         switch wire.command {
         case "001":
             if let registeredNickname = wire.parameters.first, !registeredNickname.isEmpty {
@@ -2085,17 +2093,28 @@ final class IRCAppState: ObservableObject {
             }
         case "PRIVMSG":
             guard let target = wire.parameters.first, let text = wire.trailing else { return }
-            guard !isIgnored(sender, on: profile) else { return }
-            if handleCTCP(text, from: sender, target: target, profile: profile, canReplyToRequest: true) { return }
-            // Servers with IRCv3 echo-message send our own PRIVMSG back to us.
-            // The optimistic local row is already visible, so consume that echo.
-            if identifiersEqual(sender, nickname(for: profile), serverID: profile.id),
-               consumeOutgoingEcho(serverID: profile.id, target: target, text: text) {
+            let isOwnMessage = identifiersEqual(
+                sender,
+                nickname(for: profile),
+                serverID: profile.id
+            )
+            if isOwnMessage,
+               consumeOutgoingEcho(
+                serverID: profile.id,
+                target: target,
+                text: text,
+                maximumEchoBytes: relayedMessageByteLimit(
+                    target: target,
+                    sourcePrefix: wire.prefix,
+                    profile: profile
+                )
+               ) {
                 return
             }
+            guard !isIgnored(sender, on: profile) else { return }
+            if handleCTCP(text, from: sender, target: target, profile: profile, canReplyToRequest: true) { return }
             if let channelTarget = features(for: profile.id).channelName(fromMessageTarget: target) {
                 let channel = channel(named: channelTarget, serverID: profile.id)
-                let isOwnMessage = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
                 append(
                     IRCMessage(sender: sender, text: text),
                     for: .channel(channel.id),
@@ -3740,7 +3759,8 @@ final class IRCAppState: ObservableObject {
         _ text: String,
         commandPrefix: String,
         suffix: String = "",
-        maximumLineLength: Int
+        maximumLineLength: Int,
+        sourcePrefix: String?
     ) -> [String] {
         IRCTextFraming.messageChunks(
             text,
@@ -3749,11 +3769,15 @@ final class IRCAppState: ObservableObject {
             maximumLineBytes: max(
                 0,
                 maximumLineLength - IRCTextFraming.lineTerminatorBytes
-            )
+            ),
+            sourcePrefix: sourcePrefix
         )
     }
 
     private func localSourcePrefix(for profile: ServerProfile) -> String? {
+        if let observedPrefix = observedLocalSourcePrefixes[profile.id] {
+            return observedPrefix
+        }
         let localNickname = nickname(for: profile)
         for channel in channels(for: profile) {
             guard let member = channelMembers[channel.id]?.first(where: {
@@ -3766,6 +3790,31 @@ final class IRCAppState: ObservableObject {
         return nil
     }
 
+    private func rememberLocalSourcePrefix(
+        _ prefix: String?,
+        sender: String,
+        profile: ServerProfile
+    ) {
+        guard identifiersEqual(sender, nickname(for: profile), serverID: profile.id),
+              let prefix,
+              prefix.contains("!"),
+              prefix.contains("@") else { return }
+        observedLocalSourcePrefixes[profile.id] = prefix
+    }
+
+    private func relayedMessageByteLimit(
+        target: String,
+        sourcePrefix: String?,
+        profile: ServerProfile
+    ) -> Int? {
+        guard let sourcePrefix else { return nil }
+        return IRCTextFraming.messageContentByteLimit(
+            commandPrefix: "PRIVMSG \(target) :",
+            maximumLineLength: features(for: profile.id).maximumLineLength,
+            sourcePrefix: sourcePrefix
+        )
+    }
+
     private func rememberOutgoingEcho(serverID: UUID, target: String, text: String) -> UUID {
         pruneOutgoingEchoes(for: serverID)
         let pending = PendingOutgoingEcho(target: target, text: text, sentAt: Date())
@@ -3773,7 +3822,12 @@ final class IRCAppState: ObservableObject {
         return pending.id
     }
 
-    private func consumeOutgoingEcho(serverID: UUID, target: String, text: String) -> Bool {
+    private func consumeOutgoingEcho(
+        serverID: UUID,
+        target: String,
+        text: String,
+        maximumEchoBytes: Int? = nil
+    ) -> Bool {
         pruneOutgoingEchoes(for: serverID)
         guard var pending = pendingOutgoingEchoes[serverID] else { return false }
         let matchingTarget: (PendingOutgoingEcho) -> Bool = {
@@ -3783,7 +3837,11 @@ final class IRCAppState: ObservableObject {
             matchingTarget($0) && $0.text == text
         }) ?? pending.firstIndex(where: {
             matchingTarget($0)
-                && IRCOutgoingEchoPolicy.matches(sentText: $0.text, echoedText: text)
+                && IRCOutgoingEchoPolicy.matches(
+                    sentText: $0.text,
+                    echoedText: text,
+                    maximumEchoBytes: maximumEchoBytes
+                )
         })
         guard let index else { return false }
         pending.remove(at: index)

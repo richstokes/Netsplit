@@ -1205,6 +1205,15 @@ private final class IRCComposerNativeTextView: NSTextView {
     var onTab: (() -> Bool)?
 
     override func keyDown(with event: NSEvent) {
+        // Return and Tab belong to the input method while it is converting
+        // marked text (for example, choosing a CJK candidate). Let AppKit
+        // commit that composition before treating either key as a composer
+        // command.
+        if hasMarkedText() {
+            super.keyDown(with: event)
+            return
+        }
+
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.keyCode == 36 || event.keyCode == 76 {
             if modifiers.contains(.shift) || modifiers.contains(.option) {

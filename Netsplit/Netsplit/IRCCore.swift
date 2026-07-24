@@ -583,12 +583,14 @@ enum IRCTextFraming {
     _ text: String,
     commandPrefix: String,
     suffix: String = "",
-    maximumLineBytes: Int = maximumLineBytes
+    maximumLineBytes: Int = maximumLineBytes,
+    sourcePrefix: String? = nil
   ) -> [String] {
     let availableBytes = messageContentByteLimit(
       commandPrefix: commandPrefix,
       suffix: suffix,
-      maximumLineLength: maximumLineBytes + lineTerminatorBytes
+      maximumLineLength: maximumLineBytes + lineTerminatorBytes,
+      sourcePrefix: sourcePrefix
     )
     guard availableBytes > 0 else { return [] }
 
@@ -623,14 +625,33 @@ enum IRCTextFraming {
 enum IRCOutgoingEchoPolicy {
   /// A server may shorten a relayed PRIVMSG after adding the sender prefix.
   /// Treat a substantial prefix as the echo of the queued outgoing message,
-  /// while keeping short, merely-similar messages distinct.
+  /// while keeping short, merely-similar messages distinct. When the exact
+  /// relayed payload budget is known, an exact UTF-8-safe truncation is also
+  /// unambiguous regardless of its length.
   static let minimumTruncatedEchoBytes = 64
 
-  static func matches(sentText: String, echoedText: String) -> Bool {
+  static func matches(
+    sentText: String,
+    echoedText: String,
+    maximumEchoBytes: Int? = nil
+  ) -> Bool {
     if sentText == echoedText { return true }
+    guard !echoedText.isEmpty,
+      echoedText.utf8.count < sentText.utf8.count,
+      sentText.hasPrefix(echoedText)
+    else { return false }
+
+    if let maximumEchoBytes,
+      sentText.utf8.count > maximumEchoBytes,
+      echoedText == IRCTextFraming.prefix(
+        sentText,
+        fittingUTF8ByteCount: maximumEchoBytes
+      )
+    {
+      return true
+    }
+
     return echoedText.utf8.count >= minimumTruncatedEchoBytes
-      && echoedText.utf8.count < sentText.utf8.count
-      && sentText.hasPrefix(echoedText)
   }
 }
 

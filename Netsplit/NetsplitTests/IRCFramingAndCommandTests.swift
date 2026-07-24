@@ -155,6 +155,18 @@ struct IRCFramingAndCommandTests {
         #expect(chunks.count > 1)
         #expect(chunks.joined() == text)
         #expect(chunks.allSatisfy { (prefix + $0).utf8.count <= IRCTextFraming.maximumLineBytes })
+
+        let sourcePrefix = "NetsplitUser!user@a-very-long-cloak.example.org"
+        let relayedChunks = IRCTextFraming.messageChunks(
+            text,
+            commandPrefix: prefix,
+            sourcePrefix: sourcePrefix
+        )
+        #expect(relayedChunks.joined() == text)
+        #expect(relayedChunks.allSatisfy {
+            (":\(sourcePrefix) " + prefix + $0).utf8.count
+                <= IRCTextFraming.maximumLineBytes
+        })
     }
 
     @Test("Honors logical lines and CTCP suffix overhead")
@@ -206,6 +218,37 @@ struct IRCFramingAndCommandTests {
         #expect(!IRCOutgoingEchoPolicy.matches(
             sentText: sent,
             echoedText: String(sent.dropFirst())
+        ))
+
+        let severelyTruncated = IRCTextFraming.prefix(
+            sent,
+            fittingUTF8ByteCount: 40
+        )
+        #expect(!IRCOutgoingEchoPolicy.matches(
+            sentText: sent,
+            echoedText: severelyTruncated
+        ))
+        #expect(IRCOutgoingEchoPolicy.matches(
+            sentText: sent,
+            echoedText: severelyTruncated,
+            maximumEchoBytes: 40
+        ))
+        #expect(!IRCOutgoingEchoPolicy.matches(
+            sentText: sent,
+            echoedText: severelyTruncated,
+            maximumEchoBytes: 41
+        ))
+
+        let multibyteSent = String(repeating: "é", count: 100)
+        let multibyteEcho = IRCTextFraming.prefix(
+            multibyteSent,
+            fittingUTF8ByteCount: 41
+        )
+        #expect(multibyteEcho.utf8.count == 40)
+        #expect(IRCOutgoingEchoPolicy.matches(
+            sentText: multibyteSent,
+            echoedText: multibyteEcho,
+            maximumEchoBytes: 41
         ))
     }
 
