@@ -49,6 +49,496 @@ enum IRCGracefulQuitPolicy {
     }
 }
 
+struct IRCSASLCredentials: Equatable {
+    var username: String
+    var password: String
+}
+
+enum IRCSASLNegotiationState: Equatable {
+    case pending(IRCSASLCredentials)
+    case responseSent(IRCSASLCredentials)
+
+    var credentials: IRCSASLCredentials {
+        switch self {
+        case .pending(let credentials), .responseSent(let credentials):
+            credentials
+        }
+    }
+}
+
+struct IRCAdvertisedCapabilities: Equatable {
+    var names = Set<String>()
+    var saslMechanisms: Set<String>?
+}
+
+enum IRCCapabilityNegotiationState: Equatable {
+    case active(IRCAdvertisedCapabilities, sasl: IRCSASLNegotiationState?)
+    case ended(IRCAdvertisedCapabilities, sasl: IRCSASLNegotiationState?)
+
+    var advertised: IRCAdvertisedCapabilities {
+        switch self {
+        case .active(let advertised, _), .ended(let advertised, _):
+            advertised
+        }
+    }
+
+    var sasl: IRCSASLNegotiationState? {
+        switch self {
+        case .active(_, let sasl), .ended(_, let sasl):
+            sasl
+        }
+    }
+
+    func replacingAdvertised(_ advertised: IRCAdvertisedCapabilities) -> Self {
+        switch self {
+        case .active(_, let sasl):
+            .active(advertised, sasl: sasl)
+        case .ended(_, let sasl):
+            .ended(advertised, sasl: sasl)
+        }
+    }
+
+    func ending() -> Self {
+        switch self {
+        case .active(let advertised, let sasl):
+            .ended(advertised, sasl: sasl)
+        case .ended:
+            self
+        }
+    }
+
+    func markingSASLResponseSent() -> Self? {
+        switch self {
+        case .active(let advertised, .pending(let credentials)):
+            .active(advertised, sasl: .responseSent(credentials))
+        case .ended(let advertised, .pending(let credentials)):
+            .ended(advertised, sasl: .responseSent(credentials))
+        case .active(_, .responseSent), .active(_, nil),
+             .ended(_, .responseSent), .ended(_, nil):
+            nil
+        }
+    }
+}
+
+struct IRCRegistrationState: Equatable {
+    var serverPassword: String?
+    var capabilityNegotiation: IRCCapabilityNegotiationState
+
+    init(serverPassword: String?, saslCredentials: IRCSASLCredentials?) {
+        self.serverPassword = serverPassword
+        capabilityNegotiation = .active(
+            IRCAdvertisedCapabilities(),
+            sasl: saslCredentials.map(IRCSASLNegotiationState.pending)
+        )
+    }
+}
+
+enum IRCTransport {
+    case direct(NWConnection)
+    case ssh(SSHTunnelConnection)
+
+    var identifier: IRCTransportIdentifier {
+        switch self {
+        case .direct(let connection):
+            .direct(ObjectIdentifier(connection))
+        case .ssh(let tunnel):
+            .ssh(ObjectIdentifier(tunnel))
+        }
+    }
+
+    func close() {
+        switch self {
+        case .direct(let connection):
+            connection.cancel()
+        case .ssh(let tunnel):
+            tunnel.close()
+        }
+    }
+}
+
+enum IRCTransportIdentifier: Equatable {
+    case direct(ObjectIdentifier)
+    case ssh(ObjectIdentifier)
+}
+
+enum IRCRegistrationProgress: Equatable {
+    case connectingTransport
+    case registering
+    case ready
+}
+
+struct IRCConnectionSession {
+    var transport: IRCTransport
+    var registration: IRCRegistrationState
+}
+
+struct IRCQuitContext {
+    var generation: UUID
+    var timeoutGeneration: UUID?
+    var completion: @MainActor () -> Void
+}
+
+enum IRCQuitPhase {
+    case writing(IRCQuitContext)
+    case waitingForPeer(IRCQuitContext)
+
+    var context: IRCQuitContext {
+        switch self {
+        case .writing(let context), .waitingForPeer(let context):
+            context
+        }
+    }
+
+    func handling(_ event: IRCGracefulQuitEvent, timeoutGeneration: UUID?) -> Self {
+        var context = context
+        context.timeoutGeneration = timeoutGeneration
+        switch event {
+        case .localWriteSucceeded:
+            return .waitingForPeer(context)
+        case .started, .localWriteFailed, .peerClosed, .timedOut:
+            return self.replacingContext(context)
+        }
+    }
+
+    private func replacingContext(_ context: IRCQuitContext) -> Self {
+        switch self {
+        case .writing:
+            .writing(context)
+        case .waitingForPeer:
+            .waitingForPeer(context)
+        }
+    }
+}
+
+struct IRCQuittingConnection {
+    var progress: IRCRegistrationProgress
+    var transport: IRCTransport?
+    var registration: IRCRegistrationState
+    var quit: IRCQuitPhase
+    var failureMessage: String?
+}
+
+enum IRCConnectionFailure {
+    case disconnected(String)
+    case connected(String, previousProgress: IRCRegistrationProgress, IRCConnectionSession)
+
+    var message: String {
+        switch self {
+        case .disconnected(let message), .connected(let message, _, _):
+            message
+        }
+    }
+}
+
+enum IRCConnectionPhase {
+    case idle
+    case connectingTransport(IRCConnectionSession)
+    case registering(IRCConnectionSession)
+    case ready(IRCConnectionSession)
+    case quitting(IRCQuittingConnection)
+    case failed(IRCConnectionFailure)
+
+    var transport: IRCTransport? {
+        switch self {
+        case .idle, .failed(.disconnected):
+            nil
+        case .connectingTransport(let session),
+             .registering(let session),
+             .ready(let session),
+             .failed(.connected(_, _, let session)):
+            session.transport
+        case .quitting(let connection):
+            connection.transport
+        }
+    }
+
+    var transportIdentifier: IRCTransportIdentifier? {
+        transport?.identifier
+    }
+
+    var registration: IRCRegistrationState? {
+        switch self {
+        case .idle, .failed(.disconnected):
+            nil
+        case .connectingTransport(let session),
+             .registering(let session),
+             .ready(let session),
+             .failed(.connected(_, _, let session)):
+            session.registration
+        case .quitting(let connection):
+            connection.registration
+        }
+    }
+
+    var quitContext: IRCQuitContext? {
+        guard case .quitting(let connection) = self else { return nil }
+        return connection.quit.context
+    }
+
+    var canReportFailure: Bool {
+        switch self {
+        case .failed:
+            false
+        case .quitting(let connection):
+            connection.failureMessage == nil
+        case .idle, .connectingTransport, .registering, .ready:
+            true
+        }
+    }
+
+    var canMonitorViability: Bool {
+        switch self {
+        case .registering, .ready:
+            true
+        case .quitting(let connection):
+            connection.progress != .connectingTransport && connection.failureMessage == nil
+        case .idle, .connectingTransport, .failed:
+            false
+        }
+    }
+
+    var canRunConnectionTimeout: Bool {
+        switch self {
+        case .connectingTransport:
+            true
+        case .quitting(let connection):
+            connection.progress == .connectingTransport
+                && connection.transport != nil
+                && connection.failureMessage == nil
+        case .idle, .registering, .ready, .failed:
+            false
+        }
+    }
+
+    var canRunRegistrationTimeout: Bool {
+        switch self {
+        case .connectingTransport, .registering, .ready:
+            true
+        case .quitting(let connection):
+            connection.transport != nil && connection.failureMessage == nil
+        case .idle, .failed:
+            false
+        }
+    }
+
+    var canRunHeartbeat: Bool {
+        switch self {
+        case .connectingTransport, .registering, .ready:
+            true
+        case .quitting(let connection):
+            connection.transport != nil && connection.failureMessage == nil
+        case .idle, .failed:
+            false
+        }
+    }
+
+    func replacingRegistration(_ registration: IRCRegistrationState) -> Self {
+        switch self {
+        case .idle, .failed(.disconnected):
+            return self
+        case .connectingTransport(var session):
+            session.registration = registration
+            return .connectingTransport(session)
+        case .registering(var session):
+            session.registration = registration
+            return .registering(session)
+        case .ready(var session):
+            session.registration = registration
+            return .ready(session)
+        case .quitting(var connection):
+            connection.registration = registration
+            return .quitting(connection)
+        case .failed(.connected(let message, let progress, var session)):
+            session.registration = registration
+            return .failed(.connected(message, previousProgress: progress, session))
+        }
+    }
+
+    func transportBecameReady(
+        repeatingRegistration: Bool = false
+    ) -> (phase: Self, shouldBeginRegistration: Bool) {
+        switch self {
+        case .connectingTransport(let session):
+            return (.registering(session), true)
+        case .registering, .ready:
+            return (self, repeatingRegistration)
+        case .idle, .failed(.disconnected):
+            return (self, false)
+        case .quitting(var connection):
+            if connection.progress == .connectingTransport {
+                connection.progress = .registering
+                return (.quitting(connection), true)
+            }
+            return (self, repeatingRegistration)
+        case .failed(.connected(let message, let progress, let session)):
+            if progress == .connectingTransport {
+                return (
+                    .failed(.connected(message, previousProgress: .registering, session)),
+                    true
+                )
+            }
+            return (self, repeatingRegistration)
+        }
+    }
+
+    func registrationCompleted() -> Self {
+        switch self {
+        case .registering(let session):
+            return .ready(session)
+        case .quitting(var connection):
+            connection.progress = .ready
+            return .quitting(connection)
+        case .failed(.connected(let message, _, let session)):
+            return .failed(.connected(message, previousProgress: .ready, session))
+        case .idle, .connectingTransport, .ready, .failed(.disconnected):
+            return self
+        }
+    }
+
+    func beginningQuit(_ quit: IRCQuitPhase) -> Self? {
+        switch self {
+        case .connectingTransport(let session):
+            .quitting(
+                IRCQuittingConnection(
+                    progress: .connectingTransport,
+                    transport: session.transport,
+                    registration: session.registration,
+                    quit: quit,
+                    failureMessage: nil
+                )
+            )
+        case .registering(let session):
+            .quitting(
+                IRCQuittingConnection(
+                    progress: .registering,
+                    transport: session.transport,
+                    registration: session.registration,
+                    quit: quit,
+                    failureMessage: nil
+                )
+            )
+        case .ready(let session):
+            .quitting(
+                IRCQuittingConnection(
+                    progress: .ready,
+                    transport: session.transport,
+                    registration: session.registration,
+                    quit: quit,
+                    failureMessage: nil
+                )
+            )
+        case .failed(.connected(let message, let progress, let session)):
+            .quitting(
+                IRCQuittingConnection(
+                    progress: progress,
+                    transport: session.transport,
+                    registration: session.registration,
+                    quit: quit,
+                    failureMessage: message
+                )
+            )
+        case .idle, .quitting, .failed(.disconnected):
+            nil
+        }
+    }
+
+    func reportingFailure(
+        _ message: String,
+        cancellingTransport: Bool
+    ) -> Self {
+        switch self {
+        case .idle:
+            return .failed(.disconnected(message))
+        case .connectingTransport(let session):
+            return Self.failure(
+                message,
+                progress: .connectingTransport,
+                session: session,
+                cancellingTransport: cancellingTransport
+            )
+        case .registering(let session):
+            return Self.failure(
+                message,
+                progress: .registering,
+                session: session,
+                cancellingTransport: cancellingTransport
+            )
+        case .ready(let session):
+            return Self.failure(
+                message,
+                progress: .ready,
+                session: session,
+                cancellingTransport: cancellingTransport
+            )
+        case .quitting(var connection):
+            guard connection.failureMessage == nil else { return self }
+            connection.failureMessage = message
+            if cancellingTransport,
+               case .ssh = connection.transport {
+                connection.transport = nil
+            }
+            return .quitting(connection)
+        case .failed:
+            return self
+        }
+    }
+
+    func removingTransport() -> Self {
+        switch self {
+        case .failed(.connected(let message, _, _)):
+            return .failed(.disconnected(message))
+        case .quitting(var connection):
+            connection.transport = nil
+            return .quitting(connection)
+        case .idle, .failed(.disconnected):
+            return self
+        case .connectingTransport, .registering, .ready:
+            return .idle
+        }
+    }
+
+    func resetting() -> Self {
+        .idle
+    }
+
+    func wakeRecoveryAction(isViable: Bool?) -> IRCWakeRecoveryAction {
+        switch self {
+        case .idle, .failed:
+            return .none
+        case .connectingTransport:
+            return .resumeConnectionTimeout
+        case .registering:
+            return .resumeRegistrationTimeout
+        case .ready:
+            return isViable == false ? .waitForViability : .probeEstablishedConnection
+        case .quitting(let connection):
+            guard connection.transport != nil, connection.failureMessage == nil else {
+                return .none
+            }
+            switch connection.progress {
+            case .connectingTransport:
+                return .resumeConnectionTimeout
+            case .registering:
+                return .resumeRegistrationTimeout
+            case .ready:
+                return isViable == false ? .waitForViability : .probeEstablishedConnection
+            }
+        }
+    }
+
+    private static func failure(
+        _ message: String,
+        progress: IRCRegistrationProgress,
+        session: IRCConnectionSession,
+        cancellingTransport: Bool
+    ) -> Self {
+        if cancellingTransport, case .ssh = session.transport {
+            return .failed(.disconnected(message))
+        }
+        return .failed(.connected(message, previousProgress: progress, session))
+    }
+}
+
 struct IRCWireMessage {
     var tags: [String: String?]
     var prefix: String?
@@ -140,8 +630,7 @@ final class IRCConnection {
     // to CAP or completing registration. IRCnet commonly takes about 30
     // seconds, so leave enough headroom for capability negotiation afterward.
     private static let registrationTimeout: TimeInterval = 60
-    private var connection: NWConnection?
-    private var sshTunnel: SSHTunnelConnection?
+    private var phase = IRCConnectionPhase.idle
     private var receiveBuffer = IRCLineBuffer(maximumLineBytes: maximumBufferedLineBytes)
     private var heartbeatGeneration: UUID?
     private var pendingHeartbeatToken: String?
@@ -150,25 +639,13 @@ final class IRCConnection {
     private var registrationTimeoutGeneration: UUID?
     private var viabilityFailureGeneration: UUID?
     private var wakeRecoveryGeneration: UUID?
-    private var hasReportedFailure = false
-    private var hasReachedReadyState = false
-    private var hasCompletedRegistration = false
     private var isSystemSleeping = false
     private var isAwaitingWakeRecovery = false
     private var isConnectionViable: Bool?
     private var heartbeatIsWakeProbe = false
     private var diagnosticEndpoint = "unknown"
     private var nickname = "netsplit"
-    private var advertisedCapabilities = Set<String>()
-    private var advertisedSASLMechanisms: Set<String>?
-    private var capabilityNegotiationEnded = false
     private var maximumOutboundLineBytes = IRCTextFraming.maximumLineBytes
-    private var serverPassword: String?
-    private var saslCredentials: (username: String, password: String)?
-    private var isWaitingForSASLResponse = false
-    private var quitGeneration: UUID?
-    private var quitTimeoutGeneration: UUID?
-    private var quitCompletion: (@MainActor () -> Void)?
     var eventHandler: (@MainActor (IRCTransportEvent) -> Void)?
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Netsplit",
@@ -179,27 +656,24 @@ final class IRCConnection {
         disconnect()
         diagnosticEndpoint = "\(profile.hostname):\(profile.port)"
         self.nickname = nickname
-        advertisedCapabilities.removeAll()
-        advertisedSASLMechanisms = nil
-        capabilityNegotiationEnded = false
         maximumOutboundLineBytes = IRCTextFraming.maximumLineBytes
-        isWaitingForSASLResponse = false
-        hasReportedFailure = false
-        hasReachedReadyState = false
-        hasCompletedRegistration = false
         isSystemSleeping = false
         isAwaitingWakeRecovery = false
         isConnectionViable = nil
         heartbeatIsWakeProbe = false
         guard IRCIdentityValidation.isValidNickname(nickname) else {
-            eventHandler?(.terminalFailure(IRCIdentityValidation.nicknameError(nickname) ?? "The configured nickname is invalid."))
+            let message = IRCIdentityValidation.nicknameError(nickname) ?? "The configured nickname is invalid."
+            phase = .failed(.disconnected(message))
+            eventHandler?(.terminalFailure(message))
             return
         }
         guard profile.useSASL != true || !saslPassword.isEmpty else {
-            eventHandler?(.terminalFailure("SASL is enabled for this profile, but no SASL password is configured."))
+            let message = "SASL is enabled for this profile, but no SASL password is configured."
+            phase = .failed(.disconnected(message))
+            eventHandler?(.terminalFailure(message))
             return
         }
-        self.serverPassword = serverPassword.isEmpty ? nil : serverPassword
+        let credentials: IRCSASLCredentials?
         if profile.useSASL == true, !saslPassword.isEmpty {
             let username: String
             if let saslUsername = saslUsername?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -208,21 +682,29 @@ final class IRCConnection {
             } else {
                 username = nickname
             }
-            self.saslCredentials = (username, saslPassword)
+            credentials = IRCSASLCredentials(username: username, password: saslPassword)
         } else {
-            self.saslCredentials = nil
+            credentials = nil
         }
+        let registration = IRCRegistrationState(
+            serverPassword: serverPassword.isEmpty ? nil : serverPassword,
+            saslCredentials: credentials
+        )
 
         if profile.useSSHTunnel == true {
             guard let sshHostname = profile.sshHostname?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !sshHostname.isEmpty,
                   let sshUsername = profile.sshUsername?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !sshUsername.isEmpty else {
-                eventHandler?(.terminalFailure("The SSH hostname and username are required."))
+                let message = "The SSH hostname and username are required."
+                phase = .failed(.disconnected(message))
+                eventHandler?(.terminalFailure(message))
                 return
             }
             let tunnel = SSHTunnelConnection()
-            sshTunnel = tunnel
+            phase = .connectingTransport(
+                IRCConnectionSession(transport: .ssh(tunnel), registration: registration)
+            )
             eventHandler?(.status(.connecting))
             startConnectionTimeout()
             tunnel.connect(
@@ -238,22 +720,39 @@ final class IRCConnection {
                     useTLS: profile.useTLS
                 ),
                 onReady: { [weak self, weak tunnel] in
-                    guard let self, let tunnel, self.sshTunnel === tunnel else { return }
-                    self.hasReachedReadyState = true
+                    guard let self,
+                          let tunnel,
+                          self.phase.transportIdentifier == .ssh(ObjectIdentifier(tunnel)) else {
+                        return
+                    }
+                    let transition = self.phase.transportBecameReady(
+                        repeatingRegistration: true
+                    )
+                    self.phase = transition.phase
                     self.stopConnectionTimeout()
                     self.eventHandler?(.status(.online))
-                    self.register(nickname: nickname, realName: realName)
-                    self.startRegistrationTimeout()
+                    if transition.shouldBeginRegistration {
+                        self.register(nickname: nickname, realName: realName)
+                        self.startRegistrationTimeout()
+                    }
                 },
                 onData: { [weak self, weak tunnel] data in
-                    guard let self, let tunnel, self.sshTunnel === tunnel else { return }
+                    guard let self,
+                          let tunnel,
+                          self.phase.transportIdentifier == .ssh(ObjectIdentifier(tunnel)) else {
+                        return
+                    }
                     _ = self.process(data)
                 },
                 onClose: { [weak self, weak tunnel] error in
-                    guard let self, let tunnel, self.sshTunnel === tunnel else { return }
+                    guard let self,
+                          let tunnel,
+                          self.phase.transportIdentifier == .ssh(ObjectIdentifier(tunnel)) else {
+                        return
+                    }
                     // The tunnel wrapper begins closing both the forwarded
                     // channel and its parent SSH session before this callback.
-                    self.sshTunnel = nil
+                    self.phase = self.phase.removingTransport()
                     self.stopHeartbeat()
                     if self.handleQuitEvent(.peerClosed) { return }
                     if let error {
@@ -264,7 +763,7 @@ final class IRCConnection {
                             cancelling: false,
                             automaticallyReconnect: !preventsReconnect
                         )
-                    } else if !self.hasReportedFailure {
+                    } else if self.phase.canReportFailure {
                         self.reportFailure(
                             "SSH tunnel closed.",
                             reason: .remoteClose,
@@ -273,7 +772,11 @@ final class IRCConnection {
                     }
                 },
                 onHostKeyLearned: { [weak self, weak tunnel] key in
-                    guard let self, let tunnel, self.sshTunnel === tunnel else { return }
+                    guard let self,
+                          let tunnel,
+                          self.phase.transportIdentifier == .ssh(ObjectIdentifier(tunnel)) else {
+                        return
+                    }
                     self.eventHandler?(.sshHostKeyLearned(key))
                 }
             )
@@ -294,14 +797,22 @@ final class IRCConnection {
             parameters = NWParameters(tls: nil, tcp: tcp)
         }
         guard let port = NWEndpoint.Port(rawValue: profile.port) else {
-            eventHandler?(.terminalFailure("Invalid port"))
+            let message = "Invalid port"
+            phase = .failed(.disconnected(message))
+            eventHandler?(.terminalFailure(message))
             return
         }
         let connection = NWConnection(host: NWEndpoint.Host(profile.hostname), port: port, using: parameters)
-        self.connection = connection
+        phase = .connectingTransport(
+            IRCConnectionSession(transport: .direct(connection), registration: registration)
+        )
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             Task { @MainActor [weak self, weak connection] in
-                guard let self, let connection, self.connection === connection else { return }
+                guard let self,
+                      let connection,
+                      self.phase.transportIdentifier == .direct(ObjectIdentifier(connection)) else {
+                    return
+                }
                 switch state {
                 case .setup, .preparing: self.eventHandler?(.status(.connecting))
                 case .waiting(let error):
@@ -311,11 +822,11 @@ final class IRCConnection {
                     self.lastConnectionAttemptError = error.localizedDescription
                     self.eventHandler?(.status(.connecting))
                 case .ready:
-                    let isInitialReadyState = !self.hasReachedReadyState
-                    self.hasReachedReadyState = true
+                    let transition = self.phase.transportBecameReady()
+                    self.phase = transition.phase
                     self.stopConnectionTimeout()
                     self.eventHandler?(.status(.online))
-                    if isInitialReadyState {
+                    if transition.shouldBeginRegistration {
                         self.register(nickname: nickname, realName: realName)
                         self.startRegistrationTimeout()
                         self.receiveNext(on: connection)
@@ -331,8 +842,8 @@ final class IRCConnection {
                 case .cancelled:
                     self.stopHeartbeat()
                     if !self.handleQuitEvent(.peerClosed) {
-                        self.connection = nil
-                        if !self.hasReportedFailure {
+                        self.phase = self.phase.removingTransport()
+                        if self.phase.canReportFailure {
                             self.reportFailure(
                                 "The network connection was cancelled.",
                                 reason: .connectionState,
@@ -348,7 +859,9 @@ final class IRCConnection {
             Task { @MainActor [weak self, weak connection] in
                 guard let self,
                       let connection,
-                      self.connection === connection else { return }
+                      self.phase.transportIdentifier == .direct(ObjectIdentifier(connection)) else {
+                    return
+                }
                 self.handleViabilityChange(isViable)
             }
         }
@@ -358,7 +871,7 @@ final class IRCConnection {
     }
 
     func disconnect() {
-        if quitGeneration != nil {
+        if case .quitting = phase {
             finishQuit()
             return
         }
@@ -401,13 +914,7 @@ final class IRCConnection {
     }
 
     private func resumeAfterWake() {
-        let action = IRCConnectionRecoveryPolicy.wakeAction(
-            hasTransport: connection != nil || sshTunnel != nil,
-            hasReportedFailure: hasReportedFailure,
-            hasCompletedRegistration: hasCompletedRegistration,
-            hasReachedReadyState: hasReachedReadyState,
-            isViable: isConnectionViable
-        )
+        let action = phase.wakeRecoveryAction(isViable: isConnectionViable)
         Self.logger.info(
             "Resuming after wake endpoint=\(self.diagnosticEndpoint, privacy: .public) action=\(String(describing: action), privacy: .public)"
         )
@@ -442,16 +949,14 @@ final class IRCConnection {
             return
         }
 
-        guard hasReachedReadyState,
-              !hasReportedFailure,
+        guard phase.canMonitorViability,
               !isSystemSleeping else { return }
         scheduleViabilityFailure()
     }
 
     private func scheduleViabilityFailure() {
         guard isConnectionViable == false,
-              hasReachedReadyState,
-              !hasReportedFailure,
+              phase.canMonitorViability,
               !isSystemSleeping else { return }
         let generation = UUID()
         viabilityFailureGeneration = generation
@@ -477,10 +982,9 @@ final class IRCConnection {
         stopHeartbeat()
         stopConnectionTimeout()
         stopRegistrationTimeout()
-        connection?.cancel()
-        connection = nil
-        sshTunnel?.close()
-        sshTunnel = nil
+        let transport = phase.transport
+        phase = phase.resetting()
+        transport?.close()
         receiveBuffer.removeAll()
     }
 
@@ -488,11 +992,11 @@ final class IRCConnection {
     /// side of the IRC session. A bounded timeout still guarantees completion if
     /// the peer does not respond to QUIT with an orderly close.
     func quit(reason: String, completion: @MainActor @escaping () -> Void = {}) {
-        guard quitGeneration == nil else {
+        if case .quitting = phase {
             completion()
             return
         }
-        guard connection != nil || sshTunnel != nil else {
+        guard let transport = phase.transport else {
             completion()
             return
         }
@@ -500,11 +1004,22 @@ final class IRCConnection {
         stopHeartbeat()
         stopRegistrationTimeout()
         let generation = UUID()
-        quitGeneration = generation
-        quitCompletion = completion
+        let quit = IRCQuitPhase.writing(
+            IRCQuitContext(
+                generation: generation,
+                timeoutGeneration: nil,
+                completion: completion
+            )
+        )
+        guard let quittingPhase = phase.beginningQuit(quit) else {
+            completion()
+            return
+        }
+        phase = quittingPhase
         _ = handleQuitEvent(.started, generation: generation)
 
-        if let sshTunnel {
+        switch transport {
+        case .ssh(let sshTunnel):
             let safeReason = reason
                 .replacingOccurrences(of: "\r", with: "")
                 .replacingOccurrences(of: "\n", with: "")
@@ -514,46 +1029,56 @@ final class IRCConnection {
             )
             sshTunnel.send(Data("\(boundedCommand)\r\n".utf8)) { [weak self, weak sshTunnel] sent, error in
                 guard let self,
-                      self.quitGeneration == generation,
-                      self.sshTunnel === sshTunnel else { return }
+                      let sshTunnel,
+                      self.phase.quitContext?.generation == generation,
+                      self.phase.transportIdentifier == .ssh(ObjectIdentifier(sshTunnel)) else {
+                    return
+                }
                 let event: IRCGracefulQuitEvent = sent && error == nil ? .localWriteSucceeded : .localWriteFailed
                 _ = self.handleQuitEvent(event, generation: generation)
             }
-            return
+        case .direct(let connection):
+            let safeReason = reason
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: "\n", with: "")
+            let boundedCommand = IRCTextFraming.prefix(
+                "QUIT :\(safeReason)",
+                fittingUTF8ByteCount: maximumOutboundLineBytes
+            )
+            let line = "\(boundedCommand)\r\n"
+            connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] error in
+                Task { @MainActor [weak self, weak connection] in
+                    guard let self,
+                          let connection,
+                          self.phase.quitContext?.generation == generation,
+                          self.phase.transportIdentifier == .direct(ObjectIdentifier(connection)) else {
+                        return
+                    }
+                    let event: IRCGracefulQuitEvent = error == nil ? .localWriteSucceeded : .localWriteFailed
+                    _ = self.handleQuitEvent(event, generation: generation)
+                }
+            })
         }
-        guard let connection else { return }
-
-        let safeReason = reason
-            .replacingOccurrences(of: "\r", with: "")
-            .replacingOccurrences(of: "\n", with: "")
-        let boundedCommand = IRCTextFraming.prefix(
-            "QUIT :\(safeReason)",
-            fittingUTF8ByteCount: maximumOutboundLineBytes
-        )
-        let line = "\(boundedCommand)\r\n"
-        connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] error in
-            Task { @MainActor [weak self, weak connection] in
-                guard let self,
-                      self.quitGeneration == generation,
-                      self.connection === connection else { return }
-                let event: IRCGracefulQuitEvent = error == nil ? .localWriteSucceeded : .localWriteFailed
-                _ = self.handleQuitEvent(event, generation: generation)
-            }
-        })
     }
 
     @discardableResult
     private func handleQuitEvent(_ event: IRCGracefulQuitEvent, generation: UUID? = nil) -> Bool {
-        guard let activeGeneration = quitGeneration,
-              generation == nil || generation == activeGeneration else { return false }
+        guard case .quitting(var connection) = phase else { return false }
+        let context = connection.quit.context
+        let activeGeneration = context.generation
+        guard generation == nil || generation == activeGeneration else { return false }
         if let timeout = IRCGracefulQuitPolicy.timeout(after: event) {
             let timeoutGeneration = UUID()
-            quitTimeoutGeneration = timeoutGeneration
+            connection.quit = connection.quit.handling(
+                event,
+                timeoutGeneration: timeoutGeneration
+            )
+            phase = .quitting(connection)
             // This closure deliberately retains the transport until its deadline.
             // The initial watchdog bounds a stalled write; after a successful
             // write, a fresh grace period gives the peer time to close cleanly.
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [self] in
-                guard quitTimeoutGeneration == timeoutGeneration else { return }
+                guard phase.quitContext?.timeoutGeneration == timeoutGeneration else { return }
                 _ = handleQuitEvent(.timedOut, generation: activeGeneration)
             }
         }
@@ -564,18 +1089,15 @@ final class IRCConnection {
     }
 
     private func finishQuit(generation: UUID? = nil) {
-        guard let activeGeneration = quitGeneration,
-              generation == nil || generation == activeGeneration else { return }
-        let completion = quitCompletion
-        quitGeneration = nil
-        quitTimeoutGeneration = nil
-        quitCompletion = nil
+        guard let context = phase.quitContext,
+              generation == nil || generation == context.generation else { return }
+        let completion = context.completion
         closeTransport()
-        completion?()
+        completion()
     }
 
     func send(command: String, completion: (@MainActor (Bool) -> Void)? = nil) {
-        guard connection != nil || sshTunnel != nil else {
+        guard let transport = phase.transport else {
             completion?(false)
             return
         }
@@ -588,9 +1110,12 @@ final class IRCConnection {
             eventHandler?(.notice("An outgoing IRC command exceeded the server line limit and was truncated."))
         }
         let line = boundedCommand + "\r\n"
-        if let sshTunnel {
+        switch transport {
+        case .ssh(let sshTunnel):
             sshTunnel.send(Data(line.utf8)) { [weak self, weak sshTunnel] sent, error in
-                guard let self, self.sshTunnel === sshTunnel else {
+                guard let self,
+                      let sshTunnel,
+                      self.phase.transportIdentifier == .ssh(ObjectIdentifier(sshTunnel)) else {
                     completion?(false)
                     return
                 }
@@ -604,29 +1129,27 @@ final class IRCConnection {
                     completion?(sent)
                 }
             }
-            return
-        }
-        guard let connection else {
-            completion?(false)
-            return
-        }
-        connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] error in
-            Task { @MainActor [weak self, weak connection] in
-                guard let self, let connection, self.connection === connection else {
-                    completion?(false)
-                    return
+        case .direct(let connection):
+            connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] error in
+                Task { @MainActor [weak self, weak connection] in
+                    guard let self,
+                          let connection,
+                          self.phase.transportIdentifier == .direct(ObjectIdentifier(connection)) else {
+                        completion?(false)
+                        return
+                    }
+                    if let error {
+                        self.reportFailure(
+                            "Send failed: \(error.localizedDescription)",
+                            reason: .sendError
+                        )
+                        completion?(false)
+                    } else {
+                        completion?(true)
+                    }
                 }
-                if let error {
-                    self.reportFailure(
-                        "Send failed: \(error.localizedDescription)",
-                        reason: .sendError
-                    )
-                    completion?(false)
-                } else {
-                    completion?(true)
-                }
-            }
-        })
+            })
+        }
     }
 
     func setMaximumLineLength(_ maximumLineLength: Int) {
@@ -642,7 +1165,9 @@ final class IRCConnection {
         // behaves as a normal RFC-style IRC connection.
         let registrationName = realName.trimmingCharacters(in: .whitespacesAndNewlines)
         let safeRealName = registrationName.isEmpty ? "Netsplit User" : registrationName
-        if let serverPassword { send(command: "PASS :\(serverPassword.replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: ""))") }
+        if let serverPassword = phase.registration?.serverPassword {
+            send(command: "PASS :\(serverPassword.replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: ""))")
+        }
         send(command: "CAP LS 302")
         send(command: "NICK \(nickname)")
         send(command: "USER \(nickname) 0 * :\(safeRealName)")
@@ -651,7 +1176,11 @@ final class IRCConnection {
     private func receiveNext(on connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self, weak connection] data, _, isComplete, error in
             Task { @MainActor [weak self, weak connection] in
-                guard let self, let connection, self.connection === connection else { return }
+                guard let self,
+                      let connection,
+                      self.phase.transportIdentifier == .direct(ObjectIdentifier(connection)) else {
+                    return
+                }
                 if let data, !self.process(data) { return }
                 if let error {
                     if !self.handleQuitEvent(.peerClosed) {
@@ -663,7 +1192,7 @@ final class IRCConnection {
                 } else if isComplete {
                     self.stopHeartbeat()
                     if !self.handleQuitEvent(.peerClosed) {
-                        self.connection = nil
+                        self.phase = self.phase.removingTransport()
                         self.reportFailure(
                             "Connection closed by the IRC server.",
                             reason: .remoteClose,
@@ -683,7 +1212,7 @@ final class IRCConnection {
         for line in output.lines {
             guard let message = IRCWireMessage(line: line) else { continue }
             if message.command == "001" {
-                hasCompletedRegistration = true
+                phase = phase.registrationCompleted()
                 stopRegistrationTimeout()
                 if !isSystemSleeping {
                     startHeartbeat()
@@ -735,16 +1264,14 @@ final class IRCConnection {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.heartbeatInterval) { [weak self] in
             guard let self,
                   self.heartbeatGeneration == generation,
-                  self.connection != nil || self.sshTunnel != nil,
-                  !self.hasReportedFailure else { return }
+                  self.phase.canRunHeartbeat else { return }
             self.sendHeartbeatProbe(generation: generation)
         }
     }
 
     private func sendHeartbeatProbe(generation: UUID) {
         guard heartbeatGeneration == generation,
-              connection != nil || sshTunnel != nil,
-              !hasReportedFailure,
+              phase.canRunHeartbeat,
               !isSystemSleeping else { return }
         let token = "netsplit-\(UUID().uuidString)"
         pendingHeartbeatToken = token
@@ -789,9 +1316,7 @@ final class IRCConnection {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectionTimeout) { [weak self] in
             guard let self,
                   self.connectionTimeoutGeneration == generation,
-                  !self.hasReachedReadyState,
-                  self.connection != nil || self.sshTunnel != nil,
-                  !self.hasReportedFailure else { return }
+                  self.phase.canRunConnectionTimeout else { return }
             let detail = self.lastConnectionAttemptError.map { " Last network error: \($0)" } ?? ""
             self.reportFailure(
                 "The connection could not be established within \(Int(Self.connectionTimeout)) seconds.\(detail)",
@@ -811,8 +1336,7 @@ final class IRCConnection {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.registrationTimeout) { [weak self] in
             guard let self,
                   self.registrationTimeoutGeneration == generation,
-                  self.connection != nil || self.sshTunnel != nil,
-                  !self.hasReportedFailure else { return }
+                  self.phase.canRunRegistrationTimeout else { return }
             self.reportFailure(
                 "The IRC server did not complete registration within \(Int(Self.registrationTimeout)) seconds.",
                 reason: .registrationTimeout
@@ -830,8 +1354,9 @@ final class IRCConnection {
         cancelling: Bool = true,
         automaticallyReconnect: Bool = true
     ) {
-        guard !hasReportedFailure else { return }
-        hasReportedFailure = true
+        guard phase.canReportFailure else { return }
+        let transport = phase.transport
+        phase = phase.reportingFailure(message, cancellingTransport: cancelling)
         stopHeartbeat()
         stopConnectionTimeout()
         stopRegistrationTimeout()
@@ -847,37 +1372,40 @@ final class IRCConnection {
             eventHandler?(.terminalFailure(message))
         }
         if cancelling {
-            connection?.cancel()
-            sshTunnel?.close()
-            sshTunnel = nil
+            transport?.close()
         }
     }
 
     private func handleCapabilityMessage(_ message: IRCWireMessage) {
         // CAP replies are normally: CAP <nick|*> <LS|ACK|NAK> [*] :capabilities
-        guard message.parameters.count >= 2 else { return }
+        guard message.parameters.count >= 2,
+              var registration = phase.registration else { return }
         let subcommand = message.parameters[1].uppercased()
         switch subcommand {
         case "LS":
             let advertisedValues = (message.trailing ?? "").split(separator: " ").map(String.init)
-            advertisedCapabilities.formUnion(
+            var advertised = registration.capabilityNegotiation.advertised
+            advertised.names.formUnion(
                 advertisedValues.map { IRCCapability.name(from: $0) }
             )
             for advertisedValue in advertisedValues {
                 guard let mechanisms = IRCCapability.saslMechanisms(from: advertisedValue) else {
                     continue
                 }
-                advertisedSASLMechanisms = (advertisedSASLMechanisms ?? []).union(mechanisms)
+                advertised.saslMechanisms = (advertised.saslMechanisms ?? []).union(mechanisms)
             }
+            registration.capabilityNegotiation =
+                registration.capabilityNegotiation.replacingAdvertised(advertised)
+            phase = phase.replacingRegistration(registration)
             // An asterisk after LS signals a multi-line capability list.
             let hasMore = message.parameters.dropFirst(2).contains("*")
             guard !hasMore else { return }
-            var supported = IRCCapability.preferred.filter { advertisedCapabilities.contains($0) }
-            if saslCredentials != nil {
-                if advertisedCapabilities.contains("sasl"),
-                   IRCSASL.canUsePlain(advertisedMechanisms: advertisedSASLMechanisms) {
+            var supported = IRCCapability.preferred.filter { advertised.names.contains($0) }
+            if registration.capabilityNegotiation.sasl != nil {
+                if advertised.names.contains("sasl"),
+                   IRCSASL.canUsePlain(advertisedMechanisms: advertised.saslMechanisms) {
                     supported.append("sasl")
-                } else if advertisedCapabilities.contains("sasl") {
+                } else if advertised.names.contains("sasl") {
                     eventHandler?(.notice("The server advertises SASL, but not the PLAIN mechanism required by this profile."))
                 } else {
                     eventHandler?(.notice("SASL is enabled for this profile, but the server does not advertise SASL."))
@@ -890,13 +1418,16 @@ final class IRCConnection {
             }
         case "ACK":
             let acknowledged = (message.trailing ?? "").split(separator: " ").map { IRCCapability.name(from: String($0)) }
-            if acknowledged.contains("sasl"), saslCredentials != nil {
+            if acknowledged.contains("sasl"), registration.capabilityNegotiation.sasl != nil {
                 send(command: "AUTHENTICATE PLAIN")
             } else {
                 endCapabilityNegotiation()
             }
         case "NAK":
-            if saslCredentials != nil, (message.trailing ?? "").split(separator: " ").map({ IRCCapability.name(from: String($0)) }).contains("sasl") {
+            if registration.capabilityNegotiation.sasl != nil,
+               (message.trailing ?? "").split(separator: " ").map({
+                   IRCCapability.name(from: String($0))
+               }).contains("sasl") {
                 eventHandler?(.notice("The server declined SASL authentication."))
             }
             endCapabilityNegotiation()
@@ -906,14 +1437,23 @@ final class IRCConnection {
     }
 
     private func endCapabilityNegotiation() {
-        guard !capabilityNegotiationEnded else { return }
-        capabilityNegotiationEnded = true
+        guard var registration = phase.registration else { return }
+        guard case .active = registration.capabilityNegotiation else { return }
+        registration.capabilityNegotiation = registration.capabilityNegotiation.ending()
+        phase = phase.replacingRegistration(registration)
         send(command: "CAP END")
     }
 
     private func handleAuthenticationMessage(_ message: IRCWireMessage) {
-        guard message.isSASLContinuation, let credentials = saslCredentials, !isWaitingForSASLResponse else { return }
-        isWaitingForSASLResponse = true
+        guard message.isSASLContinuation,
+              var registration = phase.registration,
+              let nextNegotiation = registration.capabilityNegotiation.markingSASLResponseSent() else {
+            return
+        }
+        let credentials = nextNegotiation.sasl?.credentials
+        registration.capabilityNegotiation = nextNegotiation
+        phase = phase.replacingRegistration(registration)
+        guard let credentials else { return }
         IRCSASL.plainAuthenticationChunks(username: credentials.username, password: credentials.password)
             .forEach { send(command: "AUTHENTICATE \($0)") }
     }
