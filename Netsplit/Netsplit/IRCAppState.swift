@@ -493,6 +493,26 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    func maximumMessageBytes(for item: SidebarItem) -> Int? {
+        guard isMessageDestination(item), let profile = profile(for: item) else { return nil }
+        let commandPrefix = "PRIVMSG \(title(for: item)) :"
+        return IRCTextFraming.messageContentByteLimit(
+            commandPrefix: commandPrefix,
+            maximumLineLength: features(for: profile.id).maximumLineLength,
+            sourcePrefix: localSourcePrefix(for: profile)
+        )
+    }
+
+    func boundedComposerDraft(_ draft: String, for item: SidebarItem) -> String {
+        // Slash commands have command-specific framing and are bounded again
+        // when translated to the wire. The normal composer path represents one
+        // PRIVMSG, so enforce its exact UTF-8 payload budget while editing.
+        guard draft.first != "/", let maximumBytes = maximumMessageBytes(for: item) else {
+            return draft
+        }
+        return IRCTextFraming.prefix(draft, fittingUTF8ByteCount: maximumBytes)
+    }
+
     func serverPassword(for profile: ServerProfile) -> String {
         KeychainStore.value(for: credentialAccount(profile: profile, kind: "server-password"))
     }
@@ -1522,28 +1542,45 @@ final class IRCAppState: ObservableObject {
         appendSystem("Looking up \(nickname)…", for: item)
     }
 
-    func send(_ text: String, to item: SidebarItem) {
+    @discardableResult
+    func send(_ text: String, to item: SidebarItem) -> Bool {
         if text.hasPrefix("/") {
             executeCommand(text, in: item)
-            return
+            return true
         }
         guard isMessageDestination(item), let profile = profile(for: item) else {
             appendSystem("Select a channel or private message before sending text.", for: item)
-            return
+            return false
         }
-        guard canSendMessages(on: profile, reportingTo: item) else { return }
+        let messageText = IRCTextFraming.sanitizedSingleLine(text)
+        if let maximumBytes = maximumMessageBytes(for: item),
+           messageText.utf8.count > maximumBytes {
+            appendSystem(
+                "That message is too long for this server. Shorten it to \(maximumBytes) UTF-8 bytes.",
+                for: item
+            )
+            return false
+        }
+        guard canSendMessages(on: profile, reportingTo: item) else { return false }
         let target = title(for: item)
         let sender = nickname(for: profile)
         let sessionID = sessionIDs[profile.id]
-        for chunk in outgoingTextChunks(text, commandPrefix: "PRIVMSG \(target) :") {
-            connections[profile.id]?.send(command: "PRIVMSG \(target) :\(chunk)") { [weak self] sent in
-                guard let self, sent,
-                      self.sessionIDs[profile.id] == sessionID,
-                      self.registeredServerIDs.contains(profile.id) else { return }
-                self.rememberOutgoingEcho(serverID: profile.id, target: target, text: chunk)
-                self.append(IRCMessage(sender: sender, text: chunk), for: item, markUnread: false)
+        let echoID = rememberOutgoingEcho(
+            serverID: profile.id,
+            target: target,
+            text: messageText
+        )
+        connections[profile.id]?.send(command: "PRIVMSG \(target) :\(messageText)") { [weak self] sent in
+            guard let self else { return }
+            guard sent,
+                  self.sessionIDs[profile.id] == sessionID,
+                  self.registeredServerIDs.contains(profile.id) else {
+                self.discardOutgoingEcho(serverID: profile.id, id: echoID)
+                return
             }
+            self.append(IRCMessage(sender: sender, text: messageText), for: item, markUnread: false)
         }
+        return true
     }
 
     private func executeCommand(_ input: String, in item: SidebarItem) {
@@ -1629,12 +1666,24 @@ final class IRCAppState: ObservableObject {
                 conversations[conversation.id] = [IRCMessage(sender: "System", text: "Private conversation with \(fields[0]).", isSystem: true)]
             }
             let sender = nickname(for: profile)
-            for chunk in outgoingTextChunks(fields[1], commandPrefix: "PRIVMSG \(fields[0]) :") {
+            for chunk in outgoingTextChunks(
+                fields[1],
+                commandPrefix: "PRIVMSG \(fields[0]) :",
+                maximumLineLength: features(for: profile.id).maximumLineLength
+            ) {
+                let echoID = rememberOutgoingEcho(
+                    serverID: profile.id,
+                    target: fields[0],
+                    text: chunk
+                )
                 connections[profile.id]?.send(command: "PRIVMSG \(fields[0]) :\(chunk)") { [weak self] sent in
-                    guard let self, sent,
+                    guard let self else { return }
+                    guard sent,
                           self.sessionIDs[profile.id] == sessionID,
-                          self.registeredServerIDs.contains(profile.id) else { return }
-                    self.rememberOutgoingEcho(serverID: profile.id, target: fields[0], text: chunk)
+                          self.registeredServerIDs.contains(profile.id) else {
+                        self.discardOutgoingEcho(serverID: profile.id, id: echoID)
+                        return
+                    }
                     self.append(IRCMessage(sender: sender, text: chunk), for: .directMessage(conversation.id), markUnread: false)
                 }
             }
@@ -1642,7 +1691,11 @@ final class IRCAppState: ObservableObject {
         case "NOTICE":
             let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
             guard fields.count == 2 else { appendSystem("Usage: /notice target message", for: item); return }
-            for chunk in outgoingTextChunks(fields[1], commandPrefix: "NOTICE \(fields[0]) :") {
+            for chunk in outgoingTextChunks(
+                fields[1],
+                commandPrefix: "NOTICE \(fields[0]) :",
+                maximumLineLength: features(for: profile.id).maximumLineLength
+            ) {
                 connections[profile.id]?.send(command: "NOTICE \(fields[0]) :\(chunk)") { [weak self] sent in
                     guard let self, sent,
                           self.sessionIDs[profile.id] == sessionID,
@@ -1658,13 +1711,26 @@ final class IRCAppState: ObservableObject {
             }
             let target = title(for: item)
             let sender = nickname(for: profile)
-            for chunk in outgoingTextChunks(argument, commandPrefix: "PRIVMSG \(target) :\u{01}ACTION ", suffix: "\u{01}") {
+            for chunk in outgoingTextChunks(
+                argument,
+                commandPrefix: "PRIVMSG \(target) :\u{01}ACTION ",
+                suffix: "\u{01}",
+                maximumLineLength: features(for: profile.id).maximumLineLength
+            ) {
                 let action = "\u{01}ACTION \(chunk)\u{01}"
+                let echoID = rememberOutgoingEcho(
+                    serverID: profile.id,
+                    target: target,
+                    text: action
+                )
                 connections[profile.id]?.send(command: "PRIVMSG \(target) :\(action)") { [weak self] sent in
-                    guard let self, sent,
+                    guard let self else { return }
+                    guard sent,
                           self.sessionIDs[profile.id] == sessionID,
-                          self.registeredServerIDs.contains(profile.id) else { return }
-                    self.rememberOutgoingEcho(serverID: profile.id, target: target, text: action)
+                          self.registeredServerIDs.contains(profile.id) else {
+                        self.discardOutgoingEcho(serverID: profile.id, id: echoID)
+                        return
+                    }
                     self.append(
                         IRCMessage(sender: "* \(sender)", text: chunk, nicknameColorKey: sender),
                         for: item,
@@ -1685,13 +1751,26 @@ final class IRCAppState: ObservableObject {
             let target = title(for: item)
             let slap = "slaps \(recipient) around a bit with a large trout"
             let sender = nickname(for: profile)
-            for chunk in outgoingTextChunks(slap, commandPrefix: "PRIVMSG \(target) :\u{01}ACTION ", suffix: "\u{01}") {
+            for chunk in outgoingTextChunks(
+                slap,
+                commandPrefix: "PRIVMSG \(target) :\u{01}ACTION ",
+                suffix: "\u{01}",
+                maximumLineLength: features(for: profile.id).maximumLineLength
+            ) {
                 let action = "\u{01}ACTION \(chunk)\u{01}"
+                let echoID = rememberOutgoingEcho(
+                    serverID: profile.id,
+                    target: target,
+                    text: action
+                )
                 connections[profile.id]?.send(command: "PRIVMSG \(target) :\(action)") { [weak self] sent in
-                    guard let self, sent,
+                    guard let self else { return }
+                    guard sent,
                           self.sessionIDs[profile.id] == sessionID,
-                          self.registeredServerIDs.contains(profile.id) else { return }
-                    self.rememberOutgoingEcho(serverID: profile.id, target: target, text: action)
+                          self.registeredServerIDs.contains(profile.id) else {
+                        self.discardOutgoingEcho(serverID: profile.id, id: echoID)
+                        return
+                    }
                     self.append(
                         IRCMessage(sender: "* \(sender)", text: chunk, nicknameColorKey: sender),
                         for: item,
@@ -3371,6 +3450,7 @@ final class IRCAppState: ObservableObject {
         var updated = previous
         updated.apply(parameters: wire.parameters.dropFirst())
         serverFeatures[serverID] = updated
+        connections[serverID]?.setMaximumLineLength(updated.maximumLineLength)
         ignoreSnapshotsByServer.removeValue(forKey: serverID)
 
         guard updated.membership != previous.membership
@@ -3656,26 +3736,63 @@ final class IRCAppState: ObservableObject {
         "\(serverID.uuidString)|\(normalizedIdentifier(nickname, serverID: serverID))"
     }
 
-    private func outgoingTextChunks(_ text: String, commandPrefix: String, suffix: String = "") -> [String] {
-        IRCTextFraming.messageChunks(text, commandPrefix: commandPrefix, suffix: suffix)
+    private func outgoingTextChunks(
+        _ text: String,
+        commandPrefix: String,
+        suffix: String = "",
+        maximumLineLength: Int
+    ) -> [String] {
+        IRCTextFraming.messageChunks(
+            text,
+            commandPrefix: commandPrefix,
+            suffix: suffix,
+            maximumLineBytes: max(
+                0,
+                maximumLineLength - IRCTextFraming.lineTerminatorBytes
+            )
+        )
     }
 
-    private func rememberOutgoingEcho(serverID: UUID, target: String, text: String) {
+    private func localSourcePrefix(for profile: ServerProfile) -> String? {
+        let localNickname = nickname(for: profile)
+        for channel in channels(for: profile) {
+            guard let member = channelMembers[channel.id]?.first(where: {
+                identifiersEqual($0.nickname, localNickname, serverID: profile.id)
+            }), let username = member.username, let hostname = member.hostname else {
+                continue
+            }
+            return "\(localNickname)!\(username)@\(hostname)"
+        }
+        return nil
+    }
+
+    private func rememberOutgoingEcho(serverID: UUID, target: String, text: String) -> UUID {
         pruneOutgoingEchoes(for: serverID)
-        pendingOutgoingEchoes[serverID, default: []].append(
-            PendingOutgoingEcho(target: target, text: text, sentAt: Date())
-        )
+        let pending = PendingOutgoingEcho(target: target, text: text, sentAt: Date())
+        pendingOutgoingEchoes[serverID, default: []].append(pending)
+        return pending.id
     }
 
     private func consumeOutgoingEcho(serverID: UUID, target: String, text: String) -> Bool {
         pruneOutgoingEchoes(for: serverID)
-        guard var pending = pendingOutgoingEchoes[serverID],
-              let index = pending.firstIndex(where: {
-                  identifiersEqual($0.target, target, serverID: serverID) && $0.text == text
-              }) else { return false }
+        guard var pending = pendingOutgoingEchoes[serverID] else { return false }
+        let matchingTarget: (PendingOutgoingEcho) -> Bool = {
+            self.identifiersEqual($0.target, target, serverID: serverID)
+        }
+        let index = pending.firstIndex(where: {
+            matchingTarget($0) && $0.text == text
+        }) ?? pending.firstIndex(where: {
+            matchingTarget($0)
+                && IRCOutgoingEchoPolicy.matches(sentText: $0.text, echoedText: text)
+        })
+        guard let index else { return false }
         pending.remove(at: index)
         pendingOutgoingEchoes[serverID] = pending
         return true
+    }
+
+    private func discardOutgoingEcho(serverID: UUID, id: UUID) {
+        pendingOutgoingEchoes[serverID]?.removeAll { $0.id == id }
     }
 
     private func pruneOutgoingEchoes(for serverID: UUID) {
@@ -3799,6 +3916,7 @@ final class IRCAppState: ObservableObject {
 }
 
 private struct PendingOutgoingEcho {
+    var id = UUID()
     var target: String
     var text: String
     var sentAt: Date

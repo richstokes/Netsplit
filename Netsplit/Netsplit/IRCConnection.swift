@@ -151,6 +151,7 @@ final class IRCConnection {
     private var advertisedCapabilities = Set<String>()
     private var advertisedSASLMechanisms: Set<String>?
     private var capabilityNegotiationEnded = false
+    private var maximumOutboundLineBytes = IRCTextFraming.maximumLineBytes
     private var serverPassword: String?
     private var saslCredentials: (username: String, password: String)?
     private var isWaitingForSASLResponse = false
@@ -165,6 +166,7 @@ final class IRCConnection {
         advertisedCapabilities.removeAll()
         advertisedSASLMechanisms = nil
         capabilityNegotiationEnded = false
+        maximumOutboundLineBytes = IRCTextFraming.maximumLineBytes
         isWaitingForSASLResponse = false
         hasReportedFailure = false
         hasReachedReadyState = false
@@ -361,7 +363,10 @@ final class IRCConnection {
             let safeReason = reason
                 .replacingOccurrences(of: "\r", with: "")
                 .replacingOccurrences(of: "\n", with: "")
-            let boundedCommand = IRCTextFraming.prefix("QUIT :\(safeReason)")
+            let boundedCommand = IRCTextFraming.prefix(
+                "QUIT :\(safeReason)",
+                fittingUTF8ByteCount: maximumOutboundLineBytes
+            )
             sshTunnel.send(Data("\(boundedCommand)\r\n".utf8)) { [weak self, weak sshTunnel] sent, error in
                 guard let self,
                       self.quitGeneration == generation,
@@ -376,7 +381,10 @@ final class IRCConnection {
         let safeReason = reason
             .replacingOccurrences(of: "\r", with: "")
             .replacingOccurrences(of: "\n", with: "")
-        let boundedCommand = IRCTextFraming.prefix("QUIT :\(safeReason)")
+        let boundedCommand = IRCTextFraming.prefix(
+            "QUIT :\(safeReason)",
+            fittingUTF8ByteCount: maximumOutboundLineBytes
+        )
         let line = "\(boundedCommand)\r\n"
         connection.send(content: line.data(using: .utf8), completion: .contentProcessed { [weak self, weak connection] error in
             Task { @MainActor [weak self, weak connection] in
@@ -427,7 +435,10 @@ final class IRCConnection {
             return
         }
         let singleLine = IRCTextFraming.sanitizedSingleLine(command)
-        let boundedCommand = IRCTextFraming.prefix(singleLine)
+        let boundedCommand = IRCTextFraming.prefix(
+            singleLine,
+            fittingUTF8ByteCount: maximumOutboundLineBytes
+        )
         if boundedCommand != singleLine {
             eventHandler?(.notice("An outgoing IRC command exceeded the server line limit and was truncated."))
         }
@@ -465,6 +476,13 @@ final class IRCConnection {
                 }
             }
         })
+    }
+
+    func setMaximumLineLength(_ maximumLineLength: Int) {
+        maximumOutboundLineBytes = max(
+            0,
+            maximumLineLength - IRCTextFraming.lineTerminatorBytes
+        )
     }
 
     private func register(nickname: String, realName: String) {

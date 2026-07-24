@@ -698,6 +698,7 @@ private struct ConversationView: View {
     @State private var commandCompletion: CommandTabCompletion?
     @State private var pendingURL: PendingURL?
     @State private var showsTopic = false
+    @State private var composerTextHeight: CGFloat = 18
     @Environment(\.ircTextMetrics) private var textMetrics
 
     private var title: String { state.title(for: selection) }
@@ -777,21 +778,38 @@ private struct ConversationView: View {
                         channelEventVisibility: state.channelEventVisibility
                     )
                     HStack(alignment: .bottom, spacing: 12) {
-                        TextField("Message \(title)", text: $draft, axis: .vertical)
-                            .font(state.chatFont.font(size: textMetrics.size(15)))
-                            .textFieldStyle(.plain).lineLimit(1...5)
+                        ZStack(alignment: .topLeading) {
+                            IRCComposerTextView(
+                                text: $draft,
+                                maximumUTF8Bytes: composerMaximumBytes,
+                                font: state.chatFont.nsFont(size: textMetrics.size(15)),
+                                workspaceFocus: $workspaceFocus,
+                                focusTarget: .composer(selection),
+                                measuredHeight: $composerTextHeight,
+                                onSubmit: send,
+                                onTab: completeComposer
+                            )
+                            if draft.isEmpty {
+                                Text("Message \(title)")
+                                    .font(state.chatFont.font(size: textMetrics.size(15)))
+                                    .foregroundStyle(.tertiary)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: composerTextHeight)
                             .padding(.horizontal, textMetrics.spacing(12))
                             .padding(.vertical, textMetrics.spacing(9))
                             .ircFieldBackground(in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .focused($workspaceFocus, equals: .composer(selection))
                             .accessibilityLabel("Message to \(title)")
                             .accessibilityHint("Type one IRC message. Press Return to send or Tab to complete a command or nickname.")
-                            .onSubmit(send)
-                            .onKeyPress(.tab) {
-                                completeComposer()
-                                    ? .handled
-                                    : .ignored
-                            }
+                        if let remainingMessageBytes, remainingMessageBytes <= 64 {
+                            Text("\(remainingMessageBytes)")
+                                .font(.system(size: textMetrics.size(11), weight: .medium, design: .monospaced))
+                                .foregroundStyle(remainingMessageBytes == 0 ? .orange : .secondary)
+                                .accessibilityLabel("\(remainingMessageBytes) message bytes remaining")
+                                .help("\(remainingMessageBytes) UTF-8 bytes remaining")
+                        }
                         Button(action: send) {
                             Image(systemName: "arrow.up")
                                 .font(.system(size: textMetrics.size(14), weight: .bold))
@@ -815,7 +833,7 @@ private struct ConversationView: View {
         }
         .onAppear {
             state.markRead(selection)
-            draft = state.draft(for: selection)
+            draft = state.boundedComposerDraft(state.draft(for: selection), for: selection)
             workspaceFocus = .composer(selection)
         }
         .onChange(of: selection) { _, newSelection in
@@ -824,11 +842,16 @@ private struct ConversationView: View {
             commandCompletion = nil
         }
         .onChange(of: draft) { _, newDraft in
-            state.setDraft(newDraft, for: selection)
-            if tabCompletion?.completedDraft != newDraft {
+            let boundedDraft = state.boundedComposerDraft(newDraft, for: selection)
+            if boundedDraft != newDraft {
+                draft = boundedDraft
+                return
+            }
+            state.setDraft(boundedDraft, for: selection)
+            if tabCompletion?.completedDraft != boundedDraft {
                 tabCompletion = nil
             }
-            if commandCompletion?.completedDraft != newDraft {
+            if commandCompletion?.completedDraft != boundedDraft {
                 commandCompletion = nil
             }
         }
@@ -864,6 +887,14 @@ private struct ConversationView: View {
         }
     }
 
+    private var composerMaximumBytes: Int? {
+        draft.first == "/" ? nil : state.maximumMessageBytes(for: selection)
+    }
+
+    private var remainingMessageBytes: Int? {
+        composerMaximumBytes.map { max(0, $0 - draft.utf8.count) }
+    }
+
     private static func isWebURL(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https"
@@ -872,8 +903,9 @@ private struct ConversationView: View {
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        state.send(text, to: selection)
-        draft = ""
+        if state.send(text, to: selection) {
+            draft = ""
+        }
     }
 
     private func completeComposer() -> Bool {
@@ -990,6 +1022,208 @@ private struct ConversationView: View {
     }
 }
 
+private struct IRCComposerTextView: NSViewRepresentable {
+    @Binding var text: String
+    let maximumUTF8Bytes: Int?
+    let font: NSFont
+    let workspaceFocus: FocusState<IRCWorkspaceFocus?>.Binding
+    let focusTarget: IRCWorkspaceFocus
+    @Binding var measuredHeight: CGFloat
+    let onSubmit: () -> Void
+    let onTab: () -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+
+        let textView = IRCComposerNativeTextView()
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.font = font
+        textView.textColor = .labelColor
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: scrollView.contentSize.width,
+            height: .greatestFiniteMagnitude
+        )
+        textView.onSubmit = onSubmit
+        textView.onTab = onTab
+        scrollView.documentView = textView
+
+        DispatchQueue.main.async {
+            context.coordinator.updateLayout(for: textView, in: scrollView)
+        }
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? IRCComposerNativeTextView else { return }
+        context.coordinator.parent = self
+        textView.font = font
+        textView.onSubmit = onSubmit
+        textView.onTab = onTab
+
+        if textView.string != text {
+            context.coordinator.isUpdatingProgrammatically = true
+            textView.string = text
+            textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+            context.coordinator.isUpdatingProgrammatically = false
+        }
+        context.coordinator.updateLayout(for: textView, in: scrollView)
+
+        if workspaceFocus.wrappedValue == focusTarget {
+            guard textView.window?.firstResponder !== textView else { return }
+            DispatchQueue.main.async { [weak textView] in
+                guard let textView, textView.window != nil else { return }
+                textView.window?.makeFirstResponder(textView)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: IRCComposerTextView
+        var isUpdatingProgrammatically = false
+
+        init(parent: IRCComposerTextView) {
+            self.parent = parent
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            if parent.workspaceFocus.wrappedValue != parent.focusTarget {
+                parent.workspaceFocus.wrappedValue = parent.focusTarget
+            }
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            if parent.workspaceFocus.wrappedValue == parent.focusTarget {
+                parent.workspaceFocus.wrappedValue = nil
+            }
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard !isUpdatingProgrammatically,
+                  let textView = notification.object as? IRCComposerNativeTextView,
+                  let scrollView = textView.enclosingScrollView else { return }
+            parent.text = textView.string
+            updateLayout(for: textView, in: scrollView)
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            guard let maximumUTF8Bytes = parent.maximumUTF8Bytes,
+                  let replacementString else { return true }
+
+            let currentText = textView.string as NSString
+            guard NSMaxRange(affectedCharRange) <= currentText.length else { return false }
+            let retainedText = currentText.replacingCharacters(
+                in: affectedCharRange,
+                with: ""
+            )
+            let availableBytes = maximumUTF8Bytes - retainedText.utf8.count
+            let boundedReplacement = IRCTextFraming.prefix(
+                replacementString,
+                fittingUTF8ByteCount: availableBytes
+            )
+            guard boundedReplacement != replacementString else { return true }
+
+            isUpdatingProgrammatically = true
+            textView.textStorage?.replaceCharacters(
+                in: affectedCharRange,
+                with: boundedReplacement
+            )
+            let insertionLocation = affectedCharRange.location
+                + (boundedReplacement as NSString).length
+            textView.setSelectedRange(NSRange(location: insertionLocation, length: 0))
+            parent.text = textView.string
+            isUpdatingProgrammatically = false
+            if let scrollView = textView.enclosingScrollView {
+                updateLayout(for: textView, in: scrollView)
+            }
+            return false
+        }
+
+        func updateLayout(for textView: NSTextView, in scrollView: NSScrollView) {
+            let contentWidth = scrollView.contentSize.width
+            guard contentWidth > 0,
+                  let textContainer = textView.textContainer,
+                  let layoutManager = textView.layoutManager else { return }
+            textContainer.containerSize = NSSize(
+                width: contentWidth,
+                height: .greatestFiniteMagnitude
+            )
+            layoutManager.ensureLayout(for: textContainer)
+
+            let lineHeight = ceil(
+                (textView.font ?? parent.font).ascender
+                    - (textView.font ?? parent.font).descender
+                    + (textView.font ?? parent.font).leading
+            )
+            let usedHeight = ceil(layoutManager.usedRect(for: textContainer).height)
+            let desiredHeight = min(max(lineHeight, usedHeight), lineHeight * 5)
+            let documentHeight = max(desiredHeight, usedHeight)
+            if textView.frame.width != contentWidth || textView.frame.height != documentHeight {
+                textView.frame = NSRect(
+                    x: 0,
+                    y: 0,
+                    width: contentWidth,
+                    height: documentHeight
+                )
+            }
+            if abs(parent.measuredHeight - desiredHeight) > 0.5 {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.parent.measuredHeight = desiredHeight
+                }
+            }
+            textView.scrollRangeToVisible(textView.selectedRange())
+        }
+    }
+}
+
+private final class IRCComposerNativeTextView: NSTextView {
+    var onSubmit: (() -> Void)?
+    var onTab: (() -> Bool)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 36 || event.keyCode == 76 {
+            if modifiers.contains(.shift) || modifiers.contains(.option) {
+                super.keyDown(with: event)
+            } else {
+                onSubmit?()
+            }
+            return
+        }
+        if event.keyCode == 48, !modifiers.contains(.shift) {
+            if onTab?() != true {
+                window?.selectNextKeyView(self)
+            }
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 private struct ChannelTopicPopover: View {
     let topic: String
     let channelTypes: Set<Character>
@@ -1052,6 +1286,11 @@ private struct ConversationTranscript: View {
         case tail
     }
 
+    /// Keep at least a viewport's worth of recent rows out of LazyVStack's
+    /// estimated layout so switching conversations cannot land in a blank
+    /// region above the tail.
+    private static let eagerTailMessageCount = 100
+
     init(
         state: IRCAppState,
         selection: SidebarItem,
@@ -1084,6 +1323,9 @@ private struct ConversationTranscript: View {
             channelEventVisibility: channelEventVisibility
         )
         let messages = allMessages.suffix(visibleMessageLimit)
+        let eagerTailCount = min(Self.eagerTailMessageCount, messages.count)
+        let lazyMessages = messages.dropLast(eagerTailCount)
+        let eagerMessages = messages.suffix(eagerTailCount)
         let hiddenMessageCount = allMessages.count - messages.count
         let lastMessageID = messages.last?.id
 #if DEBUG
@@ -1093,6 +1335,8 @@ private struct ConversationTranscript: View {
             title: state.title(for: selection),
             revision: revision,
             messageCount: allMessages.count,
+            lazyMessageCount: lazyMessages.count,
+            eagerMessageCount: eagerMessages.count,
             lastMessageID: lastMessageID
         )
         let debugGeometryHandler: TranscriptLiveScrollObserver.DebugGeometryHandler? = { event, geometry in
@@ -1104,58 +1348,59 @@ private struct ConversationTranscript: View {
 
         ScrollViewReader { scrollView in
             ScrollView {
-                LazyVStack(
+                VStack(
                     alignment: .leading,
                     spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
                 ) {
-                    if hiddenMessageCount > 0 {
-                        Button {
-                            let previousFirstMessageID = messages.first?.id
-                            visibleMessageLimit = IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
-                                current: visibleMessageLimit,
-                                total: allMessages.count
-                            )
-                            guard let previousFirstMessageID else { return }
-                            Task { @MainActor in
-                                await Task.yield()
-                                scrollView.scrollTo(previousFirstMessageID, anchor: .top)
+                    if hiddenMessageCount > 0 || !lazyMessages.isEmpty {
+                        LazyVStack(
+                            alignment: .leading,
+                            spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
+                        ) {
+                            if hiddenMessageCount > 0 {
+                                Button {
+                                    let previousFirstMessageID = messages.first?.id
+                                    visibleMessageLimit = IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
+                                        current: visibleMessageLimit,
+                                        total: allMessages.count
+                                    )
+                                    guard let previousFirstMessageID else { return }
+                                    Task { @MainActor in
+                                        await Task.yield()
+                                        scrollView.scrollTo(previousFirstMessageID, anchor: .top)
+                                    }
+                                } label: {
+                                    Label(
+                                        "Load \(min(hiddenMessageCount, IRCTranscriptPresentationPolicy.earlierMessagePageSize)) earlier messages",
+                                        systemImage: "arrow.up"
+                                    )
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: textMetrics.size(13), weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, textMetrics.spacing(8))
+                                .accessibilityHint("Keeps the current reading position")
                             }
-                        } label: {
-                            Label(
-                                "Load \(min(hiddenMessageCount, IRCTranscriptPresentationPolicy.earlierMessagePageSize)) earlier messages",
-                                systemImage: "arrow.up"
-                            )
-                            .frame(maxWidth: .infinity)
+
+                            ForEach(lazyMessages) { message in
+                                messageRow(for: message)
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .font(.system(size: textMetrics.size(13), weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, textMetrics.spacing(8))
-                        .accessibilityHint("Keeps the current reading position")
                     }
 
-                    ForEach(messages) { message in
-                        MessageRow(
-                            message: message,
-                            state: state,
-                            selection: selection,
-                            chatFont: chatFont,
-                            usesColoredNicknames: usesColoredNicknames,
-                            usesMonospacedServerMessages: usesMonospacedServerMessages,
-                            rendersIRCFormatting: rendersIRCFormatting,
-                            automaticallyPreviewsLinks: automaticallyPreviewsLinks,
-                            automaticallyPreviewsImages: automaticallyPreviewsImages,
-                            messageSpacing: messageSpacing
-                        )
-                        .id(message.id)
-                    }
+                    VStack(
+                        alignment: .leading,
+                        spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
+                    ) {
+                        ForEach(eagerMessages) { message in
+                            messageRow(for: message)
+                        }
 
-                    // Keep the target inside the lazy container so scrolling
-                    // to the tail materializes the final message rows instead
-                    // of relying on an estimated LazyVStack height.
-                    Color.clear
-                        .frame(height: textMetrics.spacing(18))
-                        .id(ScrollTarget.tail)
+                        Color.clear
+                            .frame(height: textMetrics.spacing(18))
+                            .id(ScrollTarget.tail)
+                    }
                 }
                 .padding(.horizontal, textMetrics.spacing(24))
                 .padding(.top, textMetrics.spacing(18))
@@ -1302,6 +1547,22 @@ private struct ConversationTranscript: View {
         }
 #endif
     }
+
+    private func messageRow(for message: IRCMessage) -> some View {
+        MessageRow(
+            message: message,
+            state: state,
+            selection: selection,
+            chatFont: chatFont,
+            usesColoredNicknames: usesColoredNicknames,
+            usesMonospacedServerMessages: usesMonospacedServerMessages,
+            rendersIRCFormatting: rendersIRCFormatting,
+            automaticallyPreviewsLinks: automaticallyPreviewsLinks,
+            automaticallyPreviewsImages: automaticallyPreviewsImages,
+            messageSpacing: messageSpacing
+        )
+        .id(message.id)
+    }
 }
 
 #if DEBUG
@@ -1311,6 +1572,8 @@ private struct TranscriptDebugContext {
     let title: String
     let revision: Int
     let messageCount: Int
+    let lazyMessageCount: Int
+    let eagerMessageCount: Int
     let lastMessageDescription: String
 
     init(
@@ -1319,6 +1582,8 @@ private struct TranscriptDebugContext {
         title: String,
         revision: Int,
         messageCount: Int,
+        lazyMessageCount: Int,
+        eagerMessageCount: Int,
         lastMessageID: UUID?
     ) {
         self.instanceID = instanceID
@@ -1326,6 +1591,8 @@ private struct TranscriptDebugContext {
         self.title = title
         self.revision = revision
         self.messageCount = messageCount
+        self.lazyMessageCount = lazyMessageCount
+        self.eagerMessageCount = eagerMessageCount
         lastMessageDescription = lastMessageID?.uuidString ?? "nil"
     }
 }
@@ -1343,7 +1610,7 @@ private enum TranscriptDebugLog {
         isFollowingTail: Bool
     ) {
         logger.debug(
-            "state event=\(event, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) last=\(context.lastMessageDescription, privacy: .public) positioned=\(hasPositionedInitialMessages, privacy: .public) followingTail=\(isFollowingTail, privacy: .public)"
+            "state event=\(event, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) lazy=\(context.lazyMessageCount, privacy: .public) eager=\(context.eagerMessageCount, privacy: .public) last=\(context.lastMessageDescription, privacy: .public) positioned=\(hasPositionedInitialMessages, privacy: .public) followingTail=\(isFollowingTail, privacy: .public)"
         )
     }
 
@@ -1359,7 +1626,7 @@ private enum TranscriptDebugLog {
             ? geometry.contentBounds.maxY - geometry.visibleBounds.maxY
             : geometry.visibleBounds.minY - geometry.contentBounds.minY
         logger.debug(
-            "geometry event=\(event, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) visible=\(visibleDescription, privacy: .public) content=\(contentDescription, privacy: .public) frame=\(frameDescription, privacy: .public) flipped=\(geometry.contentIsFlipped, privacy: .public) bottomDistance=\(distanceFromBottom, privacy: .public)"
+            "geometry event=\(event, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) lazy=\(context.lazyMessageCount, privacy: .public) eager=\(context.eagerMessageCount, privacy: .public) visible=\(visibleDescription, privacy: .public) content=\(contentDescription, privacy: .public) frame=\(frameDescription, privacy: .public) flipped=\(geometry.contentIsFlipped, privacy: .public) bottomDistance=\(distanceFromBottom, privacy: .public)"
         )
     }
 }

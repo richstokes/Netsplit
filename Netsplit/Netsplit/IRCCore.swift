@@ -400,6 +400,7 @@ struct IRCServerFeatures: Equatable {
   var maximumNicknameLength: Int?
   var maximumChannelLength: Int?
   var maximumModesPerCommand: Int?
+  var maximumLineLength: Int = IRCTextFraming.defaultMaximumLineLength
 
   mutating func apply(parameters: ArraySlice<String>) {
     for parameter in parameters {
@@ -468,6 +469,10 @@ struct IRCServerFeatures: Equatable {
       maximumChannelLength = positiveInteger(value)
     case "MODES":
       maximumModesPerCommand = positiveInteger(value)
+    case "LINELEN":
+      if let parsed = positiveInteger(value) {
+        maximumLineLength = parsed
+      }
     default:
       break
     }
@@ -485,6 +490,7 @@ struct IRCServerFeatures: Equatable {
     case "NICKLEN": maximumNicknameLength = nil
     case "CHANNELLEN": maximumChannelLength = nil
     case "MODES": maximumModesPerCommand = nil
+    case "LINELEN": maximumLineLength = defaults.maximumLineLength
     default: break
     }
   }
@@ -534,7 +540,9 @@ enum IRCMemberParser {
 }
 
 enum IRCTextFraming {
-  static let maximumLineBytes = 510
+  static let defaultMaximumLineLength = 512
+  static let lineTerminatorBytes = 2
+  static let maximumLineBytes = defaultMaximumLineLength - lineTerminatorBytes
 
   static func sanitizedSingleLine(_ value: String) -> String {
     value
@@ -544,6 +552,7 @@ enum IRCTextFraming {
 
   static func prefix(_ value: String, fittingUTF8ByteCount limit: Int = maximumLineBytes) -> String
   {
+    guard limit > 0 else { return "" }
     guard value.utf8.count > limit else { return value }
     var result = ""
     var byteCount = 0
@@ -556,13 +565,31 @@ enum IRCTextFraming {
     return result
   }
 
+  static func messageContentByteLimit(
+    commandPrefix: String,
+    suffix: String = "",
+    maximumLineLength: Int = defaultMaximumLineLength,
+    sourcePrefix: String? = nil
+  ) -> Int {
+    let relayPrefixBytes = sourcePrefix.map { ":\($0) ".utf8.count } ?? 0
+    return max(
+      0,
+      maximumLineLength - lineTerminatorBytes - relayPrefixBytes
+        - commandPrefix.utf8.count - suffix.utf8.count
+    )
+  }
+
   static func messageChunks(
     _ text: String,
     commandPrefix: String,
     suffix: String = "",
     maximumLineBytes: Int = maximumLineBytes
   ) -> [String] {
-    let availableBytes = maximumLineBytes - commandPrefix.utf8.count - suffix.utf8.count
+    let availableBytes = messageContentByteLimit(
+      commandPrefix: commandPrefix,
+      suffix: suffix,
+      maximumLineLength: maximumLineBytes + lineTerminatorBytes
+    )
     guard availableBytes > 0 else { return [] }
 
     let normalized =
@@ -590,6 +617,20 @@ enum IRCTextFraming {
       if !chunk.isEmpty { result.append(chunk) }
     }
     return result
+  }
+}
+
+enum IRCOutgoingEchoPolicy {
+  /// A server may shorten a relayed PRIVMSG after adding the sender prefix.
+  /// Treat a substantial prefix as the echo of the queued outgoing message,
+  /// while keeping short, merely-similar messages distinct.
+  static let minimumTruncatedEchoBytes = 64
+
+  static func matches(sentText: String, echoedText: String) -> Bool {
+    if sentText == echoedText { return true }
+    return echoedText.utf8.count >= minimumTruncatedEchoBytes
+      && echoedText.utf8.count < sentText.utf8.count
+      && sentText.hasPrefix(echoedText)
   }
 }
 

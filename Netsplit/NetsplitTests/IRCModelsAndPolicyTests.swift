@@ -511,7 +511,8 @@ struct IRCModelsAndPolicyTests {
             "NETWORK=ExampleNet",
             "NICKLEN=24",
             "CHANNELLEN=50",
-            "MODES=6"
+            "MODES=6",
+            "LINELEN=2048"
         ][...])
 
         #expect(features.caseMapping == .ascii)
@@ -527,10 +528,11 @@ struct IRCModelsAndPolicyTests {
         #expect(features.maximumNicknameLength == 24)
         #expect(features.maximumChannelLength == 50)
         #expect(features.maximumModesPerCommand == 6)
+        #expect(features.maximumLineLength == 2048)
 
         features.apply(parameters: [
             "-CASEMAPPING", "-PREFIX", "-CHANMODES", "-CHANTYPES",
-            "-STATUSMSG", "-NETWORK", "-NICKLEN", "-CHANNELLEN", "-MODES"
+            "-STATUSMSG", "-NETWORK", "-NICKLEN", "-CHANNELLEN", "-MODES", "-LINELEN"
         ][...])
         #expect(features == .defaults)
     }
@@ -1426,6 +1428,24 @@ struct IRCModelsAndPolicyTests {
         state.setDraft("", for: first)
         #expect(state.draft(for: first).isEmpty)
         #expect(state.draft(for: second) == "second draft")
+    }
+
+    @Test("Conversation composer stops at the target's UTF-8 message budget")
+    @MainActor
+    func boundsConversationComposerDrafts() throws {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let conversation = try #require(state.selection)
+        let maximumBytes = try #require(state.maximumMessageBytes(for: conversation))
+        #expect(maximumBytes > 400)
+        let fittingDraft = String(repeating: "a", count: maximumBytes)
+
+        #expect(state.boundedComposerDraft(fittingDraft, for: conversation) == fittingDraft)
+        #expect(state.boundedComposerDraft(fittingDraft + "b", for: conversation) == fittingDraft)
+        #expect(state.boundedComposerDraft("/" + fittingDraft + "b", for: conversation)
+            == "/" + fittingDraft + "b")
+        #expect(!state.send(fittingDraft + "b", to: conversation))
     }
 
     @Test("Selection history navigates backward, forward, and clears forward branches")

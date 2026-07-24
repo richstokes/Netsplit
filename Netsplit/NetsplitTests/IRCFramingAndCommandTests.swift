@@ -168,6 +168,47 @@ struct IRCFramingAndCommandTests {
         #expect(IRCTextFraming.messageChunks("message", commandPrefix: String(repeating: "x", count: 510)).isEmpty)
     }
 
+    @Test("Calculates byte-accurate message budgets including relay overhead")
+    func calculatesMessageContentLimits() {
+        let commandPrefix = "PRIVMSG #swift :"
+        #expect(IRCTextFraming.messageContentByteLimit(commandPrefix: commandPrefix) == 494)
+        #expect(IRCTextFraming.messageContentByteLimit(
+            commandPrefix: commandPrefix,
+            maximumLineLength: 1_024
+        ) == 1_006)
+        #expect(IRCTextFraming.messageContentByteLimit(
+            commandPrefix: commandPrefix,
+            sourcePrefix: "NetsplitUser!user@example.org"
+        ) == 463)
+
+        let bounded = IRCTextFraming.prefix(
+            String(repeating: "é", count: 300),
+            fittingUTF8ByteCount: 463
+        )
+        #expect(bounded.utf8.count == 462)
+        #expect(bounded.count == 231)
+    }
+
+    @Test("Correlates exact and server-truncated outgoing echoes")
+    func correlatesOutgoingEchoes() {
+        let sent = String(repeating: "This is a large message. ", count: 20)
+        let substantialTruncation = IRCTextFraming.prefix(
+            sent,
+            fittingUTF8ByteCount: sent.utf8.count - 20
+        )
+
+        #expect(IRCOutgoingEchoPolicy.matches(sentText: sent, echoedText: sent))
+        #expect(IRCOutgoingEchoPolicy.matches(
+            sentText: sent,
+            echoedText: substantialTruncation
+        ))
+        #expect(!IRCOutgoingEchoPolicy.matches(sentText: sent, echoedText: "This is a large"))
+        #expect(!IRCOutgoingEchoPolicy.matches(
+            sentText: sent,
+            echoedText: String(sent.dropFirst())
+        ))
+    }
+
     @Test("Translates user-friendly on-connect commands to IRC wire commands")
     func translatesOnConnectCommands() {
         let cases: [(String, String?)] = [
