@@ -141,6 +141,7 @@ final class IRCAppState: ObservableObject {
     private var connections: [UUID: IRCConnection] = [:]
     private var disconnectingConnections: [UUID: IRCConnection] = [:]
     private var disconnectCompletionWaiters: [UUID: [@MainActor () -> Void]] = [:]
+    private var oneOffServerIDs = Set<UUID>()
     private var pendingJoins: [String: PendingJoin] = [:]
     private var activeNicknames: [UUID: String] = [:]
     private var registeredServerIDs = Set<UUID>()
@@ -248,6 +249,14 @@ final class IRCAppState: ObservableObject {
         IRCServerOrdering.alphabetically(
             profiles.filter { connections[$0.id] != nil }
         )
+    }
+
+    var storedProfiles: [ServerProfile] {
+        profiles.filter { !oneOffServerIDs.contains($0.id) }
+    }
+
+    func isOneOffServer(_ profile: ServerProfile) -> Bool {
+        oneOffServerIDs.contains(profile.id)
     }
 
     var selectedProfile: ServerProfile? {
@@ -677,7 +686,12 @@ final class IRCAppState: ObservableObject {
     func toggleConnection(for profile: ServerProfile) {
         if connections[profile.id] != nil {
             if case .failed = status(for: profile) {
+                let wasOneOffServer = isOneOffServer(profile)
                 disconnect(profile)
+                if wasOneOffServer {
+                    oneOffServerIDs.insert(profile.id)
+                    profiles.append(profile)
+                }
                 connect(profile)
             } else {
                 disconnect(profile)
@@ -723,6 +737,23 @@ final class IRCAppState: ObservableObject {
         )
     }
 
+    private func connectOneOffServer(_ argument: String, reportingTo item: SidebarItem) {
+        switch IRCOneOffServerCommand.endpoint(from: argument) {
+        case .failure(let error):
+            appendSystem(error.message, for: item)
+        case .success(let endpoint):
+            let profile = ServerProfile(
+                name: endpoint.hostname,
+                hostname: endpoint.hostname,
+                port: endpoint.port,
+                useTLS: endpoint.useTLS
+            )
+            oneOffServerIDs.insert(profile.id)
+            profiles.append(profile)
+            connect(profile)
+        }
+    }
+
     func disconnect(_ profile: ServerProfile, reason: String? = nil) {
         systemSleepServerIDs.remove(profile.id)
         cancelScheduledReconnect(for: profile.id, resetAttempts: true)
@@ -739,6 +770,14 @@ final class IRCAppState: ObservableObject {
         registrationNicknameSuffixes.removeValue(forKey: profile.id)
         if let transport {
             retainWhileQuitting(transport, reason: reason ?? resolvedQuitMessage())
+        }
+        if oneOffServerIDs.remove(profile.id) != nil {
+            removeConversations(for: profile.id)
+            conversations.removeValue(forKey: profile.id)
+            messageUpdateSignals.removeValue(forKey: profile.id)
+            serverFeatures.removeValue(forKey: profile.id)
+            muteSnapshotsByServer.removeValue(forKey: profile.id)
+            profiles.removeAll { $0.id == profile.id }
         }
     }
 
@@ -1321,8 +1360,13 @@ final class IRCAppState: ObservableObject {
 
     private func executeCommand(_ input: String, in item: SidebarItem) {
         let parts = input.dropFirst().split(separator: " ", maxSplits: 1).map(String.init)
-        guard let command = parts.first?.uppercased(), let profile = profile(for: item) else { return }
+        guard let command = parts.first?.uppercased() else { return }
         let argument = parts.count > 1 ? parts[1] : ""
+        if command == "SERVER" {
+            connectOneOffServer(argument, reportingTo: item)
+            return
+        }
+        guard let profile = profile(for: item) else { return }
         let localCommands: Set<String> = ["SHOWMUTES", "MUTE", "UNMUTE", "QUIT", "DISCONNECT"]
         if !localCommands.contains(command), !canSendMessages(on: profile, reportingTo: item) {
             return
@@ -3355,7 +3399,7 @@ final class IRCAppState: ObservableObject {
 
     private func saveProfiles() {
         muteSnapshotsByServer.removeAll(keepingCapacity: true)
-        guard let data = try? JSONEncoder().encode(profiles) else { return }
+        guard let data = try? JSONEncoder().encode(storedProfiles) else { return }
         UserDefaults.standard.set(data, forKey: "profiles")
     }
 

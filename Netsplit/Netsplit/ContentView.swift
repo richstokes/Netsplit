@@ -173,15 +173,17 @@ private struct SidebarView: View {
                     ServerRow(profile: profile, state: state)
                         .tag(SidebarItem.server(profile.id))
                         .contextMenu {
-                            Button("Edit Profile…") { editingProfile = profile }
-                            Divider()
+                            if !state.isOneOffServer(profile) {
+                                Button("Edit Profile…") { editingProfile = profile }
+                                Divider()
+                            }
                             if case .failed = state.status(for: profile) {
                                 Button("Retry Now") { state.toggleConnection(for: profile) }
                             }
                             Button(state.isWaitingToReconnect(profile) ? "Stop Reconnecting" : "Disconnect") {
                                 state.disconnect(profile)
                             }
-                            if !profile.isBuiltIn {
+                            if !profile.isBuiltIn && !state.isOneOffServer(profile) {
                                 Divider()
                                 Button("Delete Server Profile", role: .destructive) { state.delete(profile) }
                             }
@@ -523,7 +525,7 @@ private struct ConnectionCenterView: View {
                     Text("Server Profiles")
                         .font(.system(size: textMetrics.size(20), weight: .semibold))
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
-                        ForEach(state.profiles) { profile in
+                        ForEach(state.storedProfiles) { profile in
                             ServerProfileCard(profile: profile, state: state, editingProfile: $editingProfile)
                         }
                     }
@@ -867,7 +869,7 @@ private struct ConversationView: View {
     private static let supportedCommands = [
         "AWAY", "CTCP", "DISCONNECT", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
         "MODE", "MOTD", "MSG", "MUTE", "NAMES", "NICK", "NOTICE", "PART",
-        "QUERY", "QUIT", "SHOWMUTES", "SLAP", "TOPIC", "UNMUTE", "VERSION",
+        "QUERY", "QUIT", "SERVER", "SHOWMUTES", "SLAP", "TOPIC", "UNMUTE", "VERSION",
         "WHO", "WHOIS"
     ]
 

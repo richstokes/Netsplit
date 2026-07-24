@@ -14,6 +14,53 @@ private enum AppSceneID {
     static let mainWindow = "main"
 }
 
+enum IRCHistoryNavigationDirection {
+    case back
+    case forward
+}
+
+enum IRCHistoryNavigationShortcut {
+    // Virtual key codes are stable for the arrow keys across macOS keyboard layouts.
+    private static let leftArrowKeyCode: UInt16 = 123
+    private static let rightArrowKeyCode: UInt16 = 124
+
+    static func direction(
+        keyCode: UInt16,
+        charactersIgnoringModifiers: String?
+    ) -> IRCHistoryNavigationDirection? {
+        // Logi Options can implement its Back and Forward actions as
+        // Command-Left Arrow and Command-Right Arrow key events.
+        switch keyCode {
+        case leftArrowKeyCode:
+            return .back
+        case rightArrowKeyCode:
+            return .forward
+        default:
+            break
+        }
+
+        switch charactersIgnoringModifiers {
+        case "[":
+            return .back
+        case "]":
+            return .forward
+        default:
+            return nil
+        }
+    }
+
+    static func direction(mouseButtonNumber: Int) -> IRCHistoryNavigationDirection? {
+        switch mouseButtonNumber {
+        case 3:
+            return .back
+        case 4:
+            return .forward
+        default:
+            return nil
+        }
+    }
+}
+
 final class NetsplitAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     weak var state: IRCAppState? {
         didSet { deliverPendingMentionNotificationDestination() }
@@ -121,6 +168,24 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate, UNUserNotifica
             let shortcutModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
             guard !event.isARepeat,
                   shortcutModifiers == .command else { return event }
+
+            if let direction = IRCHistoryNavigationShortcut.direction(
+                keyCode: event.keyCode,
+                charactersIgnoringModifiers: event.charactersIgnoringModifiers
+            ) {
+                switch direction {
+                case .back:
+                    if state?.canNavigateBack == true {
+                        state?.navigateBack()
+                    }
+                case .forward:
+                    if state?.canNavigateForward == true {
+                        state?.navigateForward()
+                    }
+                }
+                return nil
+            }
+
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "w" where state?.canCloseActiveSelection == true:
                 state?.closeActiveSelection()
@@ -130,16 +195,6 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate, UNUserNotifica
                 return nil
             case "k":
                 state?.presentJumpPalette()
-                return nil
-            case "[":
-                if state?.canNavigateBack == true {
-                    state?.navigateBack()
-                }
-                return nil
-            case "]":
-                if state?.canNavigateForward == true {
-                    state?.navigateForward()
-                }
                 return nil
             case let digit? where digit.count == 1 && ("1"..."9").contains(digit):
                 guard let number = Int(digit), state?.selectActiveServer(number: number) == true else {
@@ -151,11 +206,14 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate, UNUserNotifica
             }
 
         case .otherMouseDown:
-            switch event.buttonNumber {
-            case 3 where state?.canNavigateBack == true:
+            guard let direction = IRCHistoryNavigationShortcut.direction(
+                mouseButtonNumber: event.buttonNumber
+            ) else { return event }
+            switch direction {
+            case .back where state?.canNavigateBack == true:
                 state?.navigateBack()
                 return nil
-            case 4 where state?.canNavigateForward == true:
+            case .forward where state?.canNavigateForward == true:
                 state?.navigateForward()
                 return nil
             default:

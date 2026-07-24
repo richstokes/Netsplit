@@ -4,16 +4,62 @@ import Testing
 
 @Suite("IRC outbound framing and commands")
 struct IRCFramingAndCommandTests {
+    @Test("Parses one-off servers with inferred TLS and explicit overrides")
+    func parsesOneOffServers() throws {
+        let defaultEndpoint = try IRCOneOffServerCommand.endpoint(from: "irc.libera.chat").get()
+        #expect(defaultEndpoint == IRCOneOffServerEndpoint(
+            hostname: "irc.libera.chat",
+            port: 6697,
+            useTLS: true
+        ))
+
+        let inferredTLS = try IRCOneOffServerCommand.endpoint(from: "irc.libera.chat 6697").get()
+        #expect(inferredTLS.useTLS)
+
+        let inferredPlaintext = try IRCOneOffServerCommand.endpoint(from: "irc.example.com 6667").get()
+        #expect(!inferredPlaintext.useTLS)
+
+        let forcedTLS = try IRCOneOffServerCommand.endpoint(from: "--tls irc.example.com 7000").get()
+        #expect(forcedTLS.port == 7000)
+        #expect(forcedTLS.useTLS)
+
+        let forcedPlaintext = try IRCOneOffServerCommand.endpoint(from: "irc.example.com --no-tls").get()
+        #expect(forcedPlaintext.port == 6667)
+        #expect(!forcedPlaintext.useTLS)
+    }
+
+    @Test("Rejects malformed one-off server commands")
+    func rejectsMalformedOneOffServers() {
+        let invalidArguments = [
+            "",
+            "irc.example.com 0",
+            "irc.example.com 65536",
+            "irc.example.com not-a-port",
+            "irc.example.com 6697 extra",
+            "irc.example.com --tls --no-tls",
+            "irc.example.com --unknown"
+        ]
+
+        for argument in invalidArguments {
+            if case .success = IRCOneOffServerCommand.endpoint(from: argument) {
+                Issue.record("Expected invalid /server arguments: \(argument)")
+            }
+        }
+    }
+
     @Test("Builds CTCP VERSION replies from the app marketing version")
     func buildsClientVersionReply() throws {
         #expect(IRCClientVersion.ctcpReply(infoDictionary: [
             "CFBundleShortVersionString": "9.8.7"
-        ]) == "Netsplit 9.8.7 for macOS")
+        ]) == "Netsplit 9.8.7 for macOS - https://github.com/richstokes/Netsplit")
 
         let bundledVersion = try #require(
             Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         )
-        #expect(IRCClientVersion.ctcpReply == "Netsplit \(bundledVersion) for macOS")
+        #expect(
+            IRCClientVersion.ctcpReply
+                == "Netsplit \(bundledVersion) for macOS - https://github.com/richstokes/Netsplit"
+        )
     }
 
     @Test("Removes CR/LF command injection and enforces the IRC byte limit")

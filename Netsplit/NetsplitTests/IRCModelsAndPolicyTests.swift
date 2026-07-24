@@ -1364,6 +1364,29 @@ struct IRCModelsAndPolicyTests {
         #expect(!state.canNavigateForward)
     }
 
+    @Test("History shortcuts recognize Logitech command-arrow and auxiliary mouse events")
+    func recognizesHistoryNavigationInput() {
+        #expect(IRCHistoryNavigationShortcut.direction(
+            keyCode: 123,
+            charactersIgnoringModifiers: String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!))
+        ) == .back)
+        #expect(IRCHistoryNavigationShortcut.direction(
+            keyCode: 124,
+            charactersIgnoringModifiers: String(Character(UnicodeScalar(NSRightArrowFunctionKey)!))
+        ) == .forward)
+        #expect(IRCHistoryNavigationShortcut.direction(
+            keyCode: 33,
+            charactersIgnoringModifiers: "["
+        ) == .back)
+        #expect(IRCHistoryNavigationShortcut.direction(
+            keyCode: 30,
+            charactersIgnoringModifiers: "]"
+        ) == .forward)
+        #expect(IRCHistoryNavigationShortcut.direction(mouseButtonNumber: 3) == .back)
+        #expect(IRCHistoryNavigationShortcut.direction(mouseButtonNumber: 4) == .forward)
+        #expect(IRCHistoryNavigationShortcut.direction(mouseButtonNumber: 2) == nil)
+    }
+
     @Test("Selection history skips conversations after they close")
     @MainActor
     func skipsClosedHistoryItems() {

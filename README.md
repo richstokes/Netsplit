@@ -62,8 +62,8 @@ listed in the app menus where applicable.
 | --- | --- |
 | `⌘K` | Open the jump palette to search active servers, channels, and direct messages. |
 | `⌘1`–`⌘9` | Switch to an active server in sidebar order, restoring its last-open conversation. |
-| `⌘[` | Navigate back through recently viewed conversations. |
-| `⌘]` | Navigate forward through recently viewed conversations. |
+| `⌘[` / `⌘←` | Navigate back through recently viewed conversations. |
+| `⌘]` / `⌘→` | Navigate forward through recently viewed conversations. |
 | `⌃⌘S` | Move keyboard focus to the server and channel sidebar. |
 | `⌃⌘M` | Move keyboard focus to the message field. |
 | `⌘L` | Browse channels on the selected server. |
@@ -108,6 +108,7 @@ server, channel, or private message first.
 | `/join <channel>` | Join a channel. A missing channel prefix is automatically changed to `#`. |
 | `/list [arguments]` | Open the live channel browser and request the server's channel list. |
 | `/part [#channel] [reason]` | Leave the current channel, a named joined channel, or include a part reason. |
+| `/server <hostname> [port] [--tls\|--no-tls]` | Connect for this session without saving a profile. With no port, the defaults are 6697/TLS or 6667 with `--no-tls`. Explicit port 6697 implies TLS; other explicit ports imply plaintext unless overridden by a flag. |
 | `/disconnect [reason]` | Disconnect from the current server. |
 | `/quit [reason]` | Disconnect from the current server. |
 | `/topic [#channel] [topic]` | View or change a topic. In a channel, a non-channel first argument is treated as the new topic. |
