@@ -5,3 +5,4 @@ build/
 xcuserdata/
 
 .asc/
+/Scripts/__pycache__/
