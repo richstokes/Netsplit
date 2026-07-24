@@ -253,6 +253,30 @@ struct IRCModelsAndPolicyTests {
         ) == freshChannel.id)
     }
 
+    @Test("Direct message notifications follow the global setting and active conversation")
+    func resolvesDirectMessageNotificationSettings() {
+        #expect(IRCDirectMessageNotificationPolicy.shouldNotify(
+            isEnabled: true,
+            applicationIsActive: false,
+            conversationIsSelected: true
+        ))
+        #expect(IRCDirectMessageNotificationPolicy.shouldNotify(
+            isEnabled: true,
+            applicationIsActive: true,
+            conversationIsSelected: false
+        ))
+        #expect(!IRCDirectMessageNotificationPolicy.shouldNotify(
+            isEnabled: true,
+            applicationIsActive: true,
+            conversationIsSelected: true
+        ))
+        #expect(!IRCDirectMessageNotificationPolicy.shouldNotify(
+            isEnabled: false,
+            applicationIsActive: false,
+            conversationIsSelected: false
+        ))
+    }
+
     @Test("WHOIS channel lists preserve channels and remove membership prefixes")
     func parsesWhoisChannels() {
         let channels = IRCWhoisChannelParser.channels(
@@ -1212,6 +1236,22 @@ struct IRCModelsAndPolicyTests {
 
         #expect(state.directMessages.isEmpty)
         #expect(state.selection == .server(profile.id))
+    }
+
+    @Test("Opening a direct message notification selects its conversation")
+    @MainActor
+    func opensDirectMessageNotification() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+
+        state.openDirectMessageNotification(
+            IRCDirectMessageNotificationDestination(serverID: profile.id, nickname: "Alice")
+        )
+
+        let directMessage = try #require(state.directMessages.first {
+            $0.serverID == profile.id && $0.name == "Alice"
+        })
+        #expect(state.selection == .directMessage(directMessage.id))
     }
 
     @Test("Conversation update signals stay scoped to their conversation")

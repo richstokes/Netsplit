@@ -78,7 +78,13 @@ final class IRCAppState: ObservableObject {
     @Published var mentionNotificationsEnabled: Bool {
         didSet {
             UserDefaults.standard.set(mentionNotificationsEnabled, forKey: "mentionNotificationsEnabled")
-            if mentionNotificationsEnabled { requestMentionNotificationAuthorization() }
+            if mentionNotificationsEnabled { requestNotificationAuthorization() }
+        }
+    }
+    @Published var directMessageNotificationsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(directMessageNotificationsEnabled, forKey: "directMessageNotificationsEnabled")
+            if directMessageNotificationsEnabled { requestNotificationAuthorization() }
         }
     }
     @Published var applicationAppearance: IRCApplicationAppearance {
@@ -220,6 +226,7 @@ final class IRCAppState: ObservableObject {
         reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
         mentionNotificationsEnabled = defaults.object(forKey: "mentionNotificationsEnabled") as? Bool ?? false
+        directMessageNotificationsEnabled = defaults.object(forKey: "directMessageNotificationsEnabled") as? Bool ?? false
         applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
         messageSpacing = defaults.string(forKey: "messageSpacing").flatMap(IRCMessageSpacing.init(rawValue:)) ?? .comfortable
         chatFont = defaults.string(forKey: "chatFont").flatMap(IRCChatFont.init(rawValue:)) ?? .default
@@ -236,8 +243,10 @@ final class IRCAppState: ObservableObject {
         profiles = ServerProfileStore.load(from: defaults)
         selection = .connectionCenter
 
-        if mentionNotificationsEnabled || profiles.contains(where: { $0.mentionNotificationsOverride == true }) {
-            requestMentionNotificationAuthorization()
+        if mentionNotificationsEnabled
+            || directMessageNotificationsEnabled
+            || profiles.contains(where: { $0.mentionNotificationsOverride == true }) {
+            requestNotificationAuthorization()
         }
     }
 
@@ -378,6 +387,12 @@ final class IRCAppState: ObservableObject {
         if !resolvePendingMentionNotificationDestination() {
             selection = .server(destination.serverID)
         }
+    }
+
+    func openDirectMessageNotification(_ destination: IRCDirectMessageNotificationDestination) {
+        guard profiles.contains(where: { $0.id == destination.serverID }) else { return }
+        let conversation = directMessage(named: destination.nickname, serverID: destination.serverID)
+        selection = .directMessage(conversation.id)
     }
 
     func requestSidebarFocus() {
@@ -843,7 +858,7 @@ final class IRCAppState: ObservableObject {
         saveCredentials(for: profile, serverPassword: serverPassword, saslPassword: saslPassword, onConnectCommands: onConnectCommands, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
         saveProfiles()
         selection = .connectionCenter
-        if mentionNotificationsOverride == true { requestMentionNotificationAuthorization() }
+        if mentionNotificationsOverride == true { requestNotificationAuthorization() }
     }
 
     func delete(_ profile: ServerProfile) {
@@ -881,7 +896,7 @@ final class IRCAppState: ObservableObject {
         profiles[index] = updated
         saveCredentials(for: updated, serverPassword: serverPassword, saslPassword: saslPassword, onConnectCommands: onConnectCommands, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey)
         saveProfiles()
-        if mentionNotificationsOverride == true { requestMentionNotificationAuthorization() }
+        if mentionNotificationsOverride == true { requestNotificationAuthorization() }
     }
 
     func restorePreset(_ profile: ServerProfile) {
@@ -1782,7 +1797,8 @@ final class IRCAppState: ObservableObject {
                     let conversation = directMessage(named: sender, serverID: profile.id)
                     append(
                         IRCMessage(sender: "\(sender) (notice)", text: text, isNotice: true, nicknameColorKey: sender),
-                        for: .directMessage(conversation.id)
+                        for: .directMessage(conversation.id),
+                        notifyDirectMessage: true
                     )
                 }
             }
@@ -1807,7 +1823,11 @@ final class IRCAppState: ObservableObject {
                 )
             } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
-                append(IRCMessage(sender: sender, text: text), for: .directMessage(conversation.id))
+                append(
+                    IRCMessage(sender: sender, text: text),
+                    for: .directMessage(conversation.id),
+                    notifyDirectMessage: true
+                )
             }
         case "INVITE":
             guard let invite = IRCIncomingInvite(
@@ -2428,7 +2448,7 @@ final class IRCAppState: ObservableObject {
                 )
             } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
                 let conversation = directMessage(named: sender, serverID: profile.id)
-                append(message, for: .directMessage(conversation.id))
+                append(message, for: .directMessage(conversation.id), notifyDirectMessage: true)
             }
         case "VERSION":
             // A bare VERSION is a CTCP request. Reply privately with concise
@@ -3178,7 +3198,8 @@ final class IRCAppState: ObservableObject {
         _ message: IRCMessage,
         for item: SidebarItem,
         markUnread shouldMarkUnread: Bool = true,
-        markMention shouldMarkMention: Bool = false
+        markMention shouldMarkMention: Bool = false,
+        notifyDirectMessage shouldNotifyDirectMessage: Bool = false
     ) {
         guard let id = conversationID(for: item) else { return }
         var resolvedMessage = message
@@ -3198,6 +3219,9 @@ final class IRCAppState: ObservableObject {
         }
         if shouldMarkMention {
             postMentionNotification(for: resolvedMessage, in: item)
+        }
+        if shouldNotifyDirectMessage {
+            postDirectMessageNotification(for: resolvedMessage, in: item)
         }
         messagesDidChange(for: id)
     }
@@ -3232,7 +3256,32 @@ final class IRCAppState: ObservableObject {
         )
     }
 
-    private func requestMentionNotificationAuthorization() {
+    private func postDirectMessageNotification(for message: IRCMessage, in item: SidebarItem) {
+        guard case .directMessage(let conversationID) = item,
+              let conversation = directMessages.first(where: { $0.id == conversationID }),
+              let profile = profiles.first(where: { $0.id == conversation.serverID }),
+              IRCDirectMessageNotificationPolicy.shouldNotify(
+                isEnabled: directMessageNotificationsEnabled,
+                applicationIsActive: NSApplication.shared.isActive,
+                conversationIsSelected: selection == item
+              ) else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Direct message from \(conversation.name)"
+        content.subtitle = profile.name
+        content.body = IRCMessageTextRenderer.plainText(message.text)
+        content.sound = .default
+        content.threadIdentifier = "\(profile.id.uuidString).dm.\(conversation.name)"
+        content.userInfo = [
+            "serverID": profile.id.uuidString,
+            "directMessageNickname": conversation.name
+        ]
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        )
+    }
+
+    private func requestNotificationAuthorization() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 

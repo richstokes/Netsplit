@@ -932,7 +932,11 @@ struct SettingsView: View {
             }
             Section("Notifications") {
                 Toggle("Notify me when my username is mentioned", isOn: $state.mentionNotificationsEnabled)
-                Text("Off by default. Individual server profiles can follow or override this setting. macOS may ask for notification permission when you turn notifications on.")
+                Text("Individual server profiles can follow or override mention notifications.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Notify me when I receive a direct message", isOn: $state.directMessageNotificationsEnabled)
+                Text("Notifications are off by default. macOS may ask for permission when you turn them on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

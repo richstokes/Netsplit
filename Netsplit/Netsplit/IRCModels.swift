@@ -1070,6 +1070,21 @@ struct IRCMentionNotificationDestination: Equatable {
     let channelName: String
 }
 
+enum IRCDirectMessageNotificationPolicy {
+    static func shouldNotify(
+        isEnabled: Bool,
+        applicationIsActive: Bool,
+        conversationIsSelected: Bool
+    ) -> Bool {
+        isEnabled && !(applicationIsActive && conversationIsSelected)
+    }
+}
+
+struct IRCDirectMessageNotificationDestination: Equatable {
+    let serverID: UUID
+    let nickname: String
+}
+
 enum IRCWhoisChannelParser {
     static func channels(
         from value: String,

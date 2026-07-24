@@ -63,14 +63,19 @@ enum IRCHistoryNavigationShortcut {
 
 final class NetsplitAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     weak var state: IRCAppState? {
-        didSet { deliverPendingMentionNotificationDestination() }
+        didSet { deliverPendingNotificationDestination() }
     }
     weak var mainWindow: NSWindow?
     private var isTerminating = false
     private var hasRepliedToTermination = false
     private var shortcutMonitor: Any?
-    private var pendingMentionNotificationDestination: IRCMentionNotificationDestination?
+    private var pendingNotificationDestination: NotificationDestination?
     private let swipeCommitThreshold: CGFloat = 0.25
+
+    private enum NotificationDestination {
+        case mention(IRCMentionNotificationDestination)
+        case directMessage(IRCDirectMessageNotificationDestination)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
@@ -129,35 +134,51 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate, UNUserNotifica
     ) {
         guard response.actionIdentifier != UNNotificationDismissActionIdentifier,
               let serverIDValue = response.notification.request.content.userInfo["serverID"] as? String,
-              let channelName = response.notification.request.content.userInfo["channelName"] as? String,
-              let serverID = UUID(uuidString: serverIDValue),
-              !channelName.isEmpty else {
+              let serverID = UUID(uuidString: serverIDValue) else {
             completionHandler()
             return
         }
 
-        let destination = IRCMentionNotificationDestination(serverID: serverID, channelName: channelName)
+        let userInfo = response.notification.request.content.userInfo
+        let destination: NotificationDestination
+        if let nickname = userInfo["directMessageNickname"] as? String, !nickname.isEmpty {
+            destination = .directMessage(
+                IRCDirectMessageNotificationDestination(serverID: serverID, nickname: nickname)
+            )
+        } else if let channelName = userInfo["channelName"] as? String, !channelName.isEmpty {
+            destination = .mention(
+                IRCMentionNotificationDestination(serverID: serverID, channelName: channelName)
+            )
+        } else {
+            completionHandler()
+            return
+        }
 
         DispatchQueue.main.async { [weak self] in
-            self?.openMentionNotification(destination)
+            self?.openNotification(destination)
             NSApp.activate(ignoringOtherApps: true)
             self?.mainWindow?.makeKeyAndOrderFront(nil)
             completionHandler()
         }
     }
 
-    private func openMentionNotification(_ destination: IRCMentionNotificationDestination) {
+    private func openNotification(_ destination: NotificationDestination) {
         guard let state else {
-            pendingMentionNotificationDestination = destination
+            pendingNotificationDestination = destination
             return
         }
-        pendingMentionNotificationDestination = nil
-        state.openMentionNotification(destination)
+        pendingNotificationDestination = nil
+        switch destination {
+        case .mention(let destination):
+            state.openMentionNotification(destination)
+        case .directMessage(let destination):
+            state.openDirectMessageNotification(destination)
+        }
     }
 
-    private func deliverPendingMentionNotificationDestination() {
-        guard let pendingMentionNotificationDestination, state != nil else { return }
-        openMentionNotification(pendingMentionNotificationDestination)
+    private func deliverPendingNotificationDestination() {
+        guard let pendingNotificationDestination, state != nil else { return }
+        openNotification(pendingNotificationDestination)
     }
 
     private func handleShortcutEvent(_ event: NSEvent) -> NSEvent? {
