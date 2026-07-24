@@ -1,5 +1,70 @@
 import Foundation
 
+struct IRCOnConnectCommandPhases: Codable, Equatable {
+  var beforeFavoritesJoined: [String]
+  var afterFavoritesJoined: [String]
+
+  init(
+    beforeFavoritesJoined: [String] = [],
+    afterFavoritesJoined: [String] = []
+  ) {
+    self.beforeFavoritesJoined = beforeFavoritesJoined
+    self.afterFavoritesJoined = afterFavoritesJoined
+  }
+
+  init(from decoder: Decoder) throws {
+    let singleValueContainer = try decoder.singleValueContainer()
+    if let legacyCommands = try? singleValueContainer.decode([String].self) {
+      beforeFavoritesJoined = legacyCommands
+      afterFavoritesJoined = []
+      return
+    }
+
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    beforeFavoritesJoined =
+      try container.decodeIfPresent([String].self, forKey: .beforeFavoritesJoined) ?? []
+    afterFavoritesJoined =
+      try container.decodeIfPresent([String].self, forKey: .afterFavoritesJoined) ?? []
+  }
+
+  var removingBlankCommands: Self {
+    Self(
+      beforeFavoritesJoined: Self.cleaned(beforeFavoritesJoined),
+      afterFavoritesJoined: Self.cleaned(afterFavoritesJoined)
+    )
+  }
+
+  var isEmpty: Bool {
+    beforeFavoritesJoined.isEmpty && afterFavoritesJoined.isEmpty
+  }
+
+  private static func cleaned(_ commands: [String]) -> [String] {
+    commands
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+  }
+}
+
+struct IRCOnConnectJoinTracker: Equatable {
+  private(set) var pendingChannelNames: [String]
+
+  init(channelNames: [String]) {
+    pendingChannelNames = channelNames
+  }
+
+  var isComplete: Bool {
+    pendingChannelNames.isEmpty
+  }
+
+  mutating func complete(_ channelName: String, caseMapping: IRCCaseMapping) {
+    let normalizedChannelName = caseMapping.normalize(channelName)
+    guard let index = pendingChannelNames.firstIndex(where: {
+      caseMapping.normalize($0) == normalizedChannelName
+    }) else { return }
+    pendingChannelNames.remove(at: index)
+  }
+}
+
 enum IRCClientVersion {
   static var ctcpReply: String {
     ctcpReply(infoDictionary: Bundle.main.infoDictionary)
@@ -551,6 +616,27 @@ enum IRCCommandTranslator {
     default:
       return argument.isEmpty ? command : "\(command) \(argument)"
     }
+  }
+}
+
+enum IRCCTCPPing {
+  static func payload(token: String) -> String {
+    "\u{01}PING \(token)\u{01}"
+  }
+
+  static func roundTripMilliseconds(sentAt: Date, receivedAt: Date) -> Int {
+    max(0, Int((receivedAt.timeIntervalSince(sentAt) * 1_000).rounded()))
+  }
+}
+
+enum IRCCTCPEchoPolicy {
+  static func isSelfEcho(
+    sender: String,
+    localNickname: String,
+    caseMapping: IRCCaseMapping,
+    canReplyToRequest: Bool
+  ) -> Bool {
+    canReplyToRequest && caseMapping.normalize(sender) == caseMapping.normalize(localNickname)
   }
 }
 

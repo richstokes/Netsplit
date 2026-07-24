@@ -26,7 +26,8 @@ struct ServerProfileEditor: View {
     @State private var useSASL: Bool
     @State private var saslUsername: String
     @State private var saslPassword: String
-    @State private var onConnectCommands: [EditableOnConnectCommand]
+    @State private var beforeFavoritesJoinedCommands: [EditableOnConnectCommand]
+    @State private var afterFavoritesJoinedCommands: [EditableOnConnectCommand]
     @State private var useSSHTunnel: Bool
     @State private var sshHostname: String
     @State private var sshPort: String
@@ -51,9 +52,18 @@ struct ServerProfileEditor: View {
         _useSASL = State(initialValue: profileToEdit?.useSASL ?? false)
         _saslUsername = State(initialValue: profileToEdit?.saslUsername ?? "")
         _saslPassword = State(initialValue: profileToEdit.map { state.saslPassword(for: $0) } ?? "")
-        _onConnectCommands = State(initialValue: profileToEdit.map {
-            state.onConnectCommands(for: $0).map { EditableOnConnectCommand(text: $0) }
-        } ?? [])
+        let onConnectCommands = profileToEdit.map { state.onConnectCommands(for: $0) }
+            ?? IRCOnConnectCommandPhases()
+        _beforeFavoritesJoinedCommands = State(
+            initialValue: onConnectCommands.beforeFavoritesJoined.map {
+                EditableOnConnectCommand(text: $0)
+            }
+        )
+        _afterFavoritesJoinedCommands = State(
+            initialValue: onConnectCommands.afterFavoritesJoined.map {
+                EditableOnConnectCommand(text: $0)
+            }
+        )
         _useSSHTunnel = State(initialValue: profileToEdit?.useSSHTunnel ?? false)
         _sshHostname = State(initialValue: profileToEdit?.sshHostname ?? "")
         _sshPort = State(initialValue: String(profileToEdit?.sshPort ?? 22))
@@ -293,62 +303,21 @@ struct ServerProfileEditor: View {
 
     private var onConnectSection: some View {
         ServerEditorSection(title: "On Connect", systemImage: "terminal") {
-            if onConnectCommands.isEmpty {
-                ServerEditorHelpText("No custom commands will be sent when this server connects.")
-            } else {
-                ForEach(Array(onConnectCommands.enumerated()), id: \.element.id) { index, command in
-                    ServerEditorFieldRow("Command \(index + 1)") {
-                        HStack(spacing: 8) {
-                            TextField(
-                                "/msg NickServ IDENTIFY password",
-                                text: Binding(
-                                    get: { commandText(for: command.id) },
-                                    set: { setCommandText($0, for: command.id) }
-                                ),
-                                prompt: Text("/msg NickServ IDENTIFY password")
-                            )
-                            .accessibilityLabel("On-connect command \(index + 1)")
-                            Button {
-                                moveOnConnectCommand(command.id, by: -1)
-                            } label: {
-                                Image(systemName: "chevron.up")
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(index == 0)
-                            .help("Move command earlier")
-                            .accessibilityLabel("Move command \(index + 1) earlier")
-
-                            Button {
-                                moveOnConnectCommand(command.id, by: 1)
-                            } label: {
-                                Image(systemName: "chevron.down")
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(index == onConnectCommands.count - 1)
-                            .help("Move command later")
-                            .accessibilityLabel("Move command \(index + 1) later")
-
-                            Button(role: .destructive) {
-                                onConnectCommands.removeAll { $0.id == command.id }
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Remove command")
-                            .accessibilityLabel("Remove command \(index + 1)")
-                        }
-                    }
-                }
-            }
-
-            ServerEditorFieldRow("") {
-                Button {
-                    onConnectCommands.append(EditableOnConnectCommand(text: ""))
-                } label: {
-                    Label("Add Command", systemImage: "plus")
-                }
-            }
-            ServerEditorHelpText("Commands run in this order after the IRC server accepts the connection. Netsplit waits 0.5 seconds between commands and 2 seconds after the final command before joining favorite channels.")
+            OnConnectCommandEditor(
+                title: "Before Favorites Are Joined",
+                helpText: "Use this phase for authentication or account setup that must finish before channels are joined.",
+                placeholder: "/msg NickServ IDENTIFY password",
+                commands: $beforeFavoritesJoinedCommands
+            )
+            Divider()
+                .ircDivider()
+            OnConnectCommandEditor(
+                title: "After Favorites Are Joined",
+                helpText: "Use this phase for channel setup such as requesting operator status or setting topics.",
+                placeholder: "/msg ChanServ OP #channel",
+                commands: $afterFavoritesJoinedCommands
+            )
+            ServerEditorHelpText("Commands run in order, 0.5 seconds apart. Netsplit waits 2 seconds after the final pre-join command, joins retained and favorite channels, then runs the post-join commands after those attempts complete. If a server leaves a join unanswered, Netsplit continues after 20 seconds.")
             ServerEditorHelpText("Client commands such as /msg, /nickserv and /identify are accepted, as are raw IRC commands. Commands are stored securely in your macOS Keychain and are not written to the server log.")
         }
     }
@@ -364,28 +333,16 @@ struct ServerProfileEditor: View {
         } else {
             savedSSHPort = parsedSSHPort ?? 22
         }
+        let onConnectCommands = IRCOnConnectCommandPhases(
+            beforeFavoritesJoined: beforeFavoritesJoinedCommands.map(\.text),
+            afterFavoritesJoined: afterFavoritesJoinedCommands.map(\.text)
+        )
         if let profileToEdit {
-            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
+            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
         } else {
-            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands.map(\.text), useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
+            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
         }
         dismiss()
-    }
-
-    private func commandText(for id: UUID) -> String {
-        onConnectCommands.first(where: { $0.id == id })?.text ?? ""
-    }
-
-    private func setCommandText(_ text: String, for id: UUID) {
-        guard let index = onConnectCommands.firstIndex(where: { $0.id == id }) else { return }
-        onConnectCommands[index].text = text
-    }
-
-    private func moveOnConnectCommand(_ id: UUID, by offset: Int) {
-        guard let source = onConnectCommands.firstIndex(where: { $0.id == id }) else { return }
-        let destination = source + offset
-        guard onConnectCommands.indices.contains(destination) else { return }
-        onConnectCommands.swapAt(source, destination)
     }
 
     private func chooseSSHKey() {
@@ -448,6 +405,93 @@ struct ServerProfileEditor: View {
         } catch {
             sshKeyError = "The selected file could not be read as an SSH private key."
         }
+    }
+}
+
+private struct OnConnectCommandEditor: View {
+    let title: String
+    let helpText: String
+    let placeholder: String
+    @Binding var commands: [EditableOnConnectCommand]
+
+    var body: some View {
+        Text(title)
+            .font(.subheadline.weight(.semibold))
+            .accessibilityAddTraits(.isHeader)
+
+        if commands.isEmpty {
+            ServerEditorHelpText("No commands configured for this phase.")
+        } else {
+            ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
+                ServerEditorFieldRow("Command \(index + 1)") {
+                    HStack(spacing: 8) {
+                        TextField(
+                            placeholder,
+                            text: Binding(
+                                get: { commandText(for: command.id) },
+                                set: { setCommandText($0, for: command.id) }
+                            ),
+                            prompt: Text(placeholder)
+                        )
+                        .accessibilityLabel("\(title) command \(index + 1)")
+
+                        Button {
+                            moveCommand(command.id, by: -1)
+                        } label: {
+                            Image(systemName: "chevron.up")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(index == 0)
+                        .help("Move command earlier")
+                        .accessibilityLabel("Move command \(index + 1) earlier")
+
+                        Button {
+                            moveCommand(command.id, by: 1)
+                        } label: {
+                            Image(systemName: "chevron.down")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(index == commands.count - 1)
+                        .help("Move command later")
+                        .accessibilityLabel("Move command \(index + 1) later")
+
+                        Button(role: .destructive) {
+                            commands.removeAll { $0.id == command.id }
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove command")
+                        .accessibilityLabel("Remove command \(index + 1)")
+                    }
+                }
+            }
+        }
+
+        ServerEditorFieldRow("") {
+            Button {
+                commands.append(EditableOnConnectCommand(text: ""))
+            } label: {
+                Label("Add Command", systemImage: "plus")
+            }
+        }
+        ServerEditorHelpText(helpText)
+    }
+
+    private func commandText(for id: UUID) -> String {
+        commands.first(where: { $0.id == id })?.text ?? ""
+    }
+
+    private func setCommandText(_ text: String, for id: UUID) {
+        guard let index = commands.firstIndex(where: { $0.id == id }) else { return }
+        commands[index].text = text
+    }
+
+    private func moveCommand(_ id: UUID, by offset: Int) {
+        guard let source = commands.firstIndex(where: { $0.id == id }) else { return }
+        let destination = source + offset
+        guard commands.indices.contains(destination) else { return }
+        commands.swapAt(source, destination)
     }
 }
 

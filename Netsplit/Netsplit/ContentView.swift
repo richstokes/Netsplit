@@ -912,7 +912,7 @@ private struct ConversationView: View {
     private static let supportedCommands = [
         "AWAY", "CTCP", "DISCONNECT", "IGNORE", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
         "MODE", "MOTD", "MSG", "MUTE", "NAMES", "NICK", "NOTICE", "PART",
-        "QUERY", "QUIT", "SERVER", "SHOWIGNORES", "SHOWMUTES", "SLAP", "TOPIC",
+        "PING", "QUERY", "QUIT", "SERVER", "SHOWIGNORES", "SHOWMUTES", "SLAP", "TOPIC",
         "UNIGNORE", "UNMUTE", "VERSION",
         "WHO", "WHOIS"
     ]
@@ -980,7 +980,7 @@ private struct ConversationView: View {
 
     private func recipientArgumentIndex(for command: String) -> Int? {
         switch command {
-        case "SLAP", "MSG", "QUERY", "NOTICE", "WHOIS", "CTCP", "VERSION", "IGNORE", "UNIGNORE", "INVITE", "KILL", "WHO", "MODE":
+        case "SLAP", "PING", "MSG", "QUERY", "NOTICE", "WHOIS", "CTCP", "VERSION", "IGNORE", "UNIGNORE", "INVITE", "KILL", "WHO", "MODE":
             return 0
         case "KICK":
             return 1

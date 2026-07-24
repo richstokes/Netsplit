@@ -164,6 +164,7 @@ final class IRCAppState: ObservableObject {
     private var pendingVersionRequestIDs: [UUID: UUID] = [:]
     private var pendingClientVersionDestinations: [String: SidebarItem] = [:]
     private var pendingClientVersionRequestIDs: [String: UUID] = [:]
+    private var pendingUserPings: [String: PendingUserPing] = [:]
     private var terminalServerErrors: [UUID: String] = [:]
     private var pendingOutgoingEchoes: [UUID: [PendingOutgoingEcho]] = [:]
     private var pendingChannelListingsByServer: [UUID: [ChannelListing]] = [:]
@@ -179,13 +180,15 @@ final class IRCAppState: ObservableObject {
     private var channelBanListRequestIDs: [UUID: UUID] = [:]
     private var incomingMessageTimestamp: Date?
     private var sessionIDs: [UUID: UUID] = [:]
-    private var sessionOnConnectCommands: [UUID: [String]] = [:]
+    private var sessionOnConnectCommands: [UUID: IRCOnConnectCommandPhases] = [:]
+    private var sessionPendingAutomaticJoins: [UUID: IRCOnConnectJoinTracker] = [:]
     private let channelListCacheLifetime: TimeInterval = 120
     private let channelListRequestTimeout: TimeInterval = 30
     private let channelBanListRequestTimeout: TimeInterval = 15
     private let favoriteJoinInterval: TimeInterval = 0.45
     private let onConnectCommandInterval: TimeInterval = 0.5
     private let favoriteJoinDelayAfterCommands: TimeInterval = 2
+    private let automaticJoinCompletionTimeout: TimeInterval = 20
     private let initialReconnectDelay: TimeInterval = 2
     private let maximumReconnectDelay: TimeInterval = 60
     private static let defaultQuitMessage = "Closing macOS client"
@@ -506,10 +509,12 @@ final class IRCAppState: ObservableObject {
         KeychainStore.value(for: credentialAccount(profile: profile, kind: "ssh-private-key"))
     }
 
-    func onConnectCommands(for profile: ServerProfile) -> [String] {
+    func onConnectCommands(for profile: ServerProfile) -> IRCOnConnectCommandPhases {
         let encoded = KeychainStore.value(for: credentialAccount(profile: profile, kind: "on-connect-commands"))
         guard let data = encoded.data(using: .utf8),
-              let commands = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+              let commands = try? JSONDecoder().decode(IRCOnConnectCommandPhases.self, from: data) else {
+            return IRCOnConnectCommandPhases()
+        }
         return commands
     }
 
@@ -705,6 +710,7 @@ final class IRCAppState: ObservableObject {
             let transport = connections.removeValue(forKey: serverID)
             sessionIDs.removeValue(forKey: serverID)
             sessionOnConnectCommands.removeValue(forKey: serverID)
+            sessionPendingAutomaticJoins.removeValue(forKey: serverID)
             activeNicknames.removeValue(forKey: serverID)
             registeredServerIDs.remove(serverID)
             terminalServerErrors.removeValue(forKey: serverID)
@@ -766,6 +772,7 @@ final class IRCAppState: ObservableObject {
         serverFeatures[profile.id] = .defaults
         sessionIDs[profile.id] = UUID()
         sessionOnConnectCommands[profile.id] = onConnectCommands(for: profile)
+        sessionPendingAutomaticJoins.removeValue(forKey: profile.id)
         prepareChannelsForDisconnectedSession(for: profile.id)
         resetChannelListingRequest(for: profile.id)
         terminalServerErrors.removeValue(forKey: profile.id)
@@ -822,6 +829,7 @@ final class IRCAppState: ObservableObject {
         connections.removeValue(forKey: profile.id)
         sessionIDs.removeValue(forKey: profile.id)
         sessionOnConnectCommands.removeValue(forKey: profile.id)
+        sessionPendingAutomaticJoins.removeValue(forKey: profile.id)
         activeNicknames.removeValue(forKey: profile.id)
         registeredServerIDs.remove(profile.id)
         connectionStatuses.removeValue(forKey: profile.id)
@@ -855,6 +863,7 @@ final class IRCAppState: ObservableObject {
         connections.removeAll()
         sessionIDs.removeAll()
         sessionOnConnectCommands.removeAll()
+        sessionPendingAutomaticJoins.removeAll()
         activeNicknames.removeAll()
         registeredServerIDs.removeAll()
         connectionStatuses.removeAll()
@@ -892,7 +901,7 @@ final class IRCAppState: ObservableObject {
         selection = .connectionCenter
     }
 
-    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: [String], useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
+    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: IRCOnConnectCommandPhases, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
         var profile = ServerProfile(name: name, hostname: hostname, port: port, useTLS: useTLS, autoConnect: autoConnect)
         profile.mentionNotificationsOverride = mentionNotificationsOverride
         profile.useSASL = useSASL
@@ -918,7 +927,7 @@ final class IRCAppState: ObservableObject {
         saveProfiles()
     }
 
-    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: [String], useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
+    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: IRCOnConnectCommandPhases, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         var updated = profile
         updated.name = name
@@ -1230,38 +1239,24 @@ final class IRCAppState: ObservableObject {
 
     private func runPostRegistrationSequence(for profile: ServerProfile) {
         guard let sessionID = sessionIDs[profile.id] else { return }
-        let serverFeatures = features(for: profile.id)
-        let commands = (sessionOnConnectCommands[profile.id] ?? [])
-            .compactMap {
-                IRCCommandTranslator.onConnectWireCommand(
-                    from: $0,
-                    channelTypes: serverFeatures.channelTypes,
-                    preferredChannelPrefix: serverFeatures.preferredChannelPrefix
-                )
-            }
+        let commands = translatedOnConnectCommands(
+            sessionOnConnectCommands[profile.id]?.beforeFavoritesJoined ?? [],
+            serverID: profile.id
+        )
 
         if !commands.isEmpty {
             appendSystem(
-                "Running \(commands.count) on-connect command\(commands.count == 1 ? "" : "s") before joining channels…",
+                "Running \(commands.count) pre-join command\(commands.count == 1 ? "" : "s")…",
                 for: .server(profile.id)
             )
         }
 
-        for (index, command) in commands.enumerated() {
-            let delay = Double(index) * onConnectCommandInterval
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self,
-                      self.sessionIDs[profile.id] == sessionID,
-                      self.registeredServerIDs.contains(profile.id),
-                      let connection = self.connections[profile.id] else { return }
-                connection.send(command: command) { [weak self] sent in
-                    guard !sent,
-                          let self,
-                          self.sessionIDs[profile.id] == sessionID else { return }
-                    self.appendSystem("An on-connect command could not be sent.", for: .server(profile.id))
-                }
-            }
-        }
+        sendOnConnectCommands(
+            commands,
+            phaseDescription: "pre-join",
+            for: profile,
+            sessionID: sessionID
+        )
 
         let firstJoinDelay: TimeInterval
         if commands.isEmpty {
@@ -1281,6 +1276,28 @@ final class IRCAppState: ObservableObject {
             let trimmed = channelName.trimmingCharacters(in: .whitespacesAndNewlines)
             return !trimmed.isEmpty && seenChannelNames.insert(normalizedIdentifier(trimmed, serverID: profile.id)).inserted
         }
+        let hasPostJoinCommands = !translatedOnConnectCommands(
+            sessionOnConnectCommands[profile.id]?.afterFavoritesJoined ?? [],
+            serverID: profile.id
+        ).isEmpty
+        if hasPostJoinCommands {
+            sessionPendingAutomaticJoins[profile.id] = IRCOnConnectJoinTracker(
+                channelNames: channelNames
+            )
+        } else {
+            sessionPendingAutomaticJoins.removeValue(forKey: profile.id)
+        }
+
+        if channelNames.isEmpty {
+            guard hasPostJoinCommands else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + firstJoinDelay) { [weak self] in
+                self?.runAfterFavoriteChannelsJoinedCommandsIfReady(
+                    for: profile,
+                    sessionID: sessionID
+                )
+            }
+            return
+        }
 
         for (index, channelName) in channelNames.enumerated() {
             let delay = firstJoinDelay + (Double(index) * favoriteJoinInterval)
@@ -1294,6 +1311,117 @@ final class IRCAppState: ObservableObject {
                     self.rejoin(retainedChannel, on: activeProfile)
                 } else {
                     self.join(ChannelListing(name: channelName, userCount: 0, topic: ""), on: activeProfile, selectConversation: false, destination: .server(profile.id))
+                }
+                let key = self.joinKey(serverID: profile.id, channel: channelName)
+                if self.pendingJoins[key] == nil {
+                    self.completeAutomaticJoinAttempt(
+                        channelName,
+                        for: activeProfile,
+                        sessionID: sessionID
+                    )
+                }
+            }
+        }
+
+        guard hasPostJoinCommands else { return }
+        let finalJoinDelay = firstJoinDelay + (Double(channelNames.count - 1) * favoriteJoinInterval)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + finalJoinDelay + automaticJoinCompletionTimeout
+        ) { [weak self] in
+            guard let self,
+                  self.sessionIDs[profile.id] == sessionID,
+                  self.registeredServerIDs.contains(profile.id),
+                  self.connections[profile.id] != nil,
+                  let pending = self.sessionPendingAutomaticJoins[profile.id],
+                  !pending.isComplete else { return }
+            self.appendSystem(
+                "Some channels did not finish joining; continuing with post-join commands.",
+                for: .server(profile.id)
+            )
+            self.sessionPendingAutomaticJoins[profile.id] = IRCOnConnectJoinTracker(
+                channelNames: []
+            )
+            self.runAfterFavoriteChannelsJoinedCommandsIfReady(
+                for: profile,
+                sessionID: sessionID
+            )
+        }
+    }
+
+    private func completeAutomaticJoinAttempt(
+        _ channelName: String,
+        for profile: ServerProfile,
+        sessionID: UUID
+    ) {
+        guard sessionIDs[profile.id] == sessionID,
+              var pending = sessionPendingAutomaticJoins[profile.id] else { return }
+        pending.complete(
+            channelName,
+            caseMapping: features(for: profile.id).caseMapping
+        )
+        sessionPendingAutomaticJoins[profile.id] = pending
+        runAfterFavoriteChannelsJoinedCommandsIfReady(for: profile, sessionID: sessionID)
+    }
+
+    private func runAfterFavoriteChannelsJoinedCommandsIfReady(
+        for profile: ServerProfile,
+        sessionID: UUID
+    ) {
+        guard sessionIDs[profile.id] == sessionID,
+              registeredServerIDs.contains(profile.id),
+              let pending = sessionPendingAutomaticJoins[profile.id],
+              pending.isComplete else { return }
+        sessionPendingAutomaticJoins.removeValue(forKey: profile.id)
+
+        let commands = translatedOnConnectCommands(
+            sessionOnConnectCommands[profile.id]?.afterFavoritesJoined ?? [],
+            serverID: profile.id
+        )
+        guard !commands.isEmpty else { return }
+        appendSystem(
+            "Running \(commands.count) post-join command\(commands.count == 1 ? "" : "s")…",
+            for: .server(profile.id)
+        )
+        sendOnConnectCommands(
+            commands,
+            phaseDescription: "post-join",
+            for: profile,
+            sessionID: sessionID
+        )
+    }
+
+    private func translatedOnConnectCommands(_ commands: [String], serverID: UUID) -> [String] {
+        let serverFeatures = features(for: serverID)
+        return commands.compactMap {
+            IRCCommandTranslator.onConnectWireCommand(
+                from: $0,
+                channelTypes: serverFeatures.channelTypes,
+                preferredChannelPrefix: serverFeatures.preferredChannelPrefix
+            )
+        }
+    }
+
+    private func sendOnConnectCommands(
+        _ commands: [String],
+        phaseDescription: String,
+        for profile: ServerProfile,
+        sessionID: UUID
+    ) {
+        for (index, command) in commands.enumerated() {
+            let delay = Double(index) * onConnectCommandInterval
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self,
+                      self.sessionIDs[profile.id] == sessionID,
+                      self.registeredServerIDs.contains(profile.id),
+                      let connection = self.connections[profile.id] else { return }
+                connection.send(command: command) { [weak self] sent in
+                    guard !sent,
+                          let self,
+                          self.sessionIDs[profile.id] == sessionID else { return }
+                    self.appendSystem(
+                        "A \(phaseDescription) command could not be sent.",
+                        for: .server(profile.id)
+                    )
                 }
             }
         }
@@ -1571,6 +1699,13 @@ final class IRCAppState: ObservableObject {
                     )
                 }
             }
+        case "PING":
+            let fields = argument.split(whereSeparator: \.isWhitespace)
+            guard fields.count == 1 else {
+                appendSystem("Usage: /ping nickname", for: item)
+                return
+            }
+            requestUserPing(of: String(fields[0]), on: profile, from: item)
         case "VERSION":
             let target = argument.trimmingCharacters(in: .whitespacesAndNewlines)
             if target.isEmpty {
@@ -1932,6 +2067,13 @@ final class IRCAppState: ObservableObject {
                     let topic = pendingJoin?.topic.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let topicSuffix = topic.isEmpty ? "" : " Topic: \(topic)"
                     appendChannelEvent("Joined \(channelName).\(topicSuffix)", kind: .join, channelID: channel.id)
+                    if let sessionID = sessionIDs[profile.id] {
+                        completeAutomaticJoinAttempt(
+                            channelName,
+                            for: profile,
+                            sessionID: sessionID
+                        )
+                    }
                 } else {
                     appendChannelEvent("\(sender) joined \(channelName).", kind: .join, channelID: channel.id)
                 }
@@ -2151,6 +2293,14 @@ final class IRCAppState: ObservableObject {
         }) else { return false }
 
         pendingJoins.removeValue(forKey: key)
+        if let profile = profiles.first(where: { $0.id == serverID }),
+           let sessionID = sessionIDs[serverID] {
+            completeAutomaticJoinAttempt(
+                pendingJoin.channel,
+                for: profile,
+                sessionID: sessionID
+            )
+        }
         if let channel = channels.first(where: { $0.id == pendingJoin.channelID }) {
             if pendingJoin.preservesConversationOnFailure {
                 conversations[channel.id]?.removeAll { $0.id == pendingJoin.statusMessageID }
@@ -2474,7 +2624,7 @@ final class IRCAppState: ObservableObject {
     private func requestClientVersion(of nickname: String, on profile: ServerProfile, from item: SidebarItem) {
         let target = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else { return }
-        let key = clientVersionKey(serverID: profile.id, nickname: target)
+        let key = ctcpRequestKey(serverID: profile.id, nickname: target)
         let requestID = UUID()
         pendingClientVersionDestinations[key] = item
         pendingClientVersionRequestIDs[key] = requestID
@@ -2489,6 +2639,28 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    private func requestUserPing(of nickname: String, on profile: ServerProfile, from item: SidebarItem) {
+        let target = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        let key = ctcpRequestKey(serverID: profile.id, nickname: target)
+        let token = UUID().uuidString
+        pendingUserPings[key] = PendingUserPing(
+            token: token,
+            sentAt: Date(),
+            destination: item
+        )
+        connections[profile.id]?.send(
+            command: "PRIVMSG \(target) :\(IRCCTCPPing.payload(token: token))"
+        )
+        appendSystem("Pinging \(target)…", for: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self,
+                  self.pendingUserPings[key]?.token == token,
+                  self.pendingUserPings.removeValue(forKey: key) != nil else { return }
+            self.appendSystem("\(target) did not return a ping reply.", for: item)
+        }
+    }
+
     @discardableResult
     private func handleCTCP(_ text: String, from sender: String, target: String, profile: ServerProfile, canReplyToRequest: Bool) -> Bool {
         guard text.first == "\u{01}", text.last == "\u{01}" else { return false }
@@ -2496,13 +2668,23 @@ final class IRCAppState: ObservableObject {
         let command = payload.split(separator: " ", maxSplits: 1).map(String.init)
         guard let name = command.first?.uppercased() else { return false }
 
+        if IRCCTCPEchoPolicy.isSelfEcho(
+            sender: sender,
+            localNickname: nickname(for: profile),
+            caseMapping: features(for: profile.id).caseMapping,
+            canReplyToRequest: canReplyToRequest
+        ) {
+            // IRCv3 echo-message reflects our outgoing PRIVMSG back with our
+            // own nickname. It is not a CTCP request from the target user.
+            if name == "ACTION" {
+                _ = consumeOutgoingEcho(serverID: profile.id, target: target, text: text)
+            }
+            return true
+        }
+
         switch name {
         case "ACTION":
             guard canReplyToRequest, command.count > 1 else { return false }
-            if identifiersEqual(sender, nickname(for: profile), serverID: profile.id),
-               consumeOutgoingEcho(serverID: profile.id, target: target, text: text) {
-                return true
-            }
             let message = IRCMessage(sender: "* \(sender)", text: command[1], nicknameColorKey: sender)
             if let channelTarget = features(for: profile.id).channelName(fromMessageTarget: target) {
                 let channel = channel(named: channelTarget, serverID: profile.id)
@@ -2526,10 +2708,28 @@ final class IRCAppState: ObservableObject {
                 appendSystem("\(sender) requested Netsplit's version.", for: .server(profile.id))
             } else {
                 let version = command[1]
-                let key = clientVersionKey(serverID: profile.id, nickname: sender)
+                let key = ctcpRequestKey(serverID: profile.id, nickname: sender)
                 let destination = pendingClientVersionDestinations.removeValue(forKey: key) ?? .server(profile.id)
                 pendingClientVersionRequestIDs.removeValue(forKey: key)
                 appendSystem("Version reply from \(sender): \(version)", for: destination)
+            }
+        case "PING":
+            guard command.count == 2, !command[1].isEmpty else { return true }
+            let token = command[1]
+            if canReplyToRequest {
+                connections[profile.id]?.send(
+                    command: "NOTICE \(sender) :\(IRCCTCPPing.payload(token: token))"
+                )
+                appendSystem("\(sender) pinged you.", for: .server(profile.id))
+            } else {
+                let key = ctcpRequestKey(serverID: profile.id, nickname: sender)
+                guard let pending = pendingUserPings[key], pending.token == token else { return true }
+                pendingUserPings.removeValue(forKey: key)
+                let milliseconds = IRCCTCPPing.roundTripMilliseconds(
+                    sentAt: pending.sentAt,
+                    receivedAt: Date()
+                )
+                appendSystem("Ping reply from \(sender): \(milliseconds) ms.", for: pending.destination)
             }
         default:
             return false
@@ -2537,7 +2737,7 @@ final class IRCAppState: ObservableObject {
         return true
     }
 
-    private func clientVersionKey(serverID: UUID, nickname: String) -> String {
+    private func ctcpRequestKey(serverID: UUID, nickname: String) -> String {
         "\(serverID.uuidString)|\(normalizedIdentifier(nickname, serverID: serverID))"
     }
 
@@ -2745,6 +2945,7 @@ final class IRCAppState: ObservableObject {
         pendingVersionRequestIDs.removeValue(forKey: serverID)
         pendingClientVersionDestinations = pendingClientVersionDestinations.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingClientVersionRequestIDs = pendingClientVersionRequestIDs.filter { !$0.key.hasPrefix(keyPrefix) }
+        pendingUserPings = pendingUserPings.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingOutgoingEchoes.removeValue(forKey: serverID)
     }
 
@@ -3259,6 +3460,7 @@ final class IRCAppState: ObservableObject {
             self.scheduledReconnects.removeValue(forKey: profile.id)
             self.sessionIDs.removeValue(forKey: profile.id)
             self.sessionOnConnectCommands.removeValue(forKey: profile.id)
+            self.sessionPendingAutomaticJoins.removeValue(forKey: profile.id)
             self.activeNicknames.removeValue(forKey: profile.id)
             self.registeredServerIDs.remove(profile.id)
             self.terminalServerErrors.removeValue(forKey: profile.id)
@@ -3559,15 +3761,16 @@ final class IRCAppState: ObservableObject {
         ServerProfileStore.save(storedProfiles, to: .standard)
     }
 
-    private func saveCredentials(for profile: ServerProfile, serverPassword: String, saslPassword: String, onConnectCommands: [String], sshPassword: String, sshPrivateKey: String) {
+    private func saveCredentials(for profile: ServerProfile, serverPassword: String, saslPassword: String, onConnectCommands: IRCOnConnectCommandPhases, sshPassword: String, sshPrivateKey: String) {
         KeychainStore.set(serverPassword, for: credentialAccount(profile: profile, kind: "server-password"))
         KeychainStore.set(saslPassword, for: credentialAccount(profile: profile, kind: "sasl-password"))
-        let cleanedCommands = onConnectCommands
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        let cleanedCommands = onConnectCommands.removingBlankCommands
         let encodedCommands = (try? JSONEncoder().encode(cleanedCommands))
             .map { String(decoding: $0, as: UTF8.self) } ?? ""
-        KeychainStore.set(cleanedCommands.isEmpty ? "" : encodedCommands, for: credentialAccount(profile: profile, kind: "on-connect-commands"))
+        KeychainStore.set(
+            cleanedCommands.isEmpty ? "" : encodedCommands,
+            for: credentialAccount(profile: profile, kind: "on-connect-commands")
+        )
         KeychainStore.set(sshPassword, for: credentialAccount(profile: profile, kind: "ssh-password"))
         KeychainStore.set(sshPrivateKey, for: credentialAccount(profile: profile, kind: "ssh-private-key"))
     }
@@ -3599,6 +3802,12 @@ private struct PendingOutgoingEcho {
     var target: String
     var text: String
     var sentAt: Date
+}
+
+private struct PendingUserPing {
+    var token: String
+    var sentAt: Date
+    var destination: SidebarItem
 }
 
 private struct PendingJoin {

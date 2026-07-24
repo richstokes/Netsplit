@@ -1267,17 +1267,24 @@ struct IRCModelsAndPolicyTests {
             $0.serverID == profile.id && $0.name == "Alice[Work]"
         })
         let equivalentName = Conversation(name: "alice{work}", serverID: profile.id)
+        let existingMutedNames = profile.mutedConversationNames ?? []
 
         state.mute(directMessage)
 
         #expect(state.isMuted(directMessage))
         #expect(state.isMuted(equivalentName))
-        #expect(state.profiles.first(where: { $0.id == profile.id })?.mutedConversationNames == ["Alice[Work]"])
+        #expect(
+            state.profiles.first(where: { $0.id == profile.id })?.mutedConversationNames
+                == existingMutedNames + ["Alice[Work]"]
+        )
 
         state.unmute(equivalentName)
 
         #expect(!state.isMuted(directMessage))
-        #expect(state.profiles.first(where: { $0.id == profile.id })?.mutedConversationNames == nil)
+        #expect(
+            state.profiles.first(where: { $0.id == profile.id })?.mutedConversationNames
+                == (existingMutedNames.isEmpty ? nil : existingMutedNames)
+        )
     }
 
     @Test("Opening a direct message notification selects its conversation")

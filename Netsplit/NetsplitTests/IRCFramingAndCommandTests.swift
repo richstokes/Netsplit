@@ -4,6 +4,43 @@ import Testing
 
 @Suite("IRC outbound framing and commands")
 struct IRCFramingAndCommandTests {
+    @Test("Legacy on-connect command lists migrate to the pre-join phase")
+    func migratesLegacyOnConnectCommands() throws {
+        let legacy = Data(#"["/identify secret","MODE Alice +i"]"#.utf8)
+        let phases = try JSONDecoder().decode(IRCOnConnectCommandPhases.self, from: legacy)
+
+        #expect(phases.beforeFavoritesJoined == ["/identify secret", "MODE Alice +i"])
+        #expect(phases.afterFavoritesJoined.isEmpty)
+    }
+
+    @Test("On-connect command phases round-trip and discard blank entries")
+    func roundTripsOnConnectCommandPhases() throws {
+        let phases = IRCOnConnectCommandPhases(
+            beforeFavoritesJoined: ["  /identify secret  ", "   "],
+            afterFavoritesJoined: ["/chanserv op #swift Alice", "\n"]
+        ).removingBlankCommands
+
+        #expect(phases.beforeFavoritesJoined == ["/identify secret"])
+        #expect(phases.afterFavoritesJoined == ["/chanserv op #swift Alice"])
+
+        let decoded = try JSONDecoder().decode(
+            IRCOnConnectCommandPhases.self,
+            from: JSONEncoder().encode(phases)
+        )
+        #expect(decoded == phases)
+    }
+
+    @Test("Post-join tracking uses the server's current case mapping")
+    func tracksOnConnectJoinsAcrossCaseMappingUpdates() {
+        var tracker = IRCOnConnectJoinTracker(channelNames: ["#^Ops", "#Swift"])
+
+        tracker.complete("#^ops", caseMapping: .strictRFC1459)
+        #expect(tracker.pendingChannelNames == ["#Swift"])
+
+        tracker.complete("#SWIFT", caseMapping: .ascii)
+        #expect(tracker.isComplete)
+    }
+
     @Test("Parses one-off servers with inferred TLS and explicit overrides")
     func parsesOneOffServers() throws {
         let defaultEndpoint = try IRCOneOffServerCommand.endpoint(from: "irc.libera.chat").get()
@@ -60,6 +97,41 @@ struct IRCFramingAndCommandTests {
             IRCClientVersion.ctcpReply
                 == "Netsplit \(bundledVersion) for macOS - https://github.com/richstokes/Netsplit"
         )
+    }
+
+    @Test("Builds CTCP PING payloads and measures round-trip time")
+    func buildsUserPing() {
+        #expect(IRCCTCPPing.payload(token: "ping-token") == "\u{01}PING ping-token\u{01}")
+        #expect(IRCCTCPPing.roundTripMilliseconds(
+            sentAt: Date(timeIntervalSince1970: 100),
+            receivedAt: Date(timeIntervalSince1970: 100.1234)
+        ) == 123)
+        #expect(IRCCTCPPing.roundTripMilliseconds(
+            sentAt: Date(timeIntervalSince1970: 101),
+            receivedAt: Date(timeIntervalSince1970: 100)
+        ) == 0)
+    }
+
+    @Test("Suppresses echoed CTCP requests from the local nickname")
+    func suppressesSelfCTCPEchoes() {
+        #expect(IRCCTCPEchoPolicy.isSelfEcho(
+            sender: "DBR",
+            localNickname: "dbr",
+            caseMapping: .rfc1459,
+            canReplyToRequest: true
+        ))
+        #expect(!IRCCTCPEchoPolicy.isSelfEcho(
+            sender: "Alice",
+            localNickname: "dbr",
+            caseMapping: .rfc1459,
+            canReplyToRequest: true
+        ))
+        #expect(!IRCCTCPEchoPolicy.isSelfEcho(
+            sender: "dbr",
+            localNickname: "dbr",
+            caseMapping: .rfc1459,
+            canReplyToRequest: false
+        ))
     }
 
     @Test("Removes CR/LF command injection and enforces the IRC byte limit")

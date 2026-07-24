@@ -48,15 +48,19 @@ host identity. IRC TLS, when enabled, remains end-to-end inside the SSH tunnel.
 
 ## On-connect commands
 
-Each server profile can run an ordered list of commands after registration. This
-is useful for identifying with NickServ, setting modes, or performing other
-network-specific setup. Client commands such as `/msg NickServ IDENTIFY ...`
-and raw IRC commands are both accepted. The command list is stored in the macOS
-Keychain because it may contain passwords.
+Each server profile can run two ordered lists of commands after registration.
+The pre-join phase is useful for identifying with NickServ or performing other
+account setup before protected channels are joined. The post-join phase runs
+after retained and favorite channel join attempts complete, making it suitable
+for ChanServ requests, modes, topics, and other channel setup. Client commands
+such as `/msg NickServ IDENTIFY ...` and raw IRC commands are both accepted.
+Both command lists are stored in the macOS Keychain because they may contain
+passwords.
 
-Commands are sent 0.5 seconds apart. Netsplit then waits 2 seconds after the
-final command before rejoining retained and favorite channels, giving network
-services time to apply authentication and account changes.
+Commands are sent 0.5 seconds apart. Netsplit waits 2 seconds after the final
+pre-join command before joining channels. Post-join commands begin after the
+server confirms or rejects each automatic join attempt, with a 20-second
+fallback for servers that leave a join request unanswered.
 
 ## Keyboard shortcuts
 
@@ -105,6 +109,7 @@ server, channel, or private message first.
 | `/notice <target> <message>` | Send a notice to a nickname or channel. Incoming notices are displayed too. |
 | `/me <action>` | Send a CTCP `ACTION` message to the current channel or private message. |
 | `/slap <nickname>` | Send the classic trout-slap action to the current channel or private message. |
+| `/ping <nickname>` | Ping another user via CTCP and report the round-trip time. |
 
 ### Channels and connections
 
