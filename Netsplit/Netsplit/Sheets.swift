@@ -21,6 +21,7 @@ struct ServerProfileEditor: View {
     @State private var useTLS: Bool
     @State private var autoConnect: Bool
     @State private var nicknameOverride: String
+    @State private var realNameOverride: String
     @State private var mentionNotificationsOverride: Bool?
     @State private var serverPassword: String
     @State private var useSASL: Bool
@@ -47,6 +48,7 @@ struct ServerProfileEditor: View {
         _useTLS = State(initialValue: profileToEdit?.useTLS ?? true)
         _autoConnect = State(initialValue: profileToEdit?.autoConnect ?? false)
         _nicknameOverride = State(initialValue: profileToEdit?.nicknameOverride ?? "")
+        _realNameOverride = State(initialValue: profileToEdit?.realNameOverride ?? "")
         _mentionNotificationsOverride = State(initialValue: profileToEdit?.mentionNotificationsOverride)
         _serverPassword = State(initialValue: profileToEdit.map { state.serverPassword(for: $0) } ?? "")
         _useSASL = State(initialValue: profileToEdit?.useSASL ?? false)
@@ -194,7 +196,12 @@ struct ServerProfileEditor: View {
             if let nicknameOverrideError {
                 ServerEditorHelpText(nicknameOverrideError, tint: .red, isError: true)
             }
-            ServerEditorHelpText("Leave blank to use the global nickname from Settings. Set a value here when this network requires a different identity.")
+            ServerEditorFieldRow("Real name") {
+                TextField("Use global real name", text: $realNameOverride, prompt: Text("Use global real name"))
+                    .accessibilityLabel("Real name override")
+                    .accessibilityHint("Leave blank to use the global real name")
+            }
+            ServerEditorHelpText("Leave either field blank to use its global value from Settings. Set a value here when this network requires a different identity.")
         }
     }
 
@@ -338,9 +345,9 @@ struct ServerProfileEditor: View {
             afterFavoritesJoined: afterFavoritesJoinedCommands.map(\.text)
         )
         if let profileToEdit {
-            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
+            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
         } else {
-            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
+            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
         }
         dismiss()
     }

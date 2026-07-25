@@ -854,7 +854,7 @@ final class IRCAppState: ObservableObject {
         transport.connect(
             profile: profile,
             nickname: nickname(for: profile),
-            realName: resolvedRealName(),
+            realName: realName(for: profile),
             serverPassword: serverPassword(for: profile),
             saslUsername: profile.saslUsername,
             saslPassword: saslPassword(for: profile),
@@ -966,8 +966,12 @@ final class IRCAppState: ObservableObject {
         selection = .connectionCenter
     }
 
-    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: IRCOnConnectCommandPhases, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
+    func addProfile(name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, realNameOverride: String, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: IRCOnConnectCommandPhases, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?) {
         var profile = ServerProfile(name: name, hostname: hostname, port: port, useTLS: useTLS, autoConnect: autoConnect)
+        let cleanNickname = nicknameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.nicknameOverride = cleanNickname.isEmpty ? nil : cleanNickname
+        let cleanRealName = realNameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.realNameOverride = cleanRealName.isEmpty ? nil : cleanRealName
         profile.mentionNotificationsOverride = mentionNotificationsOverride
         profile.useSASL = useSASL
         profile.saslUsername = saslUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : saslUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -992,7 +996,7 @@ final class IRCAppState: ObservableObject {
         saveProfiles()
     }
 
-    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: IRCOnConnectCommandPhases, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
+    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, realNameOverride: String, mentionNotificationsOverride: Bool?, serverPassword: String, useSASL: Bool, saslUsername: String, saslPassword: String, onConnectCommands: IRCOnConnectCommandPhases, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshPassword: String, sshPrivateKey: String, sshKeyFilename: String?, resetSSHHostKey: Bool) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         var updated = profile
         updated.name = name
@@ -1002,6 +1006,8 @@ final class IRCAppState: ObservableObject {
         updated.autoConnect = autoConnect
         let cleanNickname = nicknameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.nicknameOverride = cleanNickname.isEmpty ? nil : cleanNickname
+        let cleanRealName = realNameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.realNameOverride = cleanRealName.isEmpty ? nil : cleanRealName
         updated.mentionNotificationsOverride = mentionNotificationsOverride
         updated.useSASL = useSASL
         let cleanSASLUsername = saslUsername.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3551,6 +3557,11 @@ final class IRCAppState: ObservableObject {
     private func configuredNickname(for profile: ServerProfile) -> String {
         let override = profile.nicknameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return override.isEmpty ? nickname : override
+    }
+
+    private func realName(for profile: ServerProfile) -> String {
+        let override = profile.realNameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return override.isEmpty ? resolvedRealName() : override
     }
 
     private func resolvedRealName() -> String {

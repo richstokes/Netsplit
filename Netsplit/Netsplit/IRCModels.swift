@@ -190,6 +190,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     var autoConnect: Bool = false
     var isBuiltIn: Bool = false
     var nicknameOverride: String?
+    var realNameOverride: String?
     /// When nil, the server follows the global mention-notification setting.
     var mentionNotificationsOverride: Bool?
     var isPresetModified: Bool?
@@ -220,6 +221,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         autoConnect: Bool = false,
         isBuiltIn: Bool = false,
         nicknameOverride: String? = nil,
+        realNameOverride: String? = nil,
         mentionNotificationsOverride: Bool? = nil,
         isPresetModified: Bool? = nil,
         favoriteChannels: [String]? = nil,
@@ -243,6 +245,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         self.autoConnect = autoConnect
         self.isBuiltIn = isBuiltIn
         self.nicknameOverride = nicknameOverride
+        self.realNameOverride = realNameOverride
         self.mentionNotificationsOverride = mentionNotificationsOverride
         self.isPresetModified = isPresetModified
         self.favoriteChannels = favoriteChannels
@@ -261,7 +264,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, hostname, port, useTLS, autoConnect, isBuiltIn
-        case nicknameOverride, mentionNotificationsOverride, isPresetModified, favoriteChannels
+        case nicknameOverride, realNameOverride, mentionNotificationsOverride, isPresetModified, favoriteChannels
         case ignoredNicknames, mutedConversationNames
         case useSASL, saslUsername
         case useSSHTunnel, sshHostname, sshPort, sshUsername, sshKeyFilename, sshTrustedHostKey, presetID
@@ -282,6 +285,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         autoConnect = try container.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? false
         isBuiltIn = try container.decodeIfPresent(Bool.self, forKey: .isBuiltIn) ?? false
         nicknameOverride = try container.decodeIfPresent(String.self, forKey: .nicknameOverride)
+        realNameOverride = try container.decodeIfPresent(String.self, forKey: .realNameOverride)
         mentionNotificationsOverride = try container.decodeIfPresent(Bool.self, forKey: .mentionNotificationsOverride)
         isPresetModified = try container.decodeIfPresent(Bool.self, forKey: .isPresetModified)
         favoriteChannels = try container.decodeIfPresent([String].self, forKey: .favoriteChannels)

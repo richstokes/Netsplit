@@ -633,6 +633,9 @@ private struct ServerProfileCard: View {
                 if let nickname = profile.nicknameOverride, !nickname.isEmpty {
                     Label("Nickname: \(nickname)", systemImage: "person.crop.circle")
                 }
+                if let realName = profile.realNameOverride, !realName.isEmpty {
+                    Label("Real name: \(realName)", systemImage: "person.text.rectangle")
+                }
                 if profile.useSSHTunnel == true, let sshHostname = profile.sshHostname {
                     Label("SSH via \(sshHostname):\(profile.sshPort ?? 22)", systemImage: "point.3.connected.trianglepath.dotted")
                         .lineLimit(1)
