@@ -495,6 +495,14 @@ private actor IRCPreviewFetchLimiter {
     }
 }
 
+struct IRCLoadedImage {
+    let image: NSImage
+    let sourcePixelSize: CGSize
+    let sourceData: Data
+    let mimeType: String
+    let resolvedURL: URL
+}
+
 enum IRCBoundedImageLoader {
     static let maximumDownloadBytes = 12 * 1_024 * 1_024
     nonisolated static let maximumDecodedDimension = 1_200
@@ -502,26 +510,40 @@ enum IRCBoundedImageLoader {
     nonisolated static let maximumSourcePixels = 100_000_000
     nonisolated static let maximumFrameCount = 200
 
-    static func load(url: URL) async throws -> NSImage {
+    static func loadResource(url: URL) async throws -> IRCLoadedImage {
         let response = try await IRCPreviewHTTPClient.shared.load(
             url: url,
             maximumBytes: maximumDownloadBytes,
             acceptHeader: "image/*",
             acceptsMIMEType: { $0.hasPrefix("image/") }
         )
-        guard let image = thumbnail(from: response.data) else {
+        guard let decodedImage = decodedImage(from: response.data) else {
             throw IRCPreviewError.invalidImage
         }
-        return image
+        return IRCLoadedImage(
+            image: decodedImage.image,
+            sourcePixelSize: decodedImage.sourcePixelSize,
+            sourceData: response.data,
+            mimeType: response.mimeType,
+            resolvedURL: response.url
+        )
     }
 
     nonisolated static func thumbnail(from data: Data) -> NSImage? {
-        let options = [kCGImageSourceShouldCache: false] as CFDictionary
-        guard let source = CGImageSourceCreateWithData(data as CFData, options) else { return nil }
-        return thumbnail(from: source)
+        decodedImage(from: data)?.image
     }
 
-    nonisolated private static func thumbnail(from source: CGImageSource) -> NSImage? {
+    nonisolated private static func decodedImage(
+        from data: Data
+    ) -> (image: NSImage, sourcePixelSize: CGSize)? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, options) else { return nil }
+        return decodedImage(from: source)
+    }
+
+    nonisolated private static func decodedImage(
+        from source: CGImageSource
+    ) -> (image: NSImage, sourcePixelSize: CGSize)? {
         guard CGImageSourceGetCount(source) > 0,
               CGImageSourceGetCount(source) <= maximumFrameCount,
               let typeIdentifier = CGImageSourceGetType(source) as String?,
@@ -544,7 +566,10 @@ enum IRCBoundedImageLoader {
             kCGImageSourceShouldCacheImmediately: true
         ] as CFDictionary
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
-        return NSImage(cgImage: cgImage, size: .zero)
+        return (
+            NSImage(cgImage: cgImage, size: .zero),
+            CGSize(width: width, height: height)
+        )
     }
 }
 

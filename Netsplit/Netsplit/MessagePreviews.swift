@@ -6,6 +6,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum IRCMessagePreview: Hashable, Identifiable {
     case link(URL)
@@ -445,32 +446,41 @@ private struct IRCLinkPreviewCard: View {
 private final class IRCImagePreviewCache {
     static let shared = IRCImagePreviewCache()
 
-    private let cache = NSCache<NSURL, NSImage>()
-    private var inFlight: [URL: Task<NSImage, Error>] = [:]
+    private final class Entry {
+        let resource: IRCLoadedImage
+        init(_ resource: IRCLoadedImage) { self.resource = resource }
+    }
+
+    private let cache = NSCache<NSURL, Entry>()
+    private var inFlight: [URL: Task<IRCLoadedImage, Error>] = [:]
 
     private init() {
         cache.countLimit = 100
         cache.totalCostLimit = 64 * 1_024 * 1_024
     }
 
-    func cachedImage(for url: URL) -> NSImage? {
+    func cachedResource(for url: URL) -> IRCLoadedImage? {
         let key = IRCRemotePreviewPolicy.normalizedNetworkURL(url) ?? url
-        return cache.object(forKey: key as NSURL)
+        return cache.object(forKey: key as NSURL)?.resource
     }
 
-    func image(for url: URL) async throws -> NSImage {
+    func resource(for url: URL) async throws -> IRCLoadedImage {
         let key = IRCRemotePreviewPolicy.normalizedNetworkURL(url) ?? url
-        if let cached = cachedImage(for: key) { return cached }
+        if let cached = cachedResource(for: key) { return cached }
         if let task = inFlight[key] { return try await task.value }
 
-        let task = Task { try await IRCBoundedImageLoader.load(url: key) }
+        let task = Task { try await IRCBoundedImageLoader.loadResource(url: key) }
         inFlight[key] = task
         do {
-            let image = try await task.value
-            let cost = Int(image.size.width * image.size.height * 4)
-            cache.setObject(image, forKey: key as NSURL, cost: cost)
+            let resource = try await task.value
+            let imageCost = Int(resource.image.size.width * resource.image.size.height * 4)
+            cache.setObject(
+                Entry(resource),
+                forKey: key as NSURL,
+                cost: imageCost + resource.sourceData.count
+            )
             inFlight[key] = nil
-            return image
+            return resource
         } catch {
             inFlight[key] = nil
             throw error
@@ -480,15 +490,15 @@ private final class IRCImagePreviewCache {
 
 private struct IRCImagePreview: View {
     let url: URL
-    @State private var image: NSImage?
+    @State private var resource: IRCLoadedImage?
     @State private var failed = false
-    @Environment(\.openURL) private var openURL
+    @State private var isShowingViewer = false
     @Environment(\.ircThemePalette) private var themePalette
 
     var body: some View {
         Group {
-            if let displayedImage {
-                loadedPreview(for: displayedImage)
+            if let displayedResource {
+                loadedPreview(for: displayedResource.image)
             } else if !failed {
                 ProgressView()
                     .controlSize(.small)
@@ -499,22 +509,27 @@ private struct IRCImagePreview: View {
         }
         .task(id: url) {
             do {
-                let loadedImage = try await IRCImagePreviewCache.shared.image(for: url)
+                let loadedResource = try await IRCImagePreviewCache.shared.resource(for: url)
                 guard !Task.isCancelled else { return }
-                image = loadedImage
+                resource = loadedResource
             } catch {
                 failed = true
             }
         }
+        .sheet(isPresented: $isShowingViewer) {
+            if let displayedResource {
+                IRCImageViewer(url: url, resource: displayedResource)
+            }
+        }
     }
 
-    private var displayedImage: NSImage? {
-        image ?? IRCImagePreviewCache.shared.cachedImage(for: url)
+    private var displayedResource: IRCLoadedImage? {
+        resource ?? IRCImagePreviewCache.shared.cachedResource(for: url)
     }
 
     private func loadedPreview(for image: NSImage) -> some View {
         Button {
-            openURL(url)
+            isShowingViewer = true
         } label: {
             IRCBoundedImageLayout(aspectRatio: Self.aspectRatio(for: image)) {
                 Image(nsImage: image)
@@ -530,8 +545,9 @@ private struct IRCImagePreview: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(imageBorder, lineWidth: 1)
         }
-        .help("Open image in browser")
+        .help("View larger image")
         .accessibilityLabel("Image preview from \(url.host(percentEncoded: true) ?? "web link")")
+        .accessibilityHint("Opens a larger image viewer")
     }
 
     private var imageBackground: Color {
@@ -545,6 +561,204 @@ private struct IRCImagePreview: View {
     private static func aspectRatio(for image: NSImage) -> CGFloat {
         guard image.size.height > 0 else { return 1 }
         return image.size.width / image.size.height
+    }
+}
+
+private struct IRCImageViewer: View {
+    let url: URL
+    let resource: IRCLoadedImage
+    private let modalSize: CGSize
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @Environment(\.ircThemePalette) private var themePalette
+    @State private var saveError: String?
+
+    init(url: URL, resource: IRCLoadedImage) {
+        self.url = url
+        self.resource = resource
+        let visibleScreenSize = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame.size ??
+            IRCImageViewerSizingPolicy.compactModalSize
+        modalSize = IRCImageViewerSizingPolicy.preferredModalSize(
+            imagePixelSize: resource.sourcePixelSize,
+            screenVisibleSize: visibleScreenSize
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Image(nsImage: resource.image)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(24)
+                .background(viewerBackground)
+                .accessibilityLabel("Enlarged image from \(url.host(percentEncoded: true) ?? "web link")")
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Text(IRCImageSavePolicy.suggestedFilename(
+                    for: resource.resolvedURL,
+                    mimeType: resource.mimeType
+                ))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+                Spacer()
+
+                Button {
+                    openURL(url)
+                } label: {
+                    Label("Open in Browser", systemImage: "safari")
+                }
+
+                Button {
+                    saveImage()
+                } label: {
+                    Label("Save Image…", systemImage: "square.and.arrow.down")
+                }
+
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding(16)
+        }
+        .frame(width: modalSize.width, height: modalSize.height)
+        .alert(
+            "Couldn’t Save Image",
+            isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(saveError ?? "The image could not be saved.")
+        }
+    }
+
+    private var viewerBackground: Color {
+        themePalette?.background ?? Color(nsColor: .windowBackgroundColor)
+    }
+
+    private func saveImage() {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = IRCImageSavePolicy.suggestedFilename(
+            for: resource.resolvedURL,
+            mimeType: resource.mimeType
+        )
+        if let contentType = IRCImageSavePolicy.contentType(for: resource.mimeType) {
+            panel.allowedContentTypes = [contentType]
+        }
+
+        guard panel.runModal() == .OK, let destinationURL = panel.url else { return }
+        do {
+            try resource.sourceData.write(to: destinationURL, options: .atomic)
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+}
+
+enum IRCImageViewerSizingPolicy {
+    nonisolated static let compactModalSize = CGSize(width: 900, height: 700)
+    private nonisolated static let screenCoverage: CGFloat = 0.75
+    private nonisolated static let minimumResolutionCoverage: CGFloat = 0.75
+    private nonisolated static let imageAreaInsets = CGSize(width: 48, height: 112)
+
+    nonisolated static func preferredModalSize(
+        imagePixelSize: CGSize,
+        screenVisibleSize: CGSize
+    ) -> CGSize {
+        guard screenVisibleSize.width.isFinite,
+              screenVisibleSize.height.isFinite,
+              screenVisibleSize.width > 0,
+              screenVisibleSize.height > 0 else { return compactModalSize }
+
+        let expandedSize = CGSize(
+            width: floor(screenVisibleSize.width * screenCoverage),
+            height: floor(screenVisibleSize.height * screenCoverage)
+        )
+        let compactSize = CGSize(
+            width: min(compactModalSize.width, expandedSize.width),
+            height: min(compactModalSize.height, expandedSize.height)
+        )
+        let availableImageSize = CGSize(
+            width: max(0, expandedSize.width - imageAreaInsets.width),
+            height: max(0, expandedSize.height - imageAreaInsets.height)
+        )
+        guard imagePixelSize.width.isFinite,
+              imagePixelSize.height.isFinite,
+              imagePixelSize.width > 0,
+              imagePixelSize.height > 0,
+              availableImageSize.width > 0,
+              availableImageSize.height > 0 else { return compactSize }
+
+        let displayedImageSize = IRCBoundedImageLayout.fittedSize(
+            aspectRatio: imagePixelSize.width / imagePixelSize.height,
+            within: availableImageSize
+        )
+        guard displayedImageSize.width > 0,
+              displayedImageSize.height > 0,
+              imagePixelSize.width >= displayedImageSize.width * minimumResolutionCoverage,
+              imagePixelSize.height >= displayedImageSize.height * minimumResolutionCoverage else {
+            return compactSize
+        }
+        return expandedSize
+    }
+}
+
+enum IRCImageSavePolicy {
+    nonisolated static func contentType(for mimeType: String) -> UTType? {
+        guard let type = UTType(mimeType: mimeType), type.conforms(to: .image) else {
+            return nil
+        }
+        return type
+    }
+
+    nonisolated static func suggestedFilename(for url: URL, mimeType: String) -> String {
+        let contentType = contentType(for: mimeType)
+        let preferredExtension = contentType?.preferredFilenameExtension
+        var filename = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+        filename = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+        if filename.isEmpty || filename == "/" || filename == "." || filename == ".." {
+            filename = "image"
+        }
+
+        let invalidCharacters = CharacterSet.controlCharacters.union(
+            CharacterSet(charactersIn: "/:")
+        )
+        filename = String(filename.unicodeScalars.map { scalar in
+            invalidCharacters.contains(scalar) ? "-" : Character(scalar)
+        })
+
+        let existingExtension = (filename as NSString).pathExtension
+        if let preferredExtension,
+           existingExtension.isEmpty {
+            filename += ".\(preferredExtension)"
+        }
+
+        let maximumLength = 180
+        if filename.count > maximumLength {
+            let pathExtension = (filename as NSString).pathExtension
+            let extensionSuffix = pathExtension.isEmpty ? "" : ".\(pathExtension)"
+            if extensionSuffix.count < maximumLength {
+                let stemLimit = maximumLength - extensionSuffix.count
+                let stem = (filename as NSString).deletingPathExtension
+                filename = String(stem.prefix(stemLimit)) + extensionSuffix
+            } else {
+                filename = String(filename.prefix(maximumLength))
+            }
+        }
+        return filename
     }
 }
 

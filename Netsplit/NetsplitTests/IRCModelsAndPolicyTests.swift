@@ -998,6 +998,41 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCBoundedImageLoader.thumbnail(from: Data("<script>alert(1)</script>".utf8)) == nil)
     }
 
+    @Test("Saved image names preserve useful names and add missing extensions")
+    func suggestsSavedImageFilenames() {
+        #expect(IRCImageSavePolicy.suggestedFilename(
+            for: URL(string: "https://example.com/photos/sunset.jpg?size=large")!,
+            mimeType: "image/jpeg"
+        ) == "sunset.jpg")
+        #expect(IRCImageSavePolicy.suggestedFilename(
+            for: URL(string: "https://example.com/download")!,
+            mimeType: "image/png"
+        ) == "download.png")
+        #expect(IRCImageSavePolicy.suggestedFilename(
+            for: URL(string: "https://example.com/")!,
+            mimeType: "image/webp"
+        ) == "image.webp")
+        #expect(IRCImageSavePolicy.contentType(for: "text/html") == nil)
+    }
+
+    @Test("Image viewer expands only when source resolution warrants it")
+    func sizesImageViewerForSourceResolution() {
+        let screenSize = CGSize(width: 2_000, height: 1_200)
+
+        #expect(IRCImageViewerSizingPolicy.preferredModalSize(
+            imagePixelSize: CGSize(width: 1_600, height: 900),
+            screenVisibleSize: screenSize
+        ) == CGSize(width: 1_500, height: 900))
+        #expect(IRCImageViewerSizingPolicy.preferredModalSize(
+            imagePixelSize: CGSize(width: 1_200, height: 675),
+            screenVisibleSize: screenSize
+        ) == CGSize(width: 1_500, height: 900))
+        #expect(IRCImageViewerSizingPolicy.preferredModalSize(
+            imagePixelSize: CGSize(width: 640, height: 360),
+            screenVisibleSize: screenSize
+        ) == CGSize(width: 900, height: 700))
+    }
+
     @Test("Image previews report their aspect-fitted size without blank framing")
     func sizesImagePreviews() {
         #expect(IRCBoundedImageLayout.fittedSize(
