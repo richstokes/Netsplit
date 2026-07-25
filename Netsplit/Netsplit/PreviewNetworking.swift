@@ -252,6 +252,19 @@ enum IRCPreviewBodyPolicy: Equatable {
     case htmlHead
 }
 
+enum IRCPreviewTransferPolicy {
+    nonisolated static func exceedsLimit(
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64,
+        maximumBytes: Int64
+    ) -> Bool {
+        let knownLengthExceedsLimit =
+            totalBytesExpectedToWrite != NSURLSessionTransferSizeUnknown &&
+            totalBytesExpectedToWrite > maximumBytes
+        return totalBytesWritten > maximumBytes || knownLengthExceedsLimit
+    }
+}
+
 struct IRCHTMLHeadTerminator {
     private static let closingTag = Array("</head>".utf8)
     private var matchedByteCount = 0
@@ -357,6 +370,66 @@ final class IRCPreviewHTTPClient {
             request.setValue("bytes=0-\(maximumBytes - 1)", forHTTPHeaderField: "Range")
             request.setValue("Netsplit-Link-Preview/1.0", forHTTPHeaderField: "User-Agent")
 
+            if bodyPolicy == .complete {
+                let downloadDelegate = IRCBoundedDownloadDelegate(maximumBytes: maximumBytes)
+                let temporaryURL: URL
+                let response: URLResponse
+                do {
+                    (temporaryURL, response) = try await session.download(
+                        for: request,
+                        delegate: downloadDelegate
+                    )
+                } catch {
+                    if downloadDelegate.exceededLimit {
+                        throw IRCPreviewError.tooLarge
+                    }
+                    throw error
+                }
+
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw IRCPreviewError.invalidResponse
+                }
+
+                if (300...399).contains(httpResponse.statusCode),
+                   let location = httpResponse.value(forHTTPHeaderField: "Location"),
+                   let redirectURL = URL(string: location, relativeTo: currentURL)?.absoluteURL {
+                    guard redirectCount < Self.maximumRedirects,
+                          IRCRemotePreviewPolicy.permitsRedirect(from: currentURL, to: redirectURL) else {
+                        throw IRCPreviewError.disallowedRedirect
+                    }
+                    currentURL = redirectURL
+                    continue
+                }
+
+                guard (200...299).contains(httpResponse.statusCode),
+                      let finalURL = httpResponse.url,
+                      IRCRemotePreviewPolicy.isPermitted(finalURL),
+                      let mimeType = httpResponse.mimeType?.lowercased(),
+                      acceptsMIMEType(mimeType) else {
+                    throw IRCPreviewError.invalidResponse
+                }
+                guard response.expectedContentLength <= Int64(maximumBytes) ||
+                        response.expectedContentLength == NSURLSessionTransferSizeUnknown else {
+                    throw IRCPreviewError.tooLarge
+                }
+
+                let resourceValues = try temporaryURL.resourceValues(forKeys: [.fileSizeKey])
+                guard let fileSize = resourceValues.fileSize,
+                      fileSize <= maximumBytes else {
+                    throw IRCPreviewError.tooLarge
+                }
+                let data = try Data(contentsOf: temporaryURL, options: .mappedIfSafe)
+                guard data.count <= maximumBytes else {
+                    throw IRCPreviewError.tooLarge
+                }
+                return IRCPreviewHTTPResponse(
+                    data: data,
+                    url: finalURL,
+                    mimeType: mimeType,
+                    textEncodingName: response.textEncodingName
+                )
+            }
+
             let (bytes, response) = try await session.bytes(for: request, delegate: redirectDelegate)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw IRCPreviewError.invalidResponse
@@ -380,11 +453,6 @@ final class IRCPreviewHTTPClient {
                   acceptsMIMEType(mimeType) else {
                 throw IRCPreviewError.invalidResponse
             }
-            if bodyPolicy == .complete,
-               response.expectedContentLength > Int64(maximumBytes) {
-                throw IRCPreviewError.tooLarge
-            }
-
             var data = Data()
             if response.expectedContentLength > 0 {
                 data.reserveCapacity(min(maximumBytes, Int(response.expectedContentLength)))
@@ -436,6 +504,68 @@ private final class IRCRejectingRedirectDelegate: NSObject, URLSessionTaskDelega
             completionHandler(.cancelAuthenticationChallenge, nil)
         }
     }
+}
+
+private final class IRCBoundedDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let maximumBytes: Int64
+    private let stateLock = NSLock()
+    private var _exceededLimit = false
+
+    init(maximumBytes: Int) {
+        self.maximumBytes = Int64(maximumBytes)
+    }
+
+    var exceededLimit: Bool {
+        stateLock.withLock { _exceededLimit }
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            completionHandler(.performDefaultHandling, nil)
+        } else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+        }
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard IRCPreviewTransferPolicy.exceedsLimit(
+            totalBytesWritten: totalBytesWritten,
+            totalBytesExpectedToWrite: totalBytesExpectedToWrite,
+            maximumBytes: maximumBytes
+        ) else { return }
+
+        stateLock.withLock {
+            _exceededLimit = true
+        }
+        downloadTask.cancel()
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {}
 }
 
 private actor IRCPreviewFetchLimiter {

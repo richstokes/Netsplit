@@ -1007,6 +1007,25 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCPreviewFailureReason.timedOut.message == "The preview took too long to load.")
     }
 
+    @Test("Preview downloads enforce their byte limit for known and unknown lengths")
+    func boundsPreviewDownloads() {
+        #expect(!IRCPreviewTransferPolicy.exceedsLimit(
+            totalBytesWritten: 12,
+            totalBytesExpectedToWrite: 12,
+            maximumBytes: 12
+        ))
+        #expect(IRCPreviewTransferPolicy.exceedsLimit(
+            totalBytesWritten: 13,
+            totalBytesExpectedToWrite: NSURLSessionTransferSizeUnknown,
+            maximumBytes: 12
+        ))
+        #expect(IRCPreviewTransferPolicy.exceedsLimit(
+            totalBytesWritten: 1,
+            totalBytesExpectedToWrite: 13,
+            maximumBytes: 12
+        ))
+    }
+
     @Test("Saved image names preserve useful names and add missing extensions")
     func suggestsSavedImageFilenames() {
         #expect(IRCImageSavePolicy.suggestedFilename(
