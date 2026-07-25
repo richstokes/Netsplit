@@ -998,6 +998,15 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCBoundedImageLoader.thumbnail(from: Data("<script>alert(1)</script>".utf8)) == nil)
     }
 
+    @Test("Preview failures provide useful user-facing reasons")
+    func describesPreviewFailures() {
+        #expect(IRCPreviewFailureReason(error: URLError(.timedOut)) == .timedOut)
+        #expect(IRCPreviewFailureReason(error: IRCPreviewError.tooLarge) == .tooLarge)
+        #expect(IRCPreviewFailureReason(error: IRCPreviewError.disallowedRedirect) == .blocked)
+        #expect(IRCPreviewFailureReason(error: IRCPreviewError.invalidImage) == .unavailable)
+        #expect(IRCPreviewFailureReason.timedOut.message == "The preview took too long to load.")
+    }
+
     @Test("Saved image names preserve useful names and add missing extensions")
     func suggestsSavedImageFilenames() {
         #expect(IRCImageSavePolicy.suggestedFilename(

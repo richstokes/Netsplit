@@ -276,6 +276,8 @@ final class IRCPreviewHTTPClient {
     static let shared = IRCPreviewHTTPClient()
 
     private static let maximumRedirects = 3
+    private static let requestTimeout: TimeInterval = 20
+    private static let resourceTimeout: TimeInterval = 30
     private let session: URLSession
     private let redirectDelegate = IRCRejectingRedirectDelegate()
     private let limiter = IRCPreviewFetchLimiter(limit: 6)
@@ -290,8 +292,8 @@ final class IRCPreviewHTTPClient {
         configuration.httpCookieAcceptPolicy = .never
         configuration.connectionProxyDictionary = [:]
         configuration.waitsForConnectivity = false
-        configuration.timeoutIntervalForRequest = 12
-        configuration.timeoutIntervalForResource = 15
+        configuration.timeoutIntervalForRequest = Self.requestTimeout
+        configuration.timeoutIntervalForResource = Self.resourceTimeout
         configuration.httpMaximumConnectionsPerHost = 2
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
         session = URLSession(configuration: configuration)
@@ -348,7 +350,7 @@ final class IRCPreviewHTTPClient {
 
             var request = URLRequest(url: currentURL)
             request.httpMethod = "GET"
-            request.timeoutInterval = 12
+            request.timeoutInterval = Self.requestTimeout
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.httpShouldHandleCookies = false
             request.setValue(acceptHeader, forHTTPHeaderField: "Accept")

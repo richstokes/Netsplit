@@ -58,6 +58,44 @@ enum IRCMessagePreviewPolicy {
     }
 }
 
+enum IRCPreviewFailureReason: Equatable {
+    case timedOut
+    case tooLarge
+    case blocked
+    case unavailable
+
+    init(error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain,
+           nsError.code == URLError.timedOut.rawValue {
+            self = .timedOut
+            return
+        }
+
+        switch error as? IRCPreviewError {
+        case .tooLarge:
+            self = .tooLarge
+        case .disallowedURL, .disallowedRedirect:
+            self = .blocked
+        default:
+            self = .unavailable
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .timedOut:
+            return "The preview took too long to load."
+        case .tooLarge:
+            return "The preview is too large to load safely."
+        case .blocked:
+            return "The preview was blocked for safety."
+        case .unavailable:
+            return "A preview isn’t available for this link."
+        }
+    }
+}
+
 struct MessagePreviewStack: View {
     let previews: [IRCMessagePreview]
     @State private var isExpanded = true
@@ -338,7 +376,8 @@ private struct IRCLinkPreviewCard: View {
 
     let url: URL
     @State private var metadata: IRCLinkPreviewMetadata?
-    @State private var failed = false
+    @State private var failureReason: IRCPreviewFailureReason?
+    @State private var retryCount = 0
     @Environment(\.openURL) private var openURL
     @Environment(\.ircThemePalette) private var themePalette
 
@@ -346,7 +385,14 @@ private struct IRCLinkPreviewCard: View {
         Group {
             if let displayedMetadata {
                 loadedPreview(for: displayedMetadata)
-            } else if !failed {
+            } else if let failureReason {
+                IRCPreviewFailureView(
+                    reason: failureReason,
+                    maximumWidth: Self.maximumWidth,
+                    minimumHeight: 72,
+                    retry: retry
+                )
+            } else {
                 ProgressView()
                     .controlSize(.small)
                     .frame(maxWidth: Self.maximumWidth, minHeight: 72)
@@ -354,19 +400,30 @@ private struct IRCLinkPreviewCard: View {
                     .accessibilityLabel("Loading link preview")
             }
         }
-        .task(id: url) {
+        .task(id: loadID) {
+            failureReason = nil
             do {
                 let loadedMetadata = try await IRCLinkPreviewCache.shared.metadata(for: url)
                 guard !Task.isCancelled else { return }
                 metadata = loadedMetadata
             } catch {
-                failed = true
+                guard !Task.isCancelled else { return }
+                failureReason = IRCPreviewFailureReason(error: error)
             }
         }
     }
 
+    private var loadID: String {
+        "\(url.absoluteString)#\(retryCount)"
+    }
+
     private var displayedMetadata: IRCLinkPreviewMetadata? {
         metadata ?? IRCLinkPreviewCache.shared.cachedMetadata(for: url)
+    }
+
+    private func retry() {
+        failureReason = nil
+        retryCount += 1
     }
 
     private func loadedPreview(for metadata: IRCLinkPreviewMetadata) -> some View {
@@ -491,7 +548,8 @@ private final class IRCImagePreviewCache {
 private struct IRCImagePreview: View {
     let url: URL
     @State private var resource: IRCLoadedImage?
-    @State private var failed = false
+    @State private var failureReason: IRCPreviewFailureReason?
+    @State private var retryCount = 0
     @State private var isShowingViewer = false
     @Environment(\.ircThemePalette) private var themePalette
 
@@ -499,7 +557,14 @@ private struct IRCImagePreview: View {
         Group {
             if let displayedResource {
                 loadedPreview(for: displayedResource.image)
-            } else if !failed {
+            } else if let failureReason {
+                IRCPreviewFailureView(
+                    reason: failureReason,
+                    maximumWidth: 520,
+                    minimumHeight: 96,
+                    retry: retry
+                )
+            } else {
                 ProgressView()
                     .controlSize(.small)
                     .frame(maxWidth: 520, minHeight: 96, maxHeight: 140)
@@ -507,13 +572,15 @@ private struct IRCImagePreview: View {
                     .accessibilityLabel("Loading image preview")
             }
         }
-        .task(id: url) {
+        .task(id: loadID) {
+            failureReason = nil
             do {
                 let loadedResource = try await IRCImagePreviewCache.shared.resource(for: url)
                 guard !Task.isCancelled else { return }
                 resource = loadedResource
             } catch {
-                failed = true
+                guard !Task.isCancelled else { return }
+                failureReason = IRCPreviewFailureReason(error: error)
             }
         }
         .sheet(isPresented: $isShowingViewer) {
@@ -523,8 +590,17 @@ private struct IRCImagePreview: View {
         }
     }
 
+    private var loadID: String {
+        "\(url.absoluteString)#\(retryCount)"
+    }
+
     private var displayedResource: IRCLoadedImage? {
         resource ?? IRCImagePreviewCache.shared.cachedResource(for: url)
+    }
+
+    private func retry() {
+        failureReason = nil
+        retryCount += 1
     }
 
     private func loadedPreview(for image: NSImage) -> some View {
@@ -561,6 +637,56 @@ private struct IRCImagePreview: View {
     private static func aspectRatio(for image: NSImage) -> CGFloat {
         guard image.size.height > 0 else { return 1 }
         return image.size.width / image.size.height
+    }
+}
+
+private struct IRCPreviewFailureView: View {
+    let reason: IRCPreviewFailureReason
+    let maximumWidth: CGFloat
+    let minimumHeight: CGFloat
+    let retry: () -> Void
+
+    @Environment(\.ircThemePalette) private var themePalette
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Preview unavailable")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(reason.message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(action: retry) {
+                Label("Retry", systemImage: "arrow.clockwise")
+            }
+            .controlSize(.small)
+        }
+        .padding(12)
+        .frame(maxWidth: maximumWidth, minHeight: minimumHeight, alignment: .leading)
+        .background(cardBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(cardBorder, lineWidth: 1)
+        }
+        .accessibilityLabel("Preview unavailable. \(reason.message)")
+    }
+
+    private var cardBackground: Color {
+        themePalette?.panel ?? Color(nsColor: .controlBackgroundColor)
+    }
+
+    private var cardBorder: Color {
+        themePalette?.border.opacity(0.7) ?? Color(nsColor: .separatorColor)
     }
 }
 
