@@ -12,6 +12,7 @@ import UserNotifications
 private enum AppSceneID {
     // SwiftUI uses this identity for persisted window state. Keep it stable.
     static let mainWindow = "main"
+    static let aboutWindow = "about"
 }
 
 enum IRCHistoryNavigationDirection {
@@ -338,6 +339,9 @@ struct NetsplitApp: App {
                 }
         }
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                OpenAboutWindowButton()
+            }
             CommandGroup(after: .newItem) {
                 Button("Close Current Conversation") {
                     state.closeActiveSelection()
@@ -400,9 +404,24 @@ struct NetsplitApp: App {
                     .keyboardShortcut("0", modifiers: [.command])
             }
         }
+        Window("About Netsplit", id: AppSceneID.aboutWindow) {
+            AboutView()
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
         Settings {
             SettingsView(state: state)
                 .ircApplicationAppearance(state.applicationAppearance)
+        }
+    }
+}
+
+private struct OpenAboutWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("About Netsplit") {
+            openWindow(id: AppSceneID.aboutWindow)
         }
     }
 }
