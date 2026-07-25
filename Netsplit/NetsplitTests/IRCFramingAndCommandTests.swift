@@ -112,22 +112,32 @@ struct IRCFramingAndCommandTests {
         ) == 0)
     }
 
-    @Test("Suppresses echoed CTCP requests from the local nickname")
-    func suppressesSelfCTCPEchoes() {
+    @Test("Suppresses reflected CTCP requests but permits requests to yourself")
+    func distinguishesSelfTargetedCTCPRequestsFromEchoes() {
         #expect(IRCCTCPEchoPolicy.isSelfEcho(
             sender: "DBR",
+            target: "Alice",
+            localNickname: "dbr",
+            caseMapping: .rfc1459,
+            canReplyToRequest: true
+        ))
+        #expect(!IRCCTCPEchoPolicy.isSelfEcho(
+            sender: "DBR",
+            target: "dBr",
             localNickname: "dbr",
             caseMapping: .rfc1459,
             canReplyToRequest: true
         ))
         #expect(!IRCCTCPEchoPolicy.isSelfEcho(
             sender: "Alice",
+            target: "dbr",
             localNickname: "dbr",
             caseMapping: .rfc1459,
             canReplyToRequest: true
         ))
         #expect(!IRCCTCPEchoPolicy.isSelfEcho(
             sender: "dbr",
+            target: "Alice",
             localNickname: "dbr",
             caseMapping: .rfc1459,
             canReplyToRequest: false

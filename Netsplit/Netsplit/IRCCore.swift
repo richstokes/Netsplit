@@ -780,11 +780,15 @@ enum IRCCTCPPing {
 enum IRCCTCPEchoPolicy {
   static func isSelfEcho(
     sender: String,
+    target: String,
     localNickname: String,
     caseMapping: IRCCaseMapping,
     canReplyToRequest: Bool
   ) -> Bool {
-    canReplyToRequest && caseMapping.normalize(sender) == caseMapping.normalize(localNickname)
+    guard canReplyToRequest else { return false }
+    let localNickname = caseMapping.normalize(localNickname)
+    return caseMapping.normalize(sender) == localNickname
+      && caseMapping.normalize(target) != localNickname
   }
 }
 

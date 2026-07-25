@@ -2827,6 +2827,7 @@ final class IRCAppState: ObservableObject {
 
         if IRCCTCPEchoPolicy.isSelfEcho(
             sender: sender,
+            target: target,
             localNickname: nickname(for: profile),
             caseMapping: features(for: profile.id).caseMapping,
             canReplyToRequest: canReplyToRequest
