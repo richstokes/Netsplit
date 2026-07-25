@@ -768,6 +768,7 @@ private actor IRCPreviewFetchLimiter {
 struct IRCLoadedImage {
     let image: NSImage
     let sourcePixelSize: CGSize
+    let sourceFrameCount: Int
     let sourceData: Data
     let mimeType: String
     let resolvedURL: URL
@@ -793,6 +794,7 @@ enum IRCBoundedImageLoader {
         return IRCLoadedImage(
             image: decodedImage.image,
             sourcePixelSize: decodedImage.sourcePixelSize,
+            sourceFrameCount: decodedImage.sourceFrameCount,
             sourceData: response.data,
             mimeType: response.mimeType,
             resolvedURL: response.url
@@ -805,7 +807,7 @@ enum IRCBoundedImageLoader {
 
     nonisolated private static func decodedImage(
         from data: Data
-    ) -> (image: NSImage, sourcePixelSize: CGSize)? {
+    ) -> (image: NSImage, sourcePixelSize: CGSize, sourceFrameCount: Int)? {
         let options = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, options) else { return nil }
         return decodedImage(from: source)
@@ -813,9 +815,10 @@ enum IRCBoundedImageLoader {
 
     nonisolated private static func decodedImage(
         from source: CGImageSource
-    ) -> (image: NSImage, sourcePixelSize: CGSize)? {
-        guard CGImageSourceGetCount(source) > 0,
-              CGImageSourceGetCount(source) <= maximumFrameCount,
+    ) -> (image: NSImage, sourcePixelSize: CGSize, sourceFrameCount: Int)? {
+        let frameCount = CGImageSourceGetCount(source)
+        guard frameCount > 0,
+              frameCount <= maximumFrameCount,
               let typeIdentifier = CGImageSourceGetType(source) as String?,
               let contentType = UTType(typeIdentifier),
               contentType.conforms(to: .image),
@@ -838,7 +841,8 @@ enum IRCBoundedImageLoader {
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
         return (
             NSImage(cgImage: cgImage, size: .zero),
-            CGSize(width: width, height: height)
+            CGSize(width: width, height: height),
+            frameCount
         )
     }
 }

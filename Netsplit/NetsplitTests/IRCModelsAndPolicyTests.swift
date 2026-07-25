@@ -1076,6 +1076,14 @@ struct IRCModelsAndPolicyTests {
         ) == CGSize(width: 900, height: 700))
     }
 
+    @Test("Enlarged image viewer animates only multi-frame GIFs")
+    func selectsAnimatedImageRendering() {
+        #expect(IRCEnlargedImagePolicy.shouldAnimate(mimeType: "image/gif", frameCount: 2))
+        #expect(IRCEnlargedImagePolicy.shouldAnimate(mimeType: "IMAGE/GIF", frameCount: 20))
+        #expect(!IRCEnlargedImagePolicy.shouldAnimate(mimeType: "image/gif", frameCount: 1))
+        #expect(!IRCEnlargedImagePolicy.shouldAnimate(mimeType: "image/png", frameCount: 20))
+    }
+
     @Test("Image previews report their aspect-fitted size without blank framing")
     func sizesImagePreviews() {
         #expect(IRCBoundedImageLayout.fittedSize(

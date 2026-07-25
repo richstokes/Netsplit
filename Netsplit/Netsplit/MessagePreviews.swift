@@ -713,10 +713,7 @@ private struct IRCImageViewer: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Image(nsImage: resource.image)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
+            enlargedImage
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
                 .background(viewerBackground)
@@ -769,6 +766,24 @@ private struct IRCImageViewer: View {
         }
     }
 
+    @ViewBuilder
+    private var enlargedImage: some View {
+        if IRCEnlargedImagePolicy.shouldAnimate(
+            mimeType: resource.mimeType,
+            frameCount: resource.sourceFrameCount
+        ) {
+            IRCAnimatedGIFView(
+                data: resource.sourceData,
+                fallbackImage: resource.image
+            )
+        } else {
+            Image(nsImage: resource.image)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+        }
+    }
+
     private var viewerBackground: Color {
         themePalette?.background ?? Color(nsColor: .windowBackgroundColor)
     }
@@ -791,6 +806,34 @@ private struct IRCImageViewer: View {
         } catch {
             saveError = error.localizedDescription
         }
+    }
+}
+
+enum IRCEnlargedImagePolicy {
+    nonisolated static func shouldAnimate(mimeType: String, frameCount: Int) -> Bool {
+        mimeType.lowercased() == "image/gif" && frameCount > 1
+    }
+}
+
+private struct IRCAnimatedGIFView: NSViewRepresentable {
+    let data: Data
+    let fallbackImage: NSImage
+
+    func makeNSView(context: Context) -> NSImageView {
+        let imageView = NSImageView()
+        imageView.imageAlignment = .alignCenter
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        imageView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        imageView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        imageView.setContentHuggingPriority(.defaultLow, for: .vertical)
+        imageView.image = NSImage(data: data) ?? fallbackImage
+        imageView.animates = true
+        return imageView
+    }
+
+    func updateNSView(_ imageView: NSImageView, context: Context) {
+        imageView.animates = true
     }
 }
 
