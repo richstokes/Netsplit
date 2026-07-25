@@ -266,10 +266,10 @@ enum IRCPreviewTransferPolicy {
 }
 
 struct IRCHTMLHeadTerminator {
-    private static let closingTag = Array("</head>".utf8)
+    nonisolated private static let closingTag = Array("</head>".utf8)
     private var matchedByteCount = 0
 
-    mutating func consume(_ byte: UInt8) -> Bool {
+    nonisolated mutating func consume(_ byte: UInt8) -> Bool {
         let normalizedByte = (65...90).contains(byte) ? byte + 32 : byte
         if normalizedByte == Self.closingTag[matchedByteCount] {
             matchedByteCount += 1
@@ -284,6 +284,29 @@ struct IRCHTMLHeadTerminator {
     }
 }
 
+struct IRCBoundedHTMLHeadCollector {
+    let maximumBytes: Int
+    private(set) var data = Data()
+    private var terminator = IRCHTMLHeadTerminator()
+
+    nonisolated init(maximumBytes: Int) {
+        self.maximumBytes = maximumBytes
+        data.reserveCapacity(min(maximumBytes, 64 * 1_024))
+    }
+
+    nonisolated mutating func consume(_ chunk: Data) -> Bool {
+        guard data.count < maximumBytes else { return true }
+
+        for byte in chunk.prefix(maximumBytes - data.count) {
+            data.append(byte)
+            if terminator.consume(byte) {
+                return true
+            }
+        }
+        return data.count == maximumBytes
+    }
+}
+
 @MainActor
 final class IRCPreviewHTTPClient {
     static let shared = IRCPreviewHTTPClient()
@@ -291,8 +314,8 @@ final class IRCPreviewHTTPClient {
     private static let maximumRedirects = 3
     private static let requestTimeout: TimeInterval = 20
     private static let resourceTimeout: TimeInterval = 30
+    private let htmlSessionDelegate: IRCBoundedHTMLSessionDelegate
     private let session: URLSession
-    private let redirectDelegate = IRCRejectingRedirectDelegate()
     private let limiter = IRCPreviewFetchLimiter(limit: 6)
 
     private init() {
@@ -309,7 +332,13 @@ final class IRCPreviewHTTPClient {
         configuration.timeoutIntervalForResource = Self.resourceTimeout
         configuration.httpMaximumConnectionsPerHost = 2
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
-        session = URLSession(configuration: configuration)
+        let htmlSessionDelegate = IRCBoundedHTMLSessionDelegate()
+        self.htmlSessionDelegate = htmlSessionDelegate
+        session = URLSession(
+            configuration: configuration,
+            delegate: htmlSessionDelegate,
+            delegateQueue: nil
+        )
     }
 
     func load(
@@ -430,7 +459,11 @@ final class IRCPreviewHTTPClient {
                 )
             }
 
-            let (bytes, response) = try await session.bytes(for: request, delegate: redirectDelegate)
+            let (data, response) = try await htmlSessionDelegate.data(
+                for: request,
+                using: session,
+                maximumBytes: maximumBytes
+            )
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw IRCPreviewError.invalidResponse
             }
@@ -453,23 +486,6 @@ final class IRCPreviewHTTPClient {
                   acceptsMIMEType(mimeType) else {
                 throw IRCPreviewError.invalidResponse
             }
-            var data = Data()
-            if response.expectedContentLength > 0 {
-                data.reserveCapacity(min(maximumBytes, Int(response.expectedContentLength)))
-            }
-            var htmlHeadTerminator = IRCHTMLHeadTerminator()
-            for try await byte in bytes {
-                try Task.checkCancellation()
-                guard data.count < maximumBytes else {
-                    if bodyPolicy == .htmlHead { break }
-                    throw IRCPreviewError.tooLarge
-                }
-                data.append(byte)
-                if bodyPolicy == .htmlHead,
-                   (htmlHeadTerminator.consume(byte) || data.count == maximumBytes) {
-                    break
-                }
-            }
             return IRCPreviewHTTPResponse(
                 data: data,
                 url: finalURL,
@@ -481,7 +497,42 @@ final class IRCPreviewHTTPClient {
     }
 }
 
-private final class IRCRejectingRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+private final class IRCBoundedHTMLSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    typealias Output = (Data, URLResponse)
+
+    private struct Transfer {
+        var collector: IRCBoundedHTMLHeadCollector
+        var response: URLResponse?
+        let continuation: CheckedContinuation<Output, Error>
+    }
+
+    private let stateLock = NSLock()
+    private var transfers: [Int: Transfer] = [:]
+
+    func data(
+        for request: URLRequest,
+        using session: URLSession,
+        maximumBytes: Int
+    ) async throws -> Output {
+        let cancellationBox = IRCURLSessionTaskCancellationBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request)
+                let transfer = Transfer(
+                    collector: IRCBoundedHTMLHeadCollector(maximumBytes: maximumBytes),
+                    continuation: continuation
+                )
+                stateLock.withLock {
+                    transfers[task.taskIdentifier] = transfer
+                }
+                cancellationBox.set(task)
+                task.resume()
+            }
+        } onCancel: {
+            cancellationBox.cancel()
+        }
+    }
+
     nonisolated func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -503,6 +554,93 @@ private final class IRCRejectingRedirectDelegate: NSObject, URLSessionTaskDelega
         } else {
             completionHandler(.cancelAuthenticationChallenge, nil)
         }
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
+    ) {
+        let isRegistered = stateLock.withLock {
+            guard var transfer = transfers[dataTask.taskIdentifier] else { return false }
+            transfer.response = response
+            transfers[dataTask.taskIdentifier] = transfer
+            return true
+        }
+        completionHandler(isRegistered ? .allow : .cancel)
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        let completion: (CheckedContinuation<Output, Error>, Output)? = stateLock.withLock {
+            guard var transfer = transfers[dataTask.taskIdentifier] else { return nil }
+            let isComplete = transfer.collector.consume(data)
+            guard isComplete, let response = transfer.response else {
+                transfers[dataTask.taskIdentifier] = transfer
+                return nil
+            }
+
+            transfers[dataTask.taskIdentifier] = nil
+            return (
+                transfer.continuation,
+                (transfer.collector.data, response)
+            )
+        }
+
+        if let (continuation, output) = completion {
+            dataTask.cancel()
+            continuation.resume(returning: output)
+        }
+    }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        let transfer = stateLock.withLock {
+            transfers.removeValue(forKey: task.taskIdentifier)
+        }
+        guard let transfer else { return }
+
+        if let error {
+            transfer.continuation.resume(throwing: error)
+        } else if let response = transfer.response {
+            transfer.continuation.resume(returning: (transfer.collector.data, response))
+        } else {
+            transfer.continuation.resume(throwing: IRCPreviewError.invalidResponse)
+        }
+    }
+}
+
+private final class IRCURLSessionTaskCancellationBox: @unchecked Sendable {
+    private let stateLock = NSLock()
+    nonisolated(unsafe) private var task: URLSessionTask?
+    nonisolated(unsafe) private var isCancelled = false
+
+    nonisolated init() {}
+
+    nonisolated func set(_ task: URLSessionTask) {
+        let shouldCancel = stateLock.withLock {
+            guard !isCancelled else { return true }
+            self.task = task
+            return false
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    nonisolated func cancel() {
+        let task = stateLock.withLock {
+            isCancelled = true
+            return self.task
+        }
+        task?.cancel()
     }
 }
 

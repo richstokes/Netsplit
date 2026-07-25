@@ -922,6 +922,21 @@ struct IRCModelsAndPolicyTests {
 
         var nonTerminator = IRCHTMLHeadTerminator()
         #expect(!Data("</header>".utf8).contains { nonTerminator.consume($0) })
+
+        var collector = IRCBoundedHTMLHeadCollector(maximumBytes: 128)
+        let firstChunkCompletedHead = collector.consume(Data("<html><he".utf8))
+        let secondChunkCompletedHead = collector.consume(
+            Data("ad><title>Example</title></HEAD><body>Ignored".utf8)
+        )
+        #expect(!firstChunkCompletedHead)
+        #expect(secondChunkCompletedHead)
+        #expect(String(decoding: collector.data, as: UTF8.self) ==
+            "<html><head><title>Example</title></HEAD>")
+
+        var boundedCollector = IRCBoundedHTMLHeadCollector(maximumBytes: 8)
+        let reachedByteLimit = boundedCollector.consume(Data(repeating: 65, count: 32))
+        #expect(reachedByteLimit)
+        #expect(boundedCollector.data == Data(repeating: 65, count: 8))
     }
 
     @Test("Preview resources deduplicate URL fragments")
