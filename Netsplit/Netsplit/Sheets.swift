@@ -47,7 +47,11 @@ struct ServerProfileEditor: View {
         _port = State(initialValue: String(profileToEdit?.port ?? 6697))
         _useTLS = State(initialValue: profileToEdit?.useTLS ?? true)
         _autoConnect = State(initialValue: profileToEdit?.autoConnect ?? false)
-        _nicknameOverride = State(initialValue: profileToEdit?.nicknameOverride ?? "")
+        _nicknameOverride = State(
+            initialValue: IRCIdentityValidation.nicknameLimitedToMaximumLength(
+                profileToEdit?.nicknameOverride ?? ""
+            )
+        )
         _realNameOverride = State(initialValue: profileToEdit?.realNameOverride ?? "")
         _mentionNotificationsOverride = State(initialValue: profileToEdit?.mentionNotificationsOverride)
         _serverPassword = State(initialValue: profileToEdit.map { state.serverPassword(for: $0) } ?? "")
@@ -190,8 +194,11 @@ struct ServerProfileEditor: View {
         ServerEditorSection(title: "Identity", systemImage: "person.crop.circle") {
             ServerEditorFieldRow("Nickname") {
                 TextField("Use global nickname", text: $nicknameOverride, prompt: Text("Use global nickname"))
+                    .onChange(of: nicknameOverride) { _, newValue in
+                        nicknameOverride = IRCIdentityValidation.nicknameLimitedToMaximumLength(newValue)
+                    }
                     .accessibilityLabel("Nickname override")
-                    .accessibilityHint("Leave blank to use the global nickname")
+                    .accessibilityHint("Leave blank to use the global nickname. Limited to \(IRCIdentityValidation.maximumNicknameLength) characters.")
             }
             if let nicknameOverrideError {
                 ServerEditorHelpText(nicknameOverrideError, tint: .red, isError: true)
@@ -201,7 +208,7 @@ struct ServerProfileEditor: View {
                     .accessibilityLabel("Real name override")
                     .accessibilityHint("Leave blank to use the global real name")
             }
-            ServerEditorHelpText("Leave either field blank to use its global value from Settings. Set a value here when this network requires a different identity.")
+            ServerEditorHelpText("Leave either field blank to use its global value from Settings. Set a value here when this network requires a different identity. Nicknames are limited to \(IRCIdentityValidation.maximumNicknameLength) characters.")
         }
     }
 
@@ -970,6 +977,9 @@ struct SettingsView: View {
         Form {
             Section("Identity") {
                 TextField("Nickname", text: $state.nickname)
+                    .onChange(of: state.nickname) { _, newValue in
+                        state.nickname = IRCIdentityValidation.nicknameLimitedToMaximumLength(newValue)
+                    }
                     .onSubmit(state.saveIdentity)
                 if let nicknameError = IRCIdentityValidation.nicknameError(state.nickname) {
                     Text(nicknameError)
@@ -980,7 +990,7 @@ struct SettingsView: View {
                 }
                 TextField("Real name", text: $state.realName)
                     .onSubmit(state.saveIdentity)
-                Text("Used when you connect to an IRC network. Some networks may require registration for preferred nicknames.")
+                Text("Used when you connect to an IRC network. Nicknames are limited to \(IRCIdentityValidation.maximumNicknameLength) characters. Some networks may require registration for preferred nicknames.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

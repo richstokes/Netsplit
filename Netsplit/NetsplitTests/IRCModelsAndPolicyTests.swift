@@ -249,12 +249,25 @@ struct IRCModelsAndPolicyTests {
 
     @Test("Nickname validation accepts IRC-safe names and rejects malformed identities")
     func validatesNicknames() {
-        for nickname in ["Netsplit_User", "[Netsplit]", "rich-stokes", "Ålice42"] {
+        let maximumLengthNickname = String(
+            repeating: "n",
+            count: IRCIdentityValidation.maximumNicknameLength
+        )
+        for nickname in ["Netsplit_User", "[Netsplit]", "rich-stokes", "Ålice42", maximumLengthNickname] {
             #expect(IRCIdentityValidation.nicknameError(nickname) == nil, "Nickname: \(nickname)")
         }
         for nickname in ["", " nick", "nick ", "nick name", "1nickname", "nick!user", "nick\nOPER"] {
             #expect(IRCIdentityValidation.nicknameError(nickname) != nil, "Nickname: \(nickname)")
         }
+        let overlongNickname = maximumLengthNickname + "n"
+        #expect(
+            IRCIdentityValidation.nicknameError(overlongNickname)
+                == "Nicknames can be at most \(IRCIdentityValidation.maximumNicknameLength) characters."
+        )
+        #expect(
+            IRCIdentityValidation.nicknameLimitedToMaximumLength(overlongNickname)
+                == maximumLengthNickname
+        )
     }
 
     @Test("Case mappings implement the network-advertised RFC variants")

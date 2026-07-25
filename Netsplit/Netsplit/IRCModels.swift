@@ -523,12 +523,21 @@ struct IRCIgnoreSnapshot {
 }
 
 enum IRCIdentityValidation {
+    static let maximumNicknameLength = 30
+
+    static func nicknameLimitedToMaximumLength(_ value: String) -> String {
+        String(value.prefix(maximumNicknameLength))
+    }
+
     static func nicknameError(_ value: String) -> String? {
         let nickname = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !nickname.isEmpty else { return "Enter a nickname." }
         guard nickname == value else { return "Nicknames cannot begin or end with whitespace." }
         guard !nickname.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }) else {
             return "Nicknames cannot contain whitespace or control characters."
+        }
+        guard nickname.count <= maximumNicknameLength else {
+            return "Nicknames can be at most \(maximumNicknameLength) characters."
         }
         let leadingSymbols = "[]\\`_^{|}"
         guard let first = nickname.first,
