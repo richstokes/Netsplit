@@ -51,6 +51,49 @@ enum SSHTunnelError: LocalizedError {
     }
 }
 
+enum SSHTunnelSendError: LocalizedError, Equatable {
+    case channelUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .channelUnavailable:
+            "The SSH forwarding channel was not ready for writing."
+        }
+    }
+}
+
+/// Coordinates readiness reported by the NIO stream pipeline with ownership of
+/// the child channel used for writes. The pipeline can become active while
+/// `createDirectTCPIPChannel` is still suspended, so neither signal is
+/// sufficient on its own.
+struct SSHTunnelReadinessGate: Equatable {
+    private(set) var hasWritableChannel = false
+    private(set) var isStreamReady = false
+    private(set) var didReportReady = false
+
+    mutating func writableChannelBecameAvailable() -> Bool {
+        hasWritableChannel = true
+        return consumeReadinessIfPossible()
+    }
+
+    mutating func streamBecameReady() -> Bool {
+        isStreamReady = true
+        return consumeReadinessIfPossible()
+    }
+
+    mutating func reset() {
+        self = Self()
+    }
+
+    private mutating func consumeReadinessIfPossible() -> Bool {
+        guard hasWritableChannel, isStreamReady, !didReportReady else {
+            return false
+        }
+        didReportReady = true
+        return true
+    }
+}
+
 /// Owns an authenticated SSH connection and one direct-tcpip child channel that
 /// carries the IRC byte stream. No local listening socket is created, which is
 /// important for the App Sandbox and avoids exposing a loopback proxy port.
@@ -60,6 +103,7 @@ final class SSHTunnelConnection {
     private var channel: Channel?
     private var connectionTask: Task<Void, Never>?
     private var generation = UUID()
+    private var readinessGate = SSHTunnelReadinessGate()
 
     func connect(
         configuration: SSHTunnelConfiguration,
@@ -122,7 +166,7 @@ final class SSHTunnelConnection {
                             onReady: {
                                 Task { @MainActor in
                                     guard owner.generation == generation else { return }
-                                    onReady()
+                                    owner.streamBecameReady(onReady: onReady)
                                 }
                             },
                             onData: { data in
@@ -168,6 +212,9 @@ final class SSHTunnelConnection {
                     return
                 }
                 self.channel = channel
+                if readinessGate.writableChannelBecameAvailable() {
+                    onReady()
+                }
             } catch {
                 guard !Task.isCancelled, self.generation == generation else { return }
                 finish(
@@ -181,7 +228,7 @@ final class SSHTunnelConnection {
 
     func send(_ data: Data, completion: @escaping @MainActor (Bool, Error?) -> Void) {
         guard let channel, channel.isActive else {
-            completion(false, nil)
+            completion(false, SSHTunnelSendError.channelUnavailable)
             return
         }
         var buffer = channel.allocator.buffer(capacity: data.count)
@@ -220,6 +267,7 @@ final class SSHTunnelConnection {
         let client = self.client
         self.channel = nil
         self.client = nil
+        readinessGate.reset()
         Task {
             // Work around a NIOSSH child-channel state-machine bug: closing a
             // child can race a pending inbound read, which then sends a window
@@ -239,6 +287,12 @@ final class SSHTunnelConnection {
             } else if let channel {
                 try? await channel.close()
             }
+        }
+    }
+
+    private func streamBecameReady(onReady: @escaping @MainActor () -> Void) {
+        if readinessGate.streamBecameReady() {
+            onReady()
         }
     }
 

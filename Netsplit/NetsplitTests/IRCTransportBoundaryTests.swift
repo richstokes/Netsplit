@@ -96,6 +96,78 @@ struct IRCTransportBoundaryTests {
         #expect(IRCGracefulQuitPolicy.shouldFinish(after: .timedOut))
     }
 
+    @Test("SSH readiness waits for the writable channel when the stream is ready first")
+    func sshReadinessHandlesStreamFirst() {
+        var gate = SSHTunnelReadinessGate()
+
+        var emittedReady = gate.streamBecameReady()
+        #expect(!emittedReady)
+        #expect(gate.isStreamReady)
+        #expect(!gate.hasWritableChannel)
+        #expect(!gate.didReportReady)
+
+        emittedReady = gate.writableChannelBecameAvailable()
+        #expect(emittedReady)
+        #expect(gate.didReportReady)
+        emittedReady = gate.streamBecameReady()
+        #expect(!emittedReady)
+        emittedReady = gate.writableChannelBecameAvailable()
+        #expect(!emittedReady)
+    }
+
+    @Test("SSH readiness waits for the stream when the writable channel is available first")
+    func sshReadinessHandlesChannelFirst() {
+        var gate = SSHTunnelReadinessGate()
+
+        var emittedReady = gate.writableChannelBecameAvailable()
+        #expect(!emittedReady)
+        #expect(gate.hasWritableChannel)
+        #expect(!gate.isStreamReady)
+        #expect(!gate.didReportReady)
+
+        emittedReady = gate.streamBecameReady()
+        #expect(emittedReady)
+        #expect(gate.didReportReady)
+        emittedReady = gate.writableChannelBecameAvailable()
+        #expect(!emittedReady)
+        emittedReady = gate.streamBecameReady()
+        #expect(!emittedReady)
+    }
+
+    @Test("Reset SSH readiness requires both signals for the next connection")
+    func sshReadinessResetStartsFresh() {
+        var gate = SSHTunnelReadinessGate()
+
+        var emittedReady = gate.streamBecameReady()
+        #expect(!emittedReady)
+        emittedReady = gate.writableChannelBecameAvailable()
+        #expect(emittedReady)
+        gate.reset()
+
+        #expect(gate == SSHTunnelReadinessGate())
+        emittedReady = gate.writableChannelBecameAvailable()
+        #expect(!emittedReady)
+        emittedReady = gate.streamBecameReady()
+        #expect(emittedReady)
+    }
+
+    @Test("SSH writes before channel readiness return an actionable error")
+    @MainActor
+    func sshWriteBeforeReadinessFailsVisibly() {
+        let tunnel = SSHTunnelConnection()
+        var didSend: Bool?
+        var sendError: Error?
+
+        tunnel.send(Data("NICK example\r\n".utf8)) { sent, error in
+            didSend = sent
+            sendError = error
+        }
+
+        #expect(didSend == false)
+        #expect(sendError as? SSHTunnelSendError == .channelUnavailable)
+        #expect(sendError?.localizedDescription == "The SSH forwarding channel was not ready for writing.")
+    }
+
     @Test("Connection lifecycle phases are mutually exclusive and reset atomically")
     @MainActor
     func connectionLifecyclePhasesAreMutuallyExclusive() {
