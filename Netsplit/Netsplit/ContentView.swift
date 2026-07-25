@@ -1346,11 +1346,6 @@ private struct ConversationTranscript: View {
         case tail
     }
 
-    /// Keep at least a viewport's worth of recent rows out of LazyVStack's
-    /// estimated layout so switching conversations cannot land in a blank
-    /// region above the tail.
-    private static let eagerTailMessageCount = 100
-
     init(
         state: IRCAppState,
         selection: SidebarItem,
@@ -1383,9 +1378,6 @@ private struct ConversationTranscript: View {
             channelEventVisibility: channelEventVisibility
         )
         let messages = allMessages.suffix(visibleMessageLimit)
-        let eagerTailCount = min(Self.eagerTailMessageCount, messages.count)
-        let lazyMessages = messages.dropLast(eagerTailCount)
-        let eagerMessages = messages.suffix(eagerTailCount)
         let hiddenMessageCount = allMessages.count - messages.count
         let lastMessageID = messages.last?.id
 #if DEBUG
@@ -1395,8 +1387,8 @@ private struct ConversationTranscript: View {
             title: state.title(for: selection),
             revision: revision,
             messageCount: allMessages.count,
-            lazyMessageCount: lazyMessages.count,
-            eagerMessageCount: eagerMessages.count,
+            lazyMessageCount: 0,
+            eagerMessageCount: messages.count,
             lastMessageID: lastMessageID
         )
         let debugGeometryHandler: TranscriptLiveScrollObserver.DebugGeometryHandler? = { event, geometry in
@@ -1412,55 +1404,39 @@ private struct ConversationTranscript: View {
                     alignment: .leading,
                     spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
                 ) {
-                    if hiddenMessageCount > 0 || !lazyMessages.isEmpty {
-                        LazyVStack(
-                            alignment: .leading,
-                            spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
-                        ) {
-                            if hiddenMessageCount > 0 {
-                                Button {
-                                    let previousFirstMessageID = messages.first?.id
-                                    visibleMessageLimit = IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
-                                        current: visibleMessageLimit,
-                                        total: allMessages.count
-                                    )
-                                    guard let previousFirstMessageID else { return }
-                                    Task { @MainActor in
-                                        await Task.yield()
-                                        scrollView.scrollTo(previousFirstMessageID, anchor: .top)
-                                    }
-                                } label: {
-                                    Label(
-                                        "Load \(min(hiddenMessageCount, IRCTranscriptPresentationPolicy.earlierMessagePageSize)) earlier messages",
-                                        systemImage: "arrow.up"
-                                    )
-                                    .frame(maxWidth: .infinity)
-                                }
-                                .buttonStyle(.plain)
-                                .font(.system(size: textMetrics.size(13), weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .padding(.vertical, textMetrics.spacing(8))
-                                .accessibilityHint("Keeps the current reading position")
+                    if hiddenMessageCount > 0 {
+                        Button {
+                            let previousFirstMessageID = messages.first?.id
+                            visibleMessageLimit = IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
+                                current: visibleMessageLimit,
+                                total: allMessages.count
+                            )
+                            guard let previousFirstMessageID else { return }
+                            Task { @MainActor in
+                                await Task.yield()
+                                scrollView.scrollTo(previousFirstMessageID, anchor: .top)
                             }
-
-                            ForEach(lazyMessages) { message in
-                                messageRow(for: message)
-                            }
+                        } label: {
+                            Label(
+                                "Load \(min(hiddenMessageCount, IRCTranscriptPresentationPolicy.earlierMessagePageSize)) earlier messages",
+                                systemImage: "arrow.up"
+                            )
+                            .frame(maxWidth: .infinity)
                         }
+                        .buttonStyle(.plain)
+                        .font(.system(size: textMetrics.size(13), weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, textMetrics.spacing(8))
+                        .accessibilityHint("Keeps the current reading position")
                     }
 
-                    VStack(
-                        alignment: .leading,
-                        spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
-                    ) {
-                        ForEach(eagerMessages) { message in
-                            messageRow(for: message)
-                        }
-
-                        Color.clear
-                            .frame(height: textMetrics.spacing(18))
-                            .id(ScrollTarget.tail)
+                    ForEach(messages) { message in
+                        messageRow(for: message)
                     }
+
+                    Color.clear
+                        .frame(height: textMetrics.spacing(18))
+                        .id(ScrollTarget.tail)
                 }
                 .padding(.horizontal, textMetrics.spacing(24))
                 .padding(.top, textMetrics.spacing(18))
