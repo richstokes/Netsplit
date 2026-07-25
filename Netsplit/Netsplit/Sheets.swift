@@ -839,6 +839,11 @@ struct ChannelBrowser: View {
             Group {
                 if !results.isEmpty {
                     List(results) { channel in
+                        let isJoined = state.isJoinedChannel(
+                            named: channel.name,
+                            on: profile?.id
+                        )
+
                         HStack(alignment: .top, spacing: textMetrics.spacing(14)) {
                             Image(systemName: "number")
                                 .font(.system(size: textMetrics.size(14), weight: .bold))
@@ -866,16 +871,26 @@ struct ChannelBrowser: View {
                                 .ircBadgeStyle()
                                 .accessibilityLabel("\(channel.userCount) users")
 
-                            Button("Join") { join(channel) }
+                            Button(isJoined ? "Joined" : "Join") { join(channel) }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(textMetrics.scale > 1.15 ? .large : .small)
-                                .help("Join channel. Command-click to keep browsing.")
-                                .accessibilityLabel("Join \(channel.name)")
-                                .accessibilityHint("Hold Command while activating to join without closing the channel browser")
+                                .disabled(isJoined)
+                                .help(isJoined
+                                      ? "You are already in \(channel.name)."
+                                      : "Join channel. Command-click to keep browsing.")
+                                .accessibilityLabel(isJoined
+                                                    ? "Already joined \(channel.name)"
+                                                    : "Join \(channel.name)")
+                                .accessibilityHint(isJoined
+                                                   ? ""
+                                                   : "Hold Command while activating to join without closing the channel browser")
                         }
                         .padding(.vertical, textMetrics.spacing(7))
                         .contentShape(Rectangle())
-                        .onTapGesture(count: 2) { join(channel) }
+                        .onTapGesture(count: 2) {
+                            guard !isJoined else { return }
+                            join(channel)
+                        }
                         .accessibilityElement(children: .contain)
                     }
                 } else if isLoading {
@@ -913,6 +928,7 @@ struct ChannelBrowser: View {
     }
 
     private func join(_ channel: ChannelListing) {
+        guard !state.isJoinedChannel(named: channel.name, on: profile?.id) else { return }
         let behavior = IRCChannelBrowserJoinBehavior(
             modifierFlags: NSApp.currentEvent?.modifierFlags ?? []
         )

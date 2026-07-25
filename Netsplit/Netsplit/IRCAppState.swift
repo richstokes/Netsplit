@@ -490,6 +490,14 @@ final class IRCAppState: ObservableObject {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
+    func isJoinedChannel(named channelName: String, on serverID: UUID?) -> Bool {
+        guard let serverID else { return false }
+        return channels.contains {
+            $0.serverID == serverID
+                && identifiersEqual($0.name, channelName, serverID: serverID)
+        }
+    }
+
     func directMessages(for profile: ServerProfile) -> [Conversation] {
         directMessages.filter { $0.serverID == profile.id }
     }
