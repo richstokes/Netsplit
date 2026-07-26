@@ -163,6 +163,7 @@ final class IRCAppState: ObservableObject {
     private var pendingTopicDestinations: [String: SidebarItem] = [:]
     private var pendingInvites: [String: PendingInvite] = [:]
     private var pendingModeDestinations: [String: SidebarItem] = [:]
+    private var pendingMaskBans: [String: [PendingMaskBan]] = [:]
     private var pendingKicks: [String: PendingKick] = [:]
     private var pendingKills: [String: PendingKill] = [:]
     private var pendingWhoDestinations: [String: SidebarItem] = [:]
@@ -1891,6 +1892,41 @@ final class IRCAppState: ObservableObject {
             connections[profile.id]?.send(command: "MODE \(argument)")
             let action = fields.count == 1 ? "Requesting modes for \(target)…" : "Changing modes for \(target)…"
             appendSystem(action, for: item)
+        case "BAN":
+            let defaultChannel: String? = if case .channel(let channelID) = item {
+                channels.first(where: { $0.id == channelID })?.name
+            } else {
+                nil
+            }
+            guard let ban = IRCBanCommand.parse(
+                argument,
+                defaultChannel: defaultChannel,
+                channelTypes: features(for: profile.id).channelTypes
+            ) else {
+                appendSystem("Usage: /ban mask [#channel] [reason]", for: item)
+                return
+            }
+            guard let channel = existingChannel(named: ban.channel, serverID: profile.id) else {
+                appendSystem("Join \(ban.channel) before banning members from it.", for: item)
+                return
+            }
+            let key = modeKey(serverID: profile.id, target: channel.name)
+            pendingModeDestinations[key] = item
+            pendingMaskBans[key, default: []].append(PendingMaskBan(
+                serverID: profile.id,
+                mask: ban.mask,
+                reason: ban.reason,
+                destination: item
+            ))
+            if channelMembers[channel.id]?.contains(where: {
+                $0.username == nil || $0.hostname == nil
+            }) == true {
+                // Request identities first so host-based masks can also kick
+                // members on servers without userhost-in-names.
+                connections[profile.id]?.send(command: "WHO \(channel.name)")
+            }
+            connections[profile.id]?.send(command: "MODE \(channel.name) +b \(ban.mask)")
+            appendSystem("Banning \(ban.mask) from \(channel.name)…", for: item)
         case "INVITE":
             let fields = argument.split(separator: " ", maxSplits: 2).map(String.init)
             guard fields.count == 2 else {
@@ -2343,6 +2379,14 @@ final class IRCAppState: ObservableObject {
             if let channel = existingChannel(named: target, serverID: profile.id) {
                 applyMembershipModes(modeString, arguments: modeArguments, to: channel.id)
                 applyBanModes(modeString, arguments: modeArguments, to: channel)
+                if identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
+                    kickMembersMatchingConfirmedBans(
+                        modeString,
+                        arguments: modeArguments,
+                        from: channel,
+                        profile: profile
+                    )
+                }
                 appendChannelEvent("\(sender) set mode \(changes) on \(target).", kind: .mode, channelID: channel.id)
                 if let destination, destination != .channel(channel.id) {
                     appendSystem("Modes for \(target) changed: \(changes)", for: destination)
@@ -2583,16 +2627,6 @@ final class IRCAppState: ObservableObject {
         default: nil
         }
 
-        if IRCBanListRequestErrorPolicy.isListRequestFailure(wire.command),
-           let channel,
-           let conversation = existingChannel(named: channel, serverID: serverID),
-           channelBanListRequests.remove(conversation.id) != nil {
-            pendingChannelBanLists.removeValue(forKey: conversation.id)
-            channelBanListRequestIDs.removeValue(forKey: conversation.id)
-            channelBanListErrors[conversation.id] = wire.trailing ?? "The server rejected the ban-list request."
-            return true
-        }
-
         if let (key, kick) = pendingKicks.first(where: { _, kick in
             guard kick.serverID == serverID else { return false }
             if let nickname, !identifiersEqual(kick.nickname, nickname, serverID: serverID) { return false }
@@ -2606,10 +2640,42 @@ final class IRCAppState: ObservableObject {
 
         if let channel {
             let key = modeKey(serverID: serverID, target: channel)
+            if let bans = pendingMaskBans.removeValue(forKey: key), !bans.isEmpty {
+                pendingModeDestinations.removeValue(forKey: key)
+                for ban in bans {
+                    appendSystem("Ban failed: \(wire.trailing ?? "The server rejected the ban.")", for: ban.destination)
+                }
+                return true
+            }
             if let destination = pendingModeDestinations.removeValue(forKey: key) {
                 appendSystem("Mode change failed: \(wire.trailing ?? "The server rejected the mode change.")", for: destination)
                 return true
             }
+        }
+
+        if IRCBanListRequestErrorPolicy.isListRequestFailure(wire.command),
+           let channel,
+           let conversation = existingChannel(named: channel, serverID: serverID),
+           channelBanListRequests.remove(conversation.id) != nil {
+            pendingChannelBanLists.removeValue(forKey: conversation.id)
+            channelBanListRequestIDs.removeValue(forKey: conversation.id)
+            channelBanListErrors[conversation.id] = wire.trailing ?? "The server rejected the ban-list request."
+            return true
+        }
+
+        if wire.command == "472",
+           let (key, bans) = pendingMaskBans.first(where: { _, bans in
+               bans.contains(where: { $0.serverID == serverID })
+           }) {
+            pendingMaskBans.removeValue(forKey: key)
+            pendingModeDestinations.removeValue(forKey: key)
+            for ban in bans {
+                appendSystem(
+                    "Ban failed: \(wire.trailing ?? "The server does not support that mode.")",
+                    for: ban.destination
+                )
+            }
+            return true
         }
 
         if wire.command == "472",
@@ -2698,6 +2764,14 @@ final class IRCAppState: ObservableObject {
     private func handleWhoReply(_ wire: IRCWireMessage, serverID: UUID) {
         guard wire.parameters.count >= 2 else { return }
         if wire.command == "352" {
+            if wire.parameters.count > 5 {
+                updateMemberIdentity(
+                    named: wire.parameters[5],
+                    username: wire.parameters[2],
+                    hostname: wire.parameters[3],
+                    serverID: serverID
+                )
+            }
             let responseTargets = [wire.parameters[1]] + (wire.parameters.count > 5 ? [wire.parameters[5]] : [])
             guard let key = responseTargets
                 .map({ whoKey(serverID: serverID, target: $0) })
@@ -3034,6 +3108,9 @@ final class IRCAppState: ObservableObject {
         channelBanListRequestIDs.removeValue(forKey: channel.id)
         channelBanListErrors.removeValue(forKey: channel.id)
         pendingJoins.removeValue(forKey: joinKey(serverID: channel.serverID, channel: channel.name))
+        let channelModeKey = modeKey(serverID: channel.serverID, target: channel.name)
+        pendingModeDestinations.removeValue(forKey: channelModeKey)
+        pendingMaskBans.removeValue(forKey: channelModeKey)
         if selection == .channel(channel.id) { selection = .server(channel.serverID) }
         messagesDidChange(for: channel.id)
         membersDidChange(for: channel.id)
@@ -3104,6 +3181,7 @@ final class IRCAppState: ObservableObject {
         pendingTopicDestinations = pendingTopicDestinations.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingInvites = pendingInvites.filter { $0.value.serverID != serverID }
         pendingModeDestinations = pendingModeDestinations.filter { !$0.key.hasPrefix(keyPrefix) }
+        pendingMaskBans = pendingMaskBans.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingKicks = pendingKicks.filter { $0.value.serverID != serverID }
         pendingKills = pendingKills.filter { $0.value.serverID != serverID }
         pendingWhoDestinations = pendingWhoDestinations.filter { !$0.key.hasPrefix(keyPrefix) }
@@ -3360,6 +3438,57 @@ final class IRCAppState: ObservableObject {
                 to: pending,
                 channelName: channel.name
             )
+        }
+    }
+
+    private func kickMembersMatchingConfirmedBans(
+        _ modeString: String,
+        arguments: [String],
+        from channel: Conversation,
+        profile: ServerProfile
+    ) {
+        let key = modeKey(serverID: profile.id, target: channel.name)
+        guard var pendingBans = pendingMaskBans[key], !pendingBans.isEmpty else { return }
+        let serverFeatures = features(for: profile.id)
+        let confirmedMasks = IRCChannelModeParser.changes(
+            modeString: modeString,
+            arguments: arguments,
+            membership: serverFeatures.membership,
+            channelModes: serverFeatures.channelModes
+        ).compactMap { change in
+            change.adding && change.mode == "b" ? change.argument : nil
+        }
+        guard !confirmedMasks.isEmpty else { return }
+
+        for confirmedMask in confirmedMasks {
+            guard let pendingIndex = pendingBans.firstIndex(where: {
+                serverFeatures.caseMapping.normalize($0.mask)
+                    == serverFeatures.caseMapping.normalize(confirmedMask)
+            }) else { continue }
+            let ban = pendingBans.remove(at: pendingIndex)
+            let localNickname = nickname(for: profile)
+            let matchingMembers = (channelMembers[channel.id] ?? []).filter {
+                IRCChannelModerationPolicy.mask(
+                    confirmedMask,
+                    matches: $0,
+                    caseMapping: serverFeatures.caseMapping
+                )
+            }
+            let orderedMembers = matchingMembers.filter {
+                !identifiersEqual($0.nickname, localNickname, serverID: profile.id)
+            } + matchingMembers.filter {
+                identifiersEqual($0.nickname, localNickname, serverID: profile.id)
+            }
+            for member in orderedMembers {
+                let reason = ban.reason.map { " \($0)" } ?? ""
+                executeCommand("/kick \(channel.name) \(member.nickname)\(reason)", in: ban.destination)
+            }
+        }
+
+        if pendingBans.isEmpty {
+            pendingMaskBans.removeValue(forKey: key)
+        } else {
+            pendingMaskBans[key] = pendingBans
         }
     }
 
@@ -4119,6 +4248,13 @@ private struct PendingKick {
     var serverID: UUID
     var channel: String
     var nickname: String
+    var destination: SidebarItem
+}
+
+private struct PendingMaskBan {
+    var serverID: UUID
+    var mask: String
+    var reason: String?
     var destination: SidebarItem
 }
 

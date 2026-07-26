@@ -487,6 +487,59 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCChannelModerationPolicy.banMask(for: identified) == "*!~alice@cloak.example")
     }
 
+    @Test("Custom ban commands use an explicit channel or fall back to the current channel")
+    func parsesCustomBanCommands() {
+        #expect(IRCBanCommand.parse(
+            "*!*@*.example.com",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == IRCBanCommand(mask: "*!*@*.example.com", channel: "#swift", reason: nil))
+        #expect(IRCBanCommand.parse(
+            "*@*.att.com &help repeated abuse",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == IRCBanCommand(mask: "*@*.att.com", channel: "&help", reason: "repeated abuse"))
+        #expect(IRCBanCommand.parse(
+            "BadNick!*@* repeated abuse",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == IRCBanCommand(mask: "BadNick!*@*", channel: "#swift", reason: "repeated abuse"))
+        #expect(IRCBanCommand.parse(
+            "*!*@*.example.com",
+            defaultChannel: nil,
+            channelTypes: ["#", "&"]
+        ) == nil)
+        #expect(IRCBanCommand.parse(
+            "*!*@*.example.com #swift",
+            defaultChannel: nil,
+            channelTypes: ["#", "&"]
+        ) == IRCBanCommand(mask: "*!*@*.example.com", channel: "#swift", reason: nil))
+    }
+
+    @Test("Custom ban masks match complete member identities with IRC wildcards")
+    func matchesCustomBanMasks() {
+        let alice = ChannelMember(
+            nickname: "[Alice]",
+            username: "~alice",
+            hostname: "user-1.att.com"
+        )
+        let bob = ChannelMember(
+            nickname: "Bob",
+            username: "bob",
+            hostname: "example.net"
+        )
+        let unidentified = ChannelMember(nickname: "Guest")
+
+        #expect(IRCChannelModerationPolicy.mask("*@*.att.com", matches: alice, caseMapping: .rfc1459))
+        #expect(IRCChannelModerationPolicy.mask(
+            "{alice}!?alice@user-?.att.com",
+            matches: alice,
+            caseMapping: .rfc1459
+        ))
+        #expect(!IRCChannelModerationPolicy.mask("*@*.att.com", matches: bob, caseMapping: .rfc1459))
+        #expect(IRCChannelModerationPolicy.mask("Guest!*@*", matches: unidentified, caseMapping: .rfc1459))
+    }
+
     @Test("Parses single and multi-prefix NAMES entries without corrupting nicknames")
     func parsesNamesMembers() {
         let plain = IRCMemberParser.member(from: "Alice")

@@ -1356,6 +1356,67 @@ enum IRCChannelModerationPolicy {
         }
         return banMask(for: member.nickname)
     }
+
+    static func mask(
+        _ mask: String,
+        matches member: ChannelMember,
+        caseMapping: IRCCaseMapping
+    ) -> Bool {
+        let identity = "\(member.nickname)!\(member.username ?? "")@\(member.hostname ?? "")"
+        let pattern = Array(caseMapping.normalize(mask))
+        let candidate = Array(caseMapping.normalize(identity))
+        var patternIndex = 0
+        var candidateIndex = 0
+        var wildcardIndex: Int?
+        var wildcardCandidateIndex = 0
+
+        while candidateIndex < candidate.count {
+            if patternIndex < pattern.count,
+               pattern[patternIndex] == "?" || pattern[patternIndex] == candidate[candidateIndex] {
+                patternIndex += 1
+                candidateIndex += 1
+            } else if patternIndex < pattern.count, pattern[patternIndex] == "*" {
+                wildcardIndex = patternIndex
+                patternIndex += 1
+                wildcardCandidateIndex = candidateIndex
+            } else if let wildcardIndex {
+                patternIndex = wildcardIndex + 1
+                wildcardCandidateIndex += 1
+                candidateIndex = wildcardCandidateIndex
+            } else {
+                return false
+            }
+        }
+
+        while patternIndex < pattern.count, pattern[patternIndex] == "*" {
+            patternIndex += 1
+        }
+        return patternIndex == pattern.count
+    }
+}
+
+struct IRCBanCommand: Equatable {
+    var mask: String
+    var channel: String
+    var reason: String?
+
+    static func parse(
+        _ argument: String,
+        defaultChannel: String?,
+        channelTypes: Set<Character>
+    ) -> IRCBanCommand? {
+        let fields = argument.split(maxSplits: 2, whereSeparator: \.isWhitespace).map(String.init)
+        guard let mask = fields.first, !mask.isEmpty else { return nil }
+
+        let hasExplicitChannel = fields.count > 1
+            && fields[1].first.map(channelTypes.contains) == true
+        let channel = hasExplicitChannel ? fields[1] : defaultChannel
+        guard let channel, !channel.isEmpty else { return nil }
+
+        let reasonFields = fields.dropFirst(hasExplicitChannel ? 2 : 1)
+        let reason = reasonFields.isEmpty ? nil : reasonFields.joined(separator: " ")
+        return IRCBanCommand(mask: mask, channel: channel, reason: reason)
+    }
 }
 
 struct IRCBanEntry: Identifiable, Hashable {
