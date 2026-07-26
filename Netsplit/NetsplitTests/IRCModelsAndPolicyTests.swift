@@ -786,7 +786,8 @@ struct IRCModelsAndPolicyTests {
             showsImagePreviews: true
         ) == [
             .image(URL(string: "https://example.com/photo.JPG?large=1")!),
-            .link(URL(string: "https://swift.org")!)
+            .link(URL(string: "https://swift.org")!),
+            .link(URL(string: "https://example.net")!)
         ])
         #expect(IRCMessagePreviewPolicy.previews(
             for: message,

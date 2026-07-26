@@ -21,7 +21,7 @@ enum IRCMessagePreview: Hashable, Identifiable {
 }
 
 enum IRCMessagePreviewPolicy {
-    static let maximumPreviewsPerMessage = 2
+    static let maximumPreviewsPerMessage = 3
     private static let imageExtensions = Set([
         "avif", "gif", "heic", "heif", "jpeg", "jpg", "png", "tif", "tiff", "webp"
     ])

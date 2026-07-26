@@ -1119,7 +1119,7 @@ struct SettingsView: View {
             Section("Automatic Previews") {
                 Toggle("Preview web links", isOn: $state.automaticallyPreviewsLinks)
                 Toggle("Preview direct image links", isOn: $state.automaticallyPreviewsImages)
-                Text("Off by default. Previewing contacts sites shared by other people and can reveal your IP address. Netsplit previews HTTPS links only, sends no cookies or saved credentials, rejects local and private network destinations, and shows at most two bounded previews per message.")
+                Text("Off by default. Previewing contacts sites shared by other people and can reveal your IP address. Netsplit previews HTTPS links only, sends no cookies or saved credentials, rejects local and private network destinations, and shows at most three bounded previews per message.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
