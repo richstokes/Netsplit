@@ -151,10 +151,21 @@ struct IRCLinkPreviewMetadata: Equatable {
 
 enum IRCLinkPreviewMetadataParser {
     private static let maximumHTMLBytes = 1_024 * 1_024
+    private static let maximumOEmbedBytes = 64 * 1_024
     private static let maximumTitleCharacters = 200
     private static let maximumSummaryCharacters = 280
 
     static func fetch(url: URL) async throws -> IRCLinkPreviewMetadata {
+        if let oEmbedURL = redditOEmbedURL(for: url) {
+            let response = try await IRCPreviewHTTPClient.shared.load(
+                url: oEmbedURL,
+                maximumBytes: maximumOEmbedBytes,
+                acceptHeader: "application/json",
+                acceptsMIMEType: { $0 == "application/json" }
+            )
+            return try parseRedditOEmbed(data: response.data, originalURL: url)
+        }
+
         let response = try await IRCPreviewHTTPClient.shared.load(
             url: url,
             maximumBytes: maximumHTMLBytes,
@@ -196,6 +207,77 @@ enum IRCLinkPreviewMetadataParser {
             title: rawTitle.flatMap { sanitizedText($0, maximumCharacters: maximumTitleCharacters) },
             summary: rawSummary.flatMap { sanitizedText($0, maximumCharacters: maximumSummaryCharacters) },
             resolvedURL: responseURL
+        )
+    }
+
+    static func redditOEmbedURL(for url: URL) -> URL? {
+        guard let normalizedURL = IRCRemotePreviewPolicy.normalizedNetworkURL(url),
+              let host = normalizedURL.host(percentEncoded: false)?.lowercased(),
+              ["reddit.com", "www.reddit.com", "old.reddit.com", "np.reddit.com"].contains(host)
+        else { return nil }
+
+        let pathComponents = normalizedURL.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard let commentsIndex = pathComponents.firstIndex(of: "comments"),
+              pathComponents.indices.contains(commentsIndex + 1)
+        else { return nil }
+
+        let postID = pathComponents[commentsIndex + 1]
+        guard (5...16).contains(postID.utf8.count),
+              postID.utf8.allSatisfy({ byte in
+                  (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+              })
+        else { return nil }
+
+        var permalinkComponents = URLComponents(
+            url: normalizedURL,
+            resolvingAgainstBaseURL: false
+        )
+        permalinkComponents?.query = nil
+        guard let permalink = permalinkComponents?.url else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.reddit.com"
+        components.path = "/oembed"
+        components.queryItems = [URLQueryItem(name: "url", value: permalink.absoluteString)]
+        guard let oEmbedURL = components.url,
+              IRCRemotePreviewPolicy.isPermitted(oEmbedURL)
+        else { return nil }
+        return oEmbedURL
+    }
+
+    static func parseRedditOEmbed(data: Data, originalURL: URL) throws -> IRCLinkPreviewMetadata {
+        struct Response: Decodable {
+            let title: String?
+            let authorName: String?
+
+            enum CodingKeys: String, CodingKey {
+                case title
+                case authorName = "author_name"
+            }
+        }
+
+        let response: Response
+        do {
+            response = try JSONDecoder().decode(Response.self, from: data)
+        } catch {
+            throw IRCPreviewError.invalidResponse
+        }
+
+        guard let title = response.title.flatMap({
+            sanitizedText($0, maximumCharacters: maximumTitleCharacters)
+        }) else {
+            throw IRCPreviewError.invalidResponse
+        }
+
+        let summary = response.authorName
+            .flatMap { sanitizedText($0, maximumCharacters: maximumSummaryCharacters) }
+            .map { $0.hasPrefix("u/") ? "Posted by \($0)" : "Posted by u/\($0)" }
+
+        return IRCLinkPreviewMetadata(
+            title: title,
+            summary: summary,
+            resolvedURL: originalURL
         )
     }
 

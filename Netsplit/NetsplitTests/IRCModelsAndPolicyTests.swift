@@ -1006,6 +1006,57 @@ struct IRCModelsAndPolicyTests {
         #expect(combiningMetadata.title?.unicodeScalars.count == 200)
     }
 
+    @Test("Reddit post previews use the public oEmbed endpoint")
+    func createsRedditOEmbedURLs() throws {
+        let permalink = try #require(URL(
+            string: "https://www.reddit.com/r/AbsoluteUnits/comments/1mewyt5/of_a_mustache/?utm_source=share#comments"
+        ))
+        let oEmbedURL = try #require(IRCLinkPreviewMetadataParser.redditOEmbedURL(for: permalink))
+        let components = try #require(URLComponents(
+            url: oEmbedURL,
+            resolvingAgainstBaseURL: false
+        ))
+
+        #expect(components.scheme == "https")
+        #expect(components.host == "www.reddit.com")
+        #expect(components.path == "/oembed")
+        #expect(components.queryItems == [
+            URLQueryItem(
+                name: "url",
+                value: "https://www.reddit.com/r/AbsoluteUnits/comments/1mewyt5/of_a_mustache/"
+            )
+        ])
+        #expect(IRCLinkPreviewMetadataParser.redditOEmbedURL(
+            for: URL(string: "https://www.reddit.com/r/AbsoluteUnits/")!
+        ) == nil)
+        #expect(IRCLinkPreviewMetadataParser.redditOEmbedURL(
+            for: URL(string: "https://reddit.example/r/AbsoluteUnits/comments/1mewyt5/title/")!
+        ) == nil)
+    }
+
+    @Test("Reddit oEmbed metadata is rendered as inert preview text")
+    func parsesRedditOEmbedMetadata() throws {
+        let originalURL = URL(
+            string: "https://www.reddit.com/r/AbsoluteUnits/comments/1mewyt5/of_a_mustache/"
+        )!
+        let response = """
+        {
+          "author_name": "amrindersr16",
+          "provider_name": "reddit",
+          "title": "of a mustache",
+          "type": "rich"
+        }
+        """
+        let metadata = try IRCLinkPreviewMetadataParser.parseRedditOEmbed(
+            data: Data(response.utf8),
+            originalURL: originalURL
+        )
+
+        #expect(metadata.title == "of a mustache")
+        #expect(metadata.summary == "Posted by u/amrindersr16")
+        #expect(metadata.resolvedURL == originalURL)
+    }
+
     @Test("Image previews accept bounded raster data and reject malformed data")
     func validatesImagePreviewData() throws {
         let bitmap = try #require(NSBitmapImageRep(
