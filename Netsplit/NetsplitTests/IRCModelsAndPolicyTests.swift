@@ -1818,6 +1818,38 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCHistoryNavigationShortcut.direction(mouseButtonNumber: 2) == nil)
     }
 
+    @Test("Composer nickname completion targets the final word of a chat message")
+    func completesNicknameInChatMessages() throws {
+        let singleWordInput = "ali"
+        let singleWord = try #require(IRCComposerCompletion.recipientContext(in: singleWordInput))
+        #expect(singleWord.command == nil)
+        #expect(singleWord.prefix == "ali")
+        #expect(String(singleWordInput[singleWord.range]) == "ali")
+
+        let sentenceInput = "hello there bo"
+        let sentence = try #require(IRCComposerCompletion.recipientContext(in: sentenceInput))
+        #expect(sentence.command == nil)
+        #expect(sentence.prefix == "bo")
+        #expect(String(sentenceInput[sentence.range]) == "bo")
+
+        let afterSpace = try #require(IRCComposerCompletion.recipientContext(in: "hello "))
+        #expect(afterSpace.prefix.isEmpty)
+        #expect(afterSpace.range.isEmpty)
+
+        #expect(IRCComposerCompletion.recipientContext(in: "") == nil)
+    }
+
+    @Test("Composer nickname completion preserves command recipient contexts")
+    func completesNicknameInCommandRecipients() throws {
+        let messageInput = "/msg ali"
+        let message = try #require(IRCComposerCompletion.recipientContext(in: messageInput))
+        #expect(message.command == "MSG")
+        #expect(message.prefix == "ali")
+        #expect(String(messageInput[message.range]) == "ali")
+
+        #expect(IRCComposerCompletion.recipientContext(in: "/join #swift") == nil)
+    }
+
     @Test("Selection history skips conversations after they close")
     @MainActor
     func skipsClosedHistoryItems() {

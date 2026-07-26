@@ -962,7 +962,8 @@ private struct ConversationView: View {
     ]
 
     private func completeRecipient() -> Bool {
-        guard isChannel, let context = recipientCompletionContext(in: draft) else { return false }
+        guard isChannel,
+              let context = IRCComposerCompletion.recipientContext(in: draft) else { return false }
 
         if var completion = tabCompletion,
            completion.command == context.command,
@@ -991,8 +992,22 @@ private struct ConversationView: View {
         return true
     }
 
-    private func recipientCompletionContext(in input: String) -> RecipientCompletionContext? {
-        guard input.first == "/" else { return nil }
+}
+
+enum IRCComposerCompletion {
+    static func recipientContext(in input: String) -> RecipientCompletionContext? {
+        guard input.first == "/" else {
+            guard !input.isEmpty else { return nil }
+            let tokenStart = input.lastIndex(where: \.isWhitespace)
+                .map { input.index(after: $0) }
+                ?? input.startIndex
+            return RecipientCompletionContext(
+                command: nil,
+                prefix: String(input[tokenStart...]),
+                range: tokenStart..<input.endIndex
+            )
+        }
+
         let commandStart = input.index(after: input.startIndex)
         guard commandStart < input.endIndex else { return nil }
         let commandEnd = input[commandStart...].firstIndex(where: { $0.isWhitespace }) ?? input.endIndex
@@ -1022,7 +1037,7 @@ private struct ConversationView: View {
         return RecipientCompletionContext(command: command, prefix: "", range: input.endIndex..<input.endIndex)
     }
 
-    private func recipientArgumentIndex(for command: String) -> Int? {
+    private static func recipientArgumentIndex(for command: String) -> Int? {
         switch command {
         case "SLAP", "PING", "MSG", "QUERY", "NOTICE", "WHOIS", "CTCP", "VERSION", "IGNORE", "UNIGNORE", "INVITE", "KILL", "WHO", "MODE":
             return 0
@@ -1862,14 +1877,14 @@ private struct TranscriptLiveScrollObserver: NSViewRepresentable {
     }
 }
 
-private struct RecipientCompletionContext {
-    let command: String
+struct RecipientCompletionContext {
+    let command: String?
     let prefix: String
     let range: Range<String.Index>
 }
 
 private struct RecipientTabCompletion {
-    let command: String
+    let command: String?
     let candidates: [String]
     var index: Int
     var completedDraft: String
