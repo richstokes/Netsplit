@@ -945,6 +945,47 @@ final class IRCMessageTextCache {
     }
 }
 
+final class IRCMessageWebURLCache {
+    private struct Signature: Equatable {
+        let sender: String
+        let text: String
+        let isSystem: Bool
+
+        init(message: IRCMessage) {
+            sender = message.sender
+            text = message.text
+            isSystem = message.isSystem
+        }
+    }
+
+    private final class Entry {
+        let signature: Signature
+        let value: [URL]
+
+        init(signature: Signature, value: [URL]) {
+            self.signature = signature
+            self.value = value
+        }
+    }
+
+    private let cache = NSCache<NSUUID, Entry>()
+
+    init(countLimit: Int) {
+        cache.countLimit = countLimit
+    }
+
+    func webURLs(for message: IRCMessage) -> [URL] {
+        let key = message.id as NSUUID
+        let signature = Signature(message: message)
+        if let cached = cache.object(forKey: key), cached.signature == signature {
+            return cached.value
+        }
+        let value = IRCMessageTextRenderer.webURLs(for: message)
+        cache.setObject(Entry(signature: signature, value: value), forKey: key)
+        return value
+    }
+}
+
 enum IRCTranscriptUpdatePolicy {
     /// Keep ordinary messages immediate, while bounding transcript layout work
     /// and array snapshot churn during sustained bursts. A full retained

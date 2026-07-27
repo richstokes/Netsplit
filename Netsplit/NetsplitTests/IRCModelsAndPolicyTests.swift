@@ -1477,6 +1477,18 @@ struct IRCModelsAndPolicyTests {
         #expect(try link(for: "#two", occurrence: 0, in: updated).flatMap(IRCInternalLink.channelName(from:)) == "#two")
     }
 
+    @Test("Message web URL cache invalidates when mutable detection content changes")
+    func invalidatesCachedMessageWebURLs() {
+        let cache = IRCMessageWebURLCache(countLimit: 10)
+        var message = IRCMessage(sender: "Alice", text: "https://before.example")
+
+        #expect(cache.webURLs(for: message) == [URL(string: "https://before.example")!])
+
+        message.text = "https://after.example"
+
+        #expect(cache.webURLs(for: message) == [URL(string: "https://after.example")!])
+    }
+
     @Test("Transcript scrolling animates at most once per throttle interval")
     func throttlesTranscriptAnimations() {
         let previous = Date(timeIntervalSince1970: 1_000)

@@ -22,6 +22,7 @@ enum IRCMessagePreview: Hashable, Identifiable {
 
 enum IRCMessagePreviewPolicy {
     static let maximumPreviewsPerMessage = 3
+    private static let webURLCache = IRCMessageWebURLCache(countLimit: 5_500)
     private static let imageExtensions = Set([
         "avif", "gif", "heic", "heif", "jpeg", "jpg", "png", "tif", "tiff", "webp"
     ])
@@ -44,7 +45,7 @@ enum IRCMessagePreviewPolicy {
         }
 
         var seenResources = Set<URL>()
-        return IRCMessageTextRenderer.webURLs(for: message)
+        return webURLCache.webURLs(for: message)
             .compactMap { url -> IRCMessagePreview? in
                 guard let networkURL = IRCRemotePreviewPolicy.normalizedNetworkURL(url),
                       seenResources.insert(networkURL).inserted else { return nil }
