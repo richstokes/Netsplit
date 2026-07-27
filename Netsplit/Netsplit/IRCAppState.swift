@@ -1125,13 +1125,15 @@ final class IRCAppState: ObservableObject {
     func markRead(_ item: SidebarItem) {
         switch item {
         case .channel(let id):
-            guard let index = channels.firstIndex(where: { $0.id == id }) else { return }
+            guard let index = channels.firstIndex(where: { $0.id == id }),
+                  channels[index].hasUnread || channels[index].hasMention else { return }
             channels[index].hasUnread = false
             channels[index].hasMention = false
         case .directMessage(let id):
             guard let index = directMessages.firstIndex(where: { $0.id == id }), directMessages[index].hasUnread else { return }
             directMessages[index].hasUnread = false
         case .server(let id):
+            guard unreadInviteCountsByServer[id] != nil else { return }
             unreadInviteCountsByServer.removeValue(forKey: id)
         case .connectionCenter:
             break

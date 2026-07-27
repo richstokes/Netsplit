@@ -854,7 +854,9 @@ private struct ConversationView: View {
 #endif
             state.markRead(selection)
             draft = state.boundedComposerDraft(state.draft(for: selection), for: selection)
-            state.requestComposerFocus()
+            if state.workspaceFocusRequest?.target != .composer(selection) {
+                state.requestComposerFocus()
+            }
         }
         .onChange(of: selection) { _, newSelection in
             state.markRead(newSelection)
