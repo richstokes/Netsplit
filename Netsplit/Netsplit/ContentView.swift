@@ -141,6 +141,11 @@ struct ContentView: View {
         }) {
             JumpPalette(state: state)
         }
+#if DEBUG
+        .onChange(of: state.selection) { _, selection in
+            TranscriptDebugLog.navigation("root-selection-changed", selection: selection)
+        }
+#endif
         .onChange(of: state.workspaceFocusRequest) { _, request in
             guard let request else { return }
             DispatchQueue.main.async {
@@ -288,9 +293,15 @@ private struct SidebarView: View {
         .accessibilityHint("Use the arrow keys to choose a server or conversation")
         .onAppear { listSelection = state.selection }
         .onChange(of: listSelection) { _, newSelection in
+#if DEBUG
+            TranscriptDebugLog.navigation("sidebar-binding-changed", selection: newSelection)
+#endif
             DispatchQueue.main.async {
                 guard listSelection == newSelection,
                       state.selection != newSelection else { return }
+#if DEBUG
+                TranscriptDebugLog.navigation("sidebar-selection-applying", selection: newSelection)
+#endif
                 state.selectFromSidebar(newSelection)
             }
         }
@@ -838,6 +849,9 @@ private struct ConversationView: View {
             }
         }
         .onAppear {
+#if DEBUG
+            TranscriptDebugLog.navigation("conversation-appeared", selection: selection)
+#endif
             state.markRead(selection)
             draft = state.boundedComposerDraft(state.draft(for: selection), for: selection)
             state.requestComposerFocus()
@@ -1657,14 +1671,22 @@ private enum TranscriptDebugLog {
         category: "Transcript"
     )
 
+    static func navigation(_ event: String, selection: SidebarItem?) {
+        let uptime = ProcessInfo.processInfo.systemUptime
+        logger.debug(
+            "navigation event=\(event, privacy: .public) uptime=\(uptime, privacy: .public) selection=\(String(describing: selection), privacy: .public)"
+        )
+    }
+
     static func state(
         _ event: String,
         context: TranscriptDebugContext,
         hasPositionedInitialMessages: Bool,
         isFollowingTail: Bool
     ) {
+        let uptime = ProcessInfo.processInfo.systemUptime
         logger.debug(
-            "state event=\(event, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) lazy=\(context.lazyMessageCount, privacy: .public) eager=\(context.eagerMessageCount, privacy: .public) last=\(context.lastMessageDescription, privacy: .public) positioned=\(hasPositionedInitialMessages, privacy: .public) followingTail=\(isFollowingTail, privacy: .public)"
+            "state event=\(event, privacy: .public) uptime=\(uptime, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) lazy=\(context.lazyMessageCount, privacy: .public) eager=\(context.eagerMessageCount, privacy: .public) last=\(context.lastMessageDescription, privacy: .public) positioned=\(hasPositionedInitialMessages, privacy: .public) followingTail=\(isFollowingTail, privacy: .public)"
         )
     }
 
@@ -1679,8 +1701,9 @@ private enum TranscriptDebugLog {
         let distanceFromBottom = geometry.contentIsFlipped
             ? geometry.contentBounds.maxY - geometry.visibleBounds.maxY
             : geometry.visibleBounds.minY - geometry.contentBounds.minY
+        let uptime = ProcessInfo.processInfo.systemUptime
         logger.debug(
-            "geometry event=\(event, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) lazy=\(context.lazyMessageCount, privacy: .public) eager=\(context.eagerMessageCount, privacy: .public) visible=\(visibleDescription, privacy: .public) content=\(contentDescription, privacy: .public) frame=\(frameDescription, privacy: .public) flipped=\(geometry.contentIsFlipped, privacy: .public) bottomDistance=\(distanceFromBottom, privacy: .public)"
+            "geometry event=\(event, privacy: .public) uptime=\(uptime, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) lazy=\(context.lazyMessageCount, privacy: .public) eager=\(context.eagerMessageCount, privacy: .public) visible=\(visibleDescription, privacy: .public) content=\(contentDescription, privacy: .public) frame=\(frameDescription, privacy: .public) flipped=\(geometry.contentIsFlipped, privacy: .public) bottomDistance=\(distanceFromBottom, privacy: .public)"
         )
     }
 }
