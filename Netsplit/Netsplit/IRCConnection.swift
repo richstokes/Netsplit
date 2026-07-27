@@ -756,6 +756,9 @@ final class IRCConnection {
                     self.stopHeartbeat()
                     if self.handleQuitEvent(.peerClosed) { return }
                     if let error {
+                        Self.logger.error(
+                            "SSH tunnel underlying failure endpoint=\(self.diagnosticEndpoint, privacy: .public) error=\(String(reflecting: error), privacy: .public)"
+                        )
                         let preventsReconnect = (error as? SSHTunnelError)?.preventsAutomaticReconnect == true
                         self.reportFailure(
                             "SSH tunnel failed: \(error.localizedDescription)",

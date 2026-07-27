@@ -198,7 +198,7 @@ final class IRCAppState: ObservableObject {
     private let channelBanListRequestTimeout: TimeInterval = 15
     private let maskBanWhoRequestTimeout: TimeInterval = 10
     private let favoriteJoinInterval: TimeInterval = 0.45
-    private let autoConnectStagger: TimeInterval = 0.5
+    private let autoConnectStagger: TimeInterval = 2
     private let onConnectCommandInterval: TimeInterval = 0.5
     private let favoriteJoinDelayAfterCommands: TimeInterval = 2
     private let automaticJoinCompletionTimeout: TimeInterval = 20
@@ -745,7 +745,16 @@ final class IRCAppState: ObservableObject {
             stagger: autoConnectStagger
         )
         for (profile, delay) in zip(launchProfiles, delays) {
+            let sshHost = profile.useSSHTunnel == true
+                ? profile.sshHostname ?? "unconfigured"
+                : "direct"
+            Self.connectionLogger.info(
+                "Launch auto-connect scheduled server=\(profile.name, privacy: .public) sshHost=\(sshHost, privacy: .public) delay=\(delay, privacy: .public)"
+            )
             guard delay > 0 else {
+                Self.connectionLogger.info(
+                    "Launch auto-connect starting server=\(profile.name, privacy: .public) sshHost=\(sshHost, privacy: .public)"
+                )
                 connect(profile, selectConversation: false)
                 continue
             }
@@ -756,6 +765,9 @@ final class IRCAppState: ObservableObject {
                       self.pendingLaunchConnectionIDs.remove(profile.id) != nil,
                       self.connections[profile.id] == nil,
                       let currentProfile = self.profiles.first(where: { $0.id == profile.id }) else { return }
+                Self.connectionLogger.info(
+                    "Launch auto-connect starting server=\(currentProfile.name, privacy: .public) sshHost=\(sshHost, privacy: .public)"
+                )
                 self.connect(currentProfile, selectConversation: false)
             }
         }
