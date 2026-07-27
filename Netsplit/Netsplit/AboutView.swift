@@ -8,6 +8,7 @@ import SwiftUI
 
 struct AboutView: View {
   private let website = URL(string: "https://github.com/richstokes/Netsplit")!
+  private let supportWebsite = URL(string: "https://buymeacoffee.com/richstokes")!
 
   private var version: String {
     Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.5"
@@ -78,6 +79,18 @@ struct AboutView: View {
       .padding(.horizontal, 14)
       .padding(.vertical, 12)
       .background(.quaternary, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+      Divider()
+        .padding(.vertical, 20)
+
+      HStack(spacing: 5) {
+        Text("Enjoying Netsplit? Feel free to show your support!")
+          .foregroundStyle(.secondary)
+
+        Link("Buy me a coffee", destination: supportWebsite)
+      }
+      .font(.callout)
+      .frame(maxWidth: .infinity, alignment: .center)
     }
     .padding(28)
     .frame(width: 540)
