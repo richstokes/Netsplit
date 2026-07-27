@@ -319,6 +319,26 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     ]
 }
 
+enum IRCAutoConnectPolicy {
+    static func launchDelays(
+        for profiles: [ServerProfile],
+        stagger: TimeInterval
+    ) -> [TimeInterval] {
+        var connectionCountsBySSHHost: [String: Int] = [:]
+
+        return profiles.map { profile in
+            guard profile.useSSHTunnel == true,
+                  let sshHostname = profile.sshHostname?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sshHostname.isEmpty else { return 0 }
+
+            let hostKey = sshHostname.lowercased()
+            let connectionIndex = connectionCountsBySSHHost[hostKey, default: 0]
+            connectionCountsBySSHHost[hostKey] = connectionIndex + 1
+            return Double(connectionIndex) * stagger
+        }
+    }
+}
+
 enum ServerProfileStore {
     static let profilesKey = "profiles"
     static let decodeFailureBackupKey = "profiles.decodeFailureBackup"

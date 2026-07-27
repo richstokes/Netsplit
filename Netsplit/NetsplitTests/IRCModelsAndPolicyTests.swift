@@ -162,6 +162,70 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCChannelBrowserJoinBehavior(modifierFlags: [.option]) == .joinAndClose)
     }
 
+    @Test("Launch auto-connect staggers only profiles sharing an SSH host")
+    func staggersLaunchConnectionsBySSHHost() {
+        let profiles = [
+            ServerProfile(
+                name: "Direct",
+                hostname: "irc.direct.example",
+                port: 6697,
+                useTLS: true
+            ),
+            ServerProfile(
+                name: "First shared tunnel",
+                hostname: "irc.one.example",
+                port: 6697,
+                useTLS: true,
+                useSSHTunnel: true,
+                sshHostname: " bastion.example.com "
+            ),
+            ServerProfile(
+                name: "Different tunnel",
+                hostname: "irc.two.example",
+                port: 6697,
+                useTLS: true,
+                useSSHTunnel: true,
+                sshHostname: "other.example.com"
+            ),
+            ServerProfile(
+                name: "Second shared tunnel",
+                hostname: "irc.three.example",
+                port: 6697,
+                useTLS: true,
+                useSSHTunnel: true,
+                sshHostname: "BASTION.EXAMPLE.COM"
+            ),
+            ServerProfile(
+                name: "Third shared tunnel",
+                hostname: "irc.four.example",
+                port: 6697,
+                useTLS: true,
+                useSSHTunnel: true,
+                sshHostname: "bastion.example.com"
+            ),
+            ServerProfile(
+                name: "Disabled tunnel",
+                hostname: "irc.disabled.example",
+                port: 6697,
+                useTLS: true,
+                useSSHTunnel: false,
+                sshHostname: "bastion.example.com"
+            ),
+            ServerProfile(
+                name: "Blank tunnel host",
+                hostname: "irc.blank.example",
+                port: 6697,
+                useTLS: true,
+                useSSHTunnel: true,
+                sshHostname: "  "
+            )
+        ]
+
+        #expect(IRCAutoConnectPolicy.launchDelays(for: profiles, stagger: 0.5) == [
+            0, 0, 0, 0.5, 1, 0, 0
+        ])
+    }
+
     @Test("System wake restores only active or already-reconnecting sessions")
     func selectsConnectionsToRestoreAfterSleep() {
         #expect(IRCSystemSleepPolicy.shouldRestoreConnection(status: .online, reconnectWasScheduled: false))

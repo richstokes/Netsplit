@@ -184,6 +184,7 @@ final class IRCAppState: ObservableObject {
     private var channelListRequestIDs: [UUID: UUID] = [:]
     private var reconnectAttempts: [UUID: Int] = [:]
     private var scheduledReconnects: [UUID: ScheduledReconnect] = [:]
+    private var pendingLaunchConnectionIDs = Set<UUID>()
     private var registrationNicknameSuffixes: [UUID: Set<Int>] = [:]
     private var serverFeatures: [UUID: IRCServerFeatures] = [:]
     private var pendingChannelBanLists: [UUID: [IRCBanEntry]] = [:]
@@ -197,6 +198,7 @@ final class IRCAppState: ObservableObject {
     private let channelBanListRequestTimeout: TimeInterval = 15
     private let maskBanWhoRequestTimeout: TimeInterval = 10
     private let favoriteJoinInterval: TimeInterval = 0.45
+    private let autoConnectStagger: TimeInterval = 0.5
     private let onConnectCommandInterval: TimeInterval = 0.5
     private let favoriteJoinDelayAfterCommands: TimeInterval = 2
     private let automaticJoinCompletionTimeout: TimeInterval = 20
@@ -737,8 +739,25 @@ final class IRCAppState: ObservableObject {
         hasStartedLaunchConnections = true
 
         let originalSelection = selection
-        for profile in profiles where profile.autoConnect {
-            connect(profile, selectConversation: false)
+        let launchProfiles = profiles.filter(\.autoConnect)
+        let delays = IRCAutoConnectPolicy.launchDelays(
+            for: launchProfiles,
+            stagger: autoConnectStagger
+        )
+        for (profile, delay) in zip(launchProfiles, delays) {
+            guard delay > 0 else {
+                connect(profile, selectConversation: false)
+                continue
+            }
+
+            pendingLaunchConnectionIDs.insert(profile.id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self,
+                      self.pendingLaunchConnectionIDs.remove(profile.id) != nil,
+                      self.connections[profile.id] == nil,
+                      let currentProfile = self.profiles.first(where: { $0.id == profile.id }) else { return }
+                self.connect(currentProfile, selectConversation: false)
+            }
         }
         selection = originalSelection
     }
@@ -837,6 +856,7 @@ final class IRCAppState: ObservableObject {
     }
 
     func connect(_ profile: ServerProfile, selectConversation: Bool = true, isAutomaticRetry: Bool = false) {
+        pendingLaunchConnectionIDs.remove(profile.id)
         guard connections[profile.id] == nil else { return }
         if !isAutomaticRetry { cancelScheduledReconnect(for: profile.id, resetAttempts: true) }
         serverFeatures[profile.id] = .defaults
@@ -892,6 +912,7 @@ final class IRCAppState: ObservableObject {
     }
 
     func disconnect(_ profile: ServerProfile, reason: String? = nil) {
+        pendingLaunchConnectionIDs.remove(profile.id)
         systemSleepState.remove(profile.id)
         pendingWakeRestoreServerIDs.remove(profile.id)
         cancelScheduledReconnect(for: profile.id, resetAttempts: true)
@@ -925,6 +946,7 @@ final class IRCAppState: ObservableObject {
     /// guaranteed quickly so quitting the app is never held up by a network
     /// problem, while active connections still get a real IRC QUIT command.
     func quitAllConnections(completion: @escaping () -> Void) {
+        pendingLaunchConnectionIDs.removeAll()
         let activeConnections = Array(connections.values)
         let inFlightQuitIDs = Array(disconnectingConnections.keys)
         guard !activeConnections.isEmpty || !inFlightQuitIDs.isEmpty else {
