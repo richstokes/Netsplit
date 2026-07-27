@@ -1419,6 +1419,23 @@ struct IRCBanCommand: Equatable {
     }
 }
 
+enum IRCBanConfirmationPolicy {
+    static func pendingMaskIndex(
+        in pendingMasks: [String],
+        confirmedMask: String,
+        caseMapping: IRCCaseMapping
+    ) -> Int? {
+        if let exactIndex = pendingMasks.firstIndex(where: {
+            caseMapping.normalize($0) == caseMapping.normalize(confirmedMask)
+        }) {
+            return exactIndex
+        }
+        // IRCds commonly echo masks verbatim, but some expand partial masks.
+        // A sole in-flight request is still unambiguous after serialization.
+        return pendingMasks.count == 1 ? 0 : nil
+    }
+}
+
 struct IRCBanEntry: Identifiable, Hashable {
     var channel: String
     var mask: String

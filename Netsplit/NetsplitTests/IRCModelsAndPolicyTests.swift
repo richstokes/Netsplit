@@ -540,6 +540,25 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCChannelModerationPolicy.mask("Guest!*@*", matches: unidentified, caseMapping: .rfc1459))
     }
 
+    @Test("Ban confirmations tolerate a normalized echo only when one request is in flight")
+    func correlatesConfirmedBanMasks() {
+        #expect(IRCBanConfirmationPolicy.pendingMaskIndex(
+            in: ["*!*@*.example.com", "*!*@elsewhere.example"],
+            confirmedMask: "*!*@*.EXAMPLE.COM",
+            caseMapping: .rfc1459
+        ) == 0)
+        #expect(IRCBanConfirmationPolicy.pendingMaskIndex(
+            in: ["*@*.att.com"],
+            confirmedMask: "*!*@*.att.com",
+            caseMapping: .rfc1459
+        ) == 0)
+        #expect(IRCBanConfirmationPolicy.pendingMaskIndex(
+            in: ["*@*.att.com", "*@*.example.net"],
+            confirmedMask: "*!*@*.att.com",
+            caseMapping: .rfc1459
+        ) == nil)
+    }
+
     @Test("Parses single and multi-prefix NAMES entries without corrupting nicknames")
     func parsesNamesMembers() {
         let plain = IRCMemberParser.member(from: "Alice")
