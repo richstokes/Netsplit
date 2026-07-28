@@ -167,6 +167,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
 
             let center = NotificationCenter.default
+            // MainActor.assumeIsolated below requires queue: .main; do not
+            // change these observers to synchronous posting-thread delivery.
             observers.append(center.addObserver(
                 forName: NSView.boundsDidChangeNotification,
                 object: scrollView.contentView,
@@ -320,6 +322,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
         }
 
+        // Keep updates to full reloadData(), insertRows, and
+        // noteHeightOfRows. Row-scoped reloadData(forRowIndexes:columnIndexes:)
+        // lays out hosted subviews incorrectly with automatic row heights.
         private func applyMessageUpdate(
             from oldMessages: [IRCMessage],
             to newMessages: [IRCMessage],
