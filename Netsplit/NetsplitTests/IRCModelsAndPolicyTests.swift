@@ -2150,6 +2150,259 @@ struct IRCModelsAndPolicyTests {
         ))
     }
 
+    @Test("Retention trimming preserves the visible native transcript message and offset")
+    @MainActor
+    func preservesNativeTranscriptPositionAcrossRetentionTrim() async throws {
+        var messages = (0..<5_250).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var didPositionInitially = false
+        var isFollowingTail = true
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { followingTail, _ in
+                        isFollowingTail = followingTail
+                    },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 700)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil {
+            didPositionInitially
+                && Self.view(
+                    withIdentifier: "IRCTranscriptTable",
+                    in: hostingController.view
+                ) != nil
+        }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+
+        let readingRow = 1_001
+        tableView.scrollRowToVisible(readingRow)
+        tableView.layoutSubtreeIfNeeded()
+        let clipView = scrollView.contentView
+        let readingBounds = NSRect(
+            x: clipView.bounds.minX,
+            y: tableView.rect(ofRow: readingRow).minY + 7,
+            width: clipView.bounds.width,
+            height: clipView.bounds.height
+        )
+        clipView.setBoundsOrigin(clipView.constrainBoundsRect(readingBounds).origin)
+        scrollView.reflectScrolledClipView(clipView)
+        try await Self.waitUntil {
+            let rows = tableView.rows(in: tableView.visibleRect)
+            return !isFollowingTail
+                && rows.location != NSNotFound
+                && NSLocationInRange(readingRow, rows)
+        }
+        #expect(!isFollowingTail)
+
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        #expect(NSLocationInRange(readingRow, visibleRows))
+        let anchorRow = try #require(
+            visibleRows.location == NSNotFound
+                ? nil
+                : max(visibleRows.location, 1)
+        )
+        let anchorMessage = try #require(messages.indices.contains(anchorRow - 1)
+            ? messages[anchorRow - 1]
+            : nil)
+        let originalOffset = tableView.rect(ofRow: anchorRow).minY
+            - clipView.bounds.minY
+
+        let newestMessage = IRCMessage(sender: "tester", text: "Message 5250")
+        messages = Array(messages.dropFirst(251))
+        messages.append(newestMessage)
+        hostingController.rootView = rootView()
+
+        try await Self.waitUntil {
+            tableView.numberOfRows == messages.count + 2
+                && messages.firstIndex(where: { $0.id == anchorMessage.id }) != nil
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        let restoredIndex = try #require(
+            messages.firstIndex(where: { $0.id == anchorMessage.id })
+        )
+        let restoredOffset = tableView.rect(ofRow: restoredIndex + 1).minY
+            - clipView.bounds.minY
+
+        #expect(tableView.numberOfRows == IRCConversationHistory.retentionLimit + 2)
+        #expect(abs(restoredOffset - originalOffset) <= 1)
+        #expect(!isFollowingTail)
+    }
+
+    @Test("Height remeasurement preserves the visible native transcript message and offset")
+    @MainActor
+    func preservesNativeTranscriptPositionAcrossHeightRemeasurement() async throws {
+        let messages = (0..<400).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var didPositionInitially = false
+        var isFollowingTail = true
+        var measuredRowHeight: CGFloat = 30
+        var renderConfiguration = "height-30"
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: renderConfiguration,
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: measuredRowHeight,
+                                    maxHeight: measuredRowHeight,
+                                    alignment: .leading
+                                )
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { followingTail, _ in
+                        isFollowingTail = followingTail
+                    },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 700)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil {
+            didPositionInitially
+                && Self.view(
+                    withIdentifier: "IRCTranscriptTable",
+                    in: hostingController.view
+                ) != nil
+        }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+
+        let readingRow = 201
+        tableView.scrollRowToVisible(readingRow)
+        tableView.layoutSubtreeIfNeeded()
+        let clipView = scrollView.contentView
+        let readingBounds = NSRect(
+            x: clipView.bounds.minX,
+            y: tableView.rect(ofRow: readingRow).minY + 7,
+            width: clipView.bounds.width,
+            height: clipView.bounds.height
+        )
+        clipView.setBoundsOrigin(clipView.constrainBoundsRect(readingBounds).origin)
+        scrollView.reflectScrolledClipView(clipView)
+        try await Self.waitUntil {
+            let rows = tableView.rows(in: tableView.visibleRect)
+            return !isFollowingTail
+                && rows.location != NSNotFound
+                && NSLocationInRange(readingRow, rows)
+        }
+        #expect(!isFollowingTail)
+
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        #expect(NSLocationInRange(readingRow, visibleRows))
+        let anchorRow = try #require(
+            visibleRows.location == NSNotFound
+                ? nil
+                : max(visibleRows.location, 1)
+        )
+        let anchorMessage = try #require(messages.indices.contains(anchorRow - 1)
+            ? messages[anchorRow - 1]
+            : nil)
+        let originalOffset = tableView.rect(ofRow: anchorRow).minY
+            - clipView.bounds.minY
+        let originalHeight = tableView.rect(ofRow: anchorRow).height
+
+        measuredRowHeight = 54
+        renderConfiguration = "height-54"
+        hostingController.rootView = rootView()
+        try await Self.waitUntil(timeout: .seconds(3)) {
+            abs(tableView.rect(ofRow: anchorRow).height - originalHeight) > 0.5
+        }
+        try await Task.sleep(for: .milliseconds(200))
+
+        let restoredIndex = try #require(
+            messages.firstIndex(where: { $0.id == anchorMessage.id })
+        )
+        let restoredOffset = tableView.rect(ofRow: restoredIndex + 1).minY
+            - clipView.bounds.minY
+        #expect(abs(tableView.rect(ofRow: restoredIndex + 1).height - originalHeight) > 0.5)
+        #expect(abs(restoredOffset - originalOffset) <= 1)
+        #expect(!isFollowingTail)
+    }
+
     @Test("Conversation drafts remain separate and clear when emptied")
     @MainActor
     func preservesConversationDrafts() {

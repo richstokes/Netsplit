@@ -109,6 +109,15 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        private struct ReadingAnchor {
+            struct Candidate {
+                let messageID: UUID
+                let viewportOffset: CGFloat
+            }
+
+            let candidates: [Candidate]
+        }
+
         private static let topInset: CGFloat = 18
         private static let bottomInset: CGFloat = 18
 
@@ -128,6 +137,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var lastAnimatedScroll = Date.distantPast
         private var isAwaitingTailPosition = false
         private var pendingTailStartOrigin: NSPoint?
+        private var isRestoringReadingPosition = false
+        private var activeReadingAnchor: ReadingAnchor?
+        private var readingPositionRestoreGeneration = 0
         private var tailPositionGeneration = 0
         private var attachmentGeneration = 0
         private var hasPendingPositionReport = false
@@ -191,6 +203,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pendingTailWorkItem = nil
             isAwaitingTailPosition = false
             pendingTailStartOrigin = nil
+            isRestoringReadingPosition = false
+            activeReadingAnchor = nil
+            readingPositionRestoreGeneration &+= 1
             tailPositionGeneration &+= 1
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
@@ -223,10 +238,16 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
 
             if configurationChanged {
+                let readingAnchor = beginReadingPositionRestoration()
                 messages = parent.messages
                 tableView.intercellSpacing.height = parent.rowSpacing
                 tableView.rowHeight = parent.estimatedRowHeight
                 tableView.reloadData()
+                adjustTopSpacerForShortContent()
+                scheduleReadingPositionRestoration(
+                    readingAnchor,
+                    event: "configuration-reloaded-anchor-restored"
+                )
                 scheduleHeightRefresh()
             } else if parent.messages != oldMessages {
                 applyMessageUpdate(from: oldMessages, to: parent.messages, in: tableView)
@@ -306,6 +327,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 && (oldMessages.isEmpty
                     || (newMessages.first?.id == oldMessages.first?.id
                         && newMessages[oldMessages.count - 1].id == oldMessages.last?.id))
+            let readingAnchor = isSimpleAppend ? nil : beginReadingPositionRestoration()
             if followingTail, hasPositionedInitially {
                 if !isAwaitingTailPosition || pendingTailWorkItem == nil {
                     pendingTailStartOrigin = tailOrigin()
@@ -324,8 +346,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
 
             adjustTopSpacerForShortContent()
+            scheduleReadingPositionRestoration(
+                readingAnchor,
+                event: "messages-reloaded-anchor-restored"
+            )
             restorePendingTailStartOrigin()
-            if followingTail, hasPositionedInitially {
+            if readingAnchor == nil, followingTail, hasPositionedInitially {
                 scheduleTailPosition()
             }
         }
@@ -405,7 +431,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         private func scrollPositionDidChange(event: String) {
             let geometry = geometry()
-            if isAwaitingTailPosition {
+            if isAwaitingTailPosition || isRestoringReadingPosition {
 #if DEBUG
                 scheduleDebugGeometryReport(event: event)
 #endif
@@ -429,6 +455,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
         private func userDidScroll() {
+            if isRestoringReadingPosition {
+                readingPositionRestoreGeneration &+= 1
+                activeReadingAnchor = nil
+                isRestoringReadingPosition = false
+                scrollPositionDidChange(event: "reading-position-restoration-cancelled")
+            }
             guard isAwaitingTailPosition else { return }
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
@@ -520,13 +552,18 @@ struct IRCTranscriptTable: NSViewRepresentable {
             guard let tableView else { return }
             DispatchQueue.main.async { [weak self, weak tableView] in
                 guard let self, let tableView else { return }
+                let readingAnchor = self.beginReadingPositionRestoration()
                 let messageRows = IndexSet(
                     integersIn: 1..<(self.messages.count + 1)
                 )
                 tableView.noteHeightOfRows(withIndexesChanged: messageRows)
                 tableView.layoutSubtreeIfNeeded()
                 self.adjustTopSpacerForShortContent()
-                if self.followingTail {
+                self.finishReadingPositionRestoration(
+                    readingAnchor,
+                    event: "height-refresh-anchor-restored"
+                )
+                if readingAnchor == nil, self.followingTail {
                     if self.isAwaitingTailPosition {
                         self.restorePendingTailStartOrigin()
                     } else {
@@ -562,13 +599,18 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 })
                 self.pendingHeightMessageIDs.removeAll()
                 guard !rows.isEmpty else { return }
+                let readingAnchor = self.beginReadingPositionRestoration()
                 tableView.noteHeightOfRows(withIndexesChanged: rows)
                 tableView.layoutSubtreeIfNeeded()
                 self.adjustTopSpacerForShortContent()
+                self.finishReadingPositionRestoration(
+                    readingAnchor,
+                    event: "row-height-anchor-restored"
+                )
                 // Appends already have one coalesced tail move pending. Only
                 // genuine later resizes, such as an async preview, reposition
                 // from the height path.
-                if self.followingTail {
+                if readingAnchor == nil, self.followingTail {
                     if self.isAwaitingTailPosition {
                         self.restorePendingTailStartOrigin()
                     } else {
@@ -579,6 +621,97 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 self.parent.onGeometryChange?("row-height-changed", self.geometry())
 #endif
             }
+        }
+
+        private func beginReadingPositionRestoration() -> ReadingAnchor? {
+            if let activeReadingAnchor {
+                return activeReadingAnchor
+            }
+            guard hasPositionedInitially,
+                  !followingTail,
+                  let tableView,
+                  let scrollView else { return nil }
+            let visibleRect = tableView.visibleRect
+            let visibleRows = tableView.rows(in: visibleRect)
+            guard visibleRows.location != NSNotFound else { return nil }
+
+            var candidates: [ReadingAnchor.Candidate] = []
+            for row in visibleRows.location..<NSMaxRange(visibleRows) {
+                guard let message = message(atTableRow: row) else { continue }
+                candidates.append(ReadingAnchor.Candidate(
+                    messageID: message.id,
+                    viewportOffset: tableView.rect(ofRow: row).minY
+                        - scrollView.contentView.bounds.minY
+                ))
+            }
+            guard !candidates.isEmpty else { return nil }
+            let anchor = ReadingAnchor(candidates: candidates)
+            activeReadingAnchor = anchor
+            isRestoringReadingPosition = true
+            return anchor
+        }
+
+        private func finishReadingPositionRestoration(
+            _ anchor: ReadingAnchor?,
+            event: String
+        ) {
+            guard let anchor else { return }
+            readingPositionRestoreGeneration &+= 1
+            restoreReadingPosition(anchor)
+            activeReadingAnchor = nil
+            isRestoringReadingPosition = false
+            scrollPositionDidChange(event: event)
+        }
+
+        private func scheduleReadingPositionRestoration(
+            _ anchor: ReadingAnchor?,
+            event: String
+        ) {
+            guard let anchor else { return }
+            readingPositionRestoreGeneration &+= 1
+            let restoreGeneration = readingPositionRestoreGeneration
+            let attachmentGeneration = self.attachmentGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.attachmentGeneration == attachmentGeneration,
+                      self.readingPositionRestoreGeneration == restoreGeneration else { return }
+                self.finishReadingPositionRestoration(anchor, event: event)
+            }
+        }
+
+        private func restoreReadingPosition(_ anchor: ReadingAnchor) {
+            guard let tableView,
+                  let scrollView,
+                  !messages.isEmpty else { return }
+
+            var survivingCandidate: (messageIndex: Int, viewportOffset: CGFloat)?
+            for candidate in anchor.candidates {
+                guard let messageIndex = messages.firstIndex(
+                    where: { $0.id == candidate.messageID }
+                ) else { continue }
+                survivingCandidate = (messageIndex, candidate.viewportOffset)
+                break
+            }
+            let target = survivingCandidate ?? (
+                messageIndex: messages.startIndex,
+                viewportOffset: anchor.candidates[0].viewportOffset
+            )
+            let row = target.messageIndex + 1
+
+            // First make AppKit realize the ordinal target, then restore the
+            // exact partial-row offset the reader had before the mutation.
+            tableView.scrollRowToVisible(row)
+            tableView.layoutSubtreeIfNeeded()
+            let clipView = scrollView.contentView
+            let desiredBounds = NSRect(
+                x: clipView.bounds.minX,
+                y: tableView.rect(ofRow: row).minY - target.viewportOffset,
+                width: clipView.bounds.width,
+                height: clipView.bounds.height
+            )
+            let constrainedBounds = clipView.constrainBoundsRect(desiredBounds)
+            clipView.setBoundsOrigin(constrainedBounds.origin)
+            scrollView.reflectScrolledClipView(clipView)
         }
 
         private func restorePendingTailStartOrigin() {
