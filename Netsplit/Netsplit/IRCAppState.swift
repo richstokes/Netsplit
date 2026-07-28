@@ -407,9 +407,7 @@ final class IRCAppState: ObservableObject {
 
     func selectFromSidebar(_ newSelection: SidebarItem?) {
         selection = newSelection
-        if case .channel = newSelection {
-            requestComposerFocus()
-        }
+        requestComposerFocus()
     }
 
     func openMentionNotification(_ destination: IRCMentionNotificationDestination) {

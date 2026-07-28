@@ -73,7 +73,6 @@ struct ContentView: View {
                     ConnectionCenterView(state: state, showAddServer: $showAddServer, editingProfile: $editingProfile)
                 } else if let selection = state.selection {
                     ConversationView(state: state, selection: selection, workspaceFocus: $workspaceFocus)
-                        .id(selection)
                 }
             }
             .toolbar {
@@ -793,6 +792,7 @@ private struct ConversationView: View {
                         messageSpacing: state.messageSpacing,
                         channelEventVisibility: state.channelEventVisibility
                     )
+                    .id(selection)
                     HStack(alignment: .bottom, spacing: 12) {
                         ZStack(alignment: .topLeading) {
                             IRCComposerTextView(
@@ -845,6 +845,7 @@ private struct ConversationView: View {
                     Divider()
                         .ircDivider()
                     ChannelMemberList(state: state, selection: selection)
+                        .id(selection)
                 }
             }
         }
@@ -860,8 +861,17 @@ private struct ConversationView: View {
         }
         .onChange(of: selection) { _, newSelection in
             state.markRead(newSelection)
+            draft = state.boundedComposerDraft(
+                state.draft(for: newSelection),
+                for: newSelection
+            )
             tabCompletion = nil
             commandCompletion = nil
+            pendingURL = nil
+            showsTopic = false
+            if state.workspaceFocusRequest?.target != .composer(newSelection) {
+                state.requestComposerFocus()
+            }
         }
         .onChange(of: draft) { _, newDraft in
             let boundedDraft = state.boundedComposerDraft(newDraft, for: selection)
@@ -1125,16 +1135,21 @@ private struct IRCComposerTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? IRCComposerNativeTextView else { return }
+        let didChangeConversation = context.coordinator.parent.focusTarget != focusTarget
         context.coordinator.parent = self
         textView.font = font
         textView.onSubmit = onSubmit
         textView.onTab = onTab
 
-        if textView.string != text {
+        let didReplaceText = textView.string != text
+        if didReplaceText {
             context.coordinator.isUpdatingProgrammatically = true
             textView.string = text
             textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
             context.coordinator.isUpdatingProgrammatically = false
+        }
+        if didChangeConversation || didReplaceText {
+            textView.undoManager?.removeAllActions()
         }
         context.coordinator.updateLayout(for: textView, in: scrollView)
         context.coordinator.scheduleFocusIfNeeded(for: textView)
@@ -1366,19 +1381,14 @@ private struct ConversationTranscript: View {
     let messageSpacing: IRCMessageSpacing
     let channelEventVisibility: IRCChannelEventVisibility
     @ObservedObject private var updates: IRCRevisionSignal
-    @State private var isFollowingTail = true
-    @State private var hasPositionedInitialMessages = false
-    @State private var lastAnimatedScroll = Date.distantPast
-    @State private var visibleMessageLimit = IRCTranscriptPresentationPolicy.initialVisibleMessageLimit
 #if DEBUG
     @State private var debugInstanceID = UUID()
     @State private var debugLastRevisionLog = Date.distantPast
 #endif
     @Environment(\.ircTextMetrics) private var textMetrics
-
-    private enum ScrollTarget: Hashable {
-        case tail
-    }
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.ircThemePalette) private var themePalette
+    @Environment(\.openURL) private var openURL
 
     init(
         state: IRCAppState,
@@ -1411,9 +1421,6 @@ private struct ConversationTranscript: View {
             for: selection,
             channelEventVisibility: channelEventVisibility
         )
-        let messages = allMessages.suffix(visibleMessageLimit)
-        let hiddenMessageCount = allMessages.count - messages.count
-        let lastMessageID = messages.last?.id
 #if DEBUG
         let debugContext = TranscriptDebugContext(
             instanceID: debugInstanceID,
@@ -1421,199 +1428,81 @@ private struct ConversationTranscript: View {
             title: state.title(for: selection),
             revision: revision,
             messageCount: allMessages.count,
-            lazyMessageCount: 0,
-            eagerMessageCount: messages.count,
-            lastMessageID: lastMessageID
+            lastMessageID: allMessages.last?.id
         )
-        let debugGeometryHandler: TranscriptLiveScrollObserver.DebugGeometryHandler? = { event, geometry in
+        let initialPositionHandler: ((IRCTranscriptTableGeometry) -> Void)? = { _ in
+            TranscriptDebugLog.state("initial-positioned", context: debugContext)
+        }
+        let followingTailHandler: ((Bool, IRCTranscriptTableGeometry) -> Void)? = { newValue, _ in
+            TranscriptDebugLog.state(
+                "following-tail-changed-\(newValue)",
+                context: debugContext
+            )
+        }
+        let tailPositionHandler: ((Bool, IRCTranscriptTableGeometry) -> Void)? = { animated, _ in
+            TranscriptDebugLog.state(
+                animated ? "tail-positioned-animated" : "tail-positioned",
+                context: debugContext
+            )
+        }
+        let debugGeometryHandler: ((String, IRCTranscriptTableGeometry) -> Void)? = { event, geometry in
             TranscriptDebugLog.geometry(event, context: debugContext, geometry: geometry)
         }
 #else
-        let debugGeometryHandler: TranscriptLiveScrollObserver.DebugGeometryHandler? = nil
+        let initialPositionHandler: ((IRCTranscriptTableGeometry) -> Void)? = nil
+        let followingTailHandler: ((Bool, IRCTranscriptTableGeometry) -> Void)? = nil
+        let tailPositionHandler: ((Bool, IRCTranscriptTableGeometry) -> Void)? = nil
+        let debugGeometryHandler: ((String, IRCTranscriptTableGeometry) -> Void)? = nil
 #endif
 
-        ScrollViewReader { scrollView in
-            ScrollView {
-                VStack(
-                    alignment: .leading,
-                    spacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3)
-                ) {
-                    if hiddenMessageCount > 0 {
-                        Button {
-                            let previousFirstMessageID = messages.first?.id
-                            visibleMessageLimit = IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
-                                current: visibleMessageLimit,
-                                total: allMessages.count
-                            )
-                            guard let previousFirstMessageID else { return }
-                            Task { @MainActor in
-                                await Task.yield()
-                                scrollView.scrollTo(previousFirstMessageID, anchor: .top)
-                            }
-                        } label: {
-                            Label(
-                                "Load \(min(hiddenMessageCount, IRCTranscriptPresentationPolicy.earlierMessagePageSize)) earlier messages",
-                                systemImage: "arrow.up"
-                            )
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(size: textMetrics.size(13), weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, textMetrics.spacing(8))
-                        .accessibilityHint("Keeps the current reading position")
-                    }
-
-                    ForEach(messages) { message in
-                        messageRow(for: message)
-                    }
-
-                    Color.clear
-                        .frame(height: textMetrics.spacing(18))
-                        .id(ScrollTarget.tail)
-                }
-                .padding(.horizontal, textMetrics.spacing(24))
-                .padding(.top, textMetrics.spacing(18))
-                .background {
-                    TranscriptLiveScrollObserver(
-                        onScroll: { visibleBounds, contentBounds, contentIsFlipped in
-                            guard hasPositionedInitialMessages else { return }
-                            guard let newValue = IRCTranscriptScrollPolicy.followingTailChange(
-                                from: isFollowingTail,
-                                visibleBounds: visibleBounds,
-                                contentBounds: contentBounds,
-                                contentIsFlipped: contentIsFlipped
-                            ) else { return }
-#if DEBUG
-                            TranscriptDebugLog.state(
-                                "following-tail-changed",
-                                context: debugContext,
-                                hasPositionedInitialMessages: hasPositionedInitialMessages,
-                                isFollowingTail: newValue
-                            )
-#endif
-                            isFollowingTail = newValue
-                        },
-                        onDebugGeometry: debugGeometryHandler
-                    )
-                }
-                // Keep initial positioning independent of message IDs so a
-                // burst cannot cancel it before the first layout completes.
-                .task(id: messages.isEmpty) {
-                    guard !messages.isEmpty, !hasPositionedInitialMessages else { return }
-#if DEBUG
-                    TranscriptDebugLog.state(
-                        "initial-scroll-yielding",
-                        context: debugContext,
-                        hasPositionedInitialMessages: hasPositionedInitialMessages,
-                        isFollowingTail: isFollowingTail
-                    )
-#endif
-                    await Task.yield()
-                    if Task.isCancelled {
-#if DEBUG
-                        TranscriptDebugLog.state(
-                            "initial-scroll-cancelled",
-                            context: debugContext,
-                            hasPositionedInitialMessages: hasPositionedInitialMessages,
-                            isFollowingTail: isFollowingTail
-                        )
-#endif
-                        return
-                    }
-
-                    var transaction = Transaction()
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) {
-                        scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
-                    }
-                    hasPositionedInitialMessages = true
-#if DEBUG
-                    TranscriptDebugLog.state(
-                        "initial-scroll-requested",
-                        context: debugContext,
-                        hasPositionedInitialMessages: hasPositionedInitialMessages,
-                        isFollowingTail: isFollowingTail
-                    )
-#endif
-                }
-            }
-            .accessibilityAddTraits(.updatesFrequently)
-            .defaultScrollAnchor(.bottom)
-            .ircCustomWindowBackground()
-            .accessibilityLabel("Conversation messages")
-            .task(id: lastMessageID) {
-                guard lastMessageID != nil,
-                      hasPositionedInitialMessages,
-                      isFollowingTail else { return }
-
-                // Collapse bursts into one tail update after traffic briefly settles.
-                // This avoids overlapping animations and repeated lazy-stack ID scans.
-                do {
-                    try await Task.sleep(for: IRCTranscriptScrollPolicy.coalescingDelay)
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled, isFollowingTail else { return }
-
-                let now = Date()
-                if IRCTranscriptScrollPolicy.shouldAnimate(lastAnimatedScroll: lastAnimatedScroll, now: now) {
-                    lastAnimatedScroll = now
-#if DEBUG
-                    TranscriptDebugLog.state(
-                        "tail-scroll-requested-animated",
-                        context: debugContext,
-                        hasPositionedInitialMessages: hasPositionedInitialMessages,
-                        isFollowingTail: isFollowingTail
-                    )
-#endif
-                    withAnimation(.easeOut(duration: IRCTranscriptScrollPolicy.animationDuration)) {
-                        scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
-                    }
-                } else {
-#if DEBUG
-                    TranscriptDebugLog.state(
-                        "tail-scroll-requested",
-                        context: debugContext,
-                        hasPositionedInitialMessages: hasPositionedInitialMessages,
-                        isFollowingTail: isFollowingTail
-                    )
-#endif
-                    var transaction = Transaction()
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) {
-                        scrollView.scrollTo(ScrollTarget.tail, anchor: .bottom)
-                    }
-                }
-            }
-        }
+        IRCTranscriptTable(
+            messages: allMessages,
+            updateRevision: revision,
+            estimatedRowHeight: textMetrics.size(24),
+            rowSpacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3),
+            renderConfiguration: [
+                chatFont.rawValue,
+                String(usesColoredNicknames),
+                String(usesMonospacedServerMessages),
+                String(rendersIRCFormatting),
+                String(automaticallyPreviewsLinks),
+                String(automaticallyPreviewsImages),
+                messageSpacing.rawValue,
+                String(describing: textMetrics.bodySize),
+                String(describing: colorScheme),
+                state.applicationAppearance.rawValue
+            ].joined(separator: "|"),
+            makeRow: { message in
+                AnyView(
+                    messageRow(for: message)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, textMetrics.spacing(24))
+                        .environment(\.ircTextMetrics, textMetrics)
+                        .environment(\.colorScheme, colorScheme)
+                        .environment(\.ircThemePalette, themePalette)
+                        .environment(\.openURL, openURL)
+                )
+            },
+            onInitialPositioned: initialPositionHandler,
+            onFollowingTailChange: followingTailHandler,
+            onTailPositioned: tailPositionHandler,
+            onGeometryChange: debugGeometryHandler
+        )
+        .accessibilityAddTraits(.updatesFrequently)
+        .ircCustomWindowBackground()
+        .accessibilityLabel("Conversation messages")
 #if DEBUG
         .onAppear {
-            TranscriptDebugLog.state(
-                "appeared",
-                context: debugContext,
-                hasPositionedInitialMessages: hasPositionedInitialMessages,
-                isFollowingTail: isFollowingTail
-            )
+            TranscriptDebugLog.state("appeared", context: debugContext)
         }
         .onDisappear {
-            TranscriptDebugLog.state(
-                "disappeared",
-                context: debugContext,
-                hasPositionedInitialMessages: hasPositionedInitialMessages,
-                isFollowingTail: isFollowingTail
-            )
+            TranscriptDebugLog.state("disappeared", context: debugContext)
         }
         .onChange(of: revision) { _, _ in
             let now = Date()
             guard now.timeIntervalSince(debugLastRevisionLog) >= 0.5 else { return }
             debugLastRevisionLog = now
-            TranscriptDebugLog.state(
-                "revision-changed",
-                context: debugContext,
-                hasPositionedInitialMessages: hasPositionedInitialMessages,
-                isFollowingTail: isFollowingTail
-            )
+            TranscriptDebugLog.state("revision-changed", context: debugContext)
         }
 #endif
     }
@@ -1642,8 +1531,6 @@ private struct TranscriptDebugContext {
     let title: String
     let revision: Int
     let messageCount: Int
-    let lazyMessageCount: Int
-    let eagerMessageCount: Int
     let lastMessageDescription: String
 
     init(
@@ -1652,8 +1539,6 @@ private struct TranscriptDebugContext {
         title: String,
         revision: Int,
         messageCount: Int,
-        lazyMessageCount: Int,
-        eagerMessageCount: Int,
         lastMessageID: UUID?
     ) {
         self.instanceID = instanceID
@@ -1661,8 +1546,6 @@ private struct TranscriptDebugContext {
         self.title = title
         self.revision = revision
         self.messageCount = messageCount
-        self.lazyMessageCount = lazyMessageCount
-        self.eagerMessageCount = eagerMessageCount
         lastMessageDescription = lastMessageID?.uuidString ?? "nil"
     }
 }
@@ -1682,20 +1565,18 @@ private enum TranscriptDebugLog {
 
     static func state(
         _ event: String,
-        context: TranscriptDebugContext,
-        hasPositionedInitialMessages: Bool,
-        isFollowingTail: Bool
+        context: TranscriptDebugContext
     ) {
         let uptime = ProcessInfo.processInfo.systemUptime
         logger.debug(
-            "state event=\(event, privacy: .public) uptime=\(uptime, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) lazy=\(context.lazyMessageCount, privacy: .public) eager=\(context.eagerMessageCount, privacy: .public) last=\(context.lastMessageDescription, privacy: .public) positioned=\(hasPositionedInitialMessages, privacy: .public) followingTail=\(isFollowingTail, privacy: .public)"
+            "state event=\(event, privacy: .public) uptime=\(uptime, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) last=\(context.lastMessageDescription, privacy: .public)"
         )
     }
 
     static func geometry(
         _ event: String,
         context: TranscriptDebugContext,
-        geometry: TranscriptScrollGeometry
+        geometry: IRCTranscriptTableGeometry
     ) {
         let visibleDescription = NSStringFromRect(geometry.visibleBounds)
         let contentDescription = NSStringFromRect(geometry.contentBounds)
@@ -1705,202 +1586,11 @@ private enum TranscriptDebugLog {
             : geometry.visibleBounds.minY - geometry.contentBounds.minY
         let uptime = ProcessInfo.processInfo.systemUptime
         logger.debug(
-            "geometry event=\(event, privacy: .public) uptime=\(uptime, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) lazy=\(context.lazyMessageCount, privacy: .public) eager=\(context.eagerMessageCount, privacy: .public) visible=\(visibleDescription, privacy: .public) content=\(contentDescription, privacy: .public) frame=\(frameDescription, privacy: .public) flipped=\(geometry.contentIsFlipped, privacy: .public) bottomDistance=\(distanceFromBottom, privacy: .public)"
+            "geometry event=\(event, privacy: .public) uptime=\(uptime, privacy: .public) view=\(context.instanceID.uuidString, privacy: .public) selection=\(context.selectionDescription, privacy: .public) title=\(context.title, privacy: .public) revision=\(context.revision, privacy: .public) messages=\(context.messageCount, privacy: .public) visible=\(visibleDescription, privacy: .public) content=\(contentDescription, privacy: .public) frame=\(frameDescription, privacy: .public) flipped=\(geometry.contentIsFlipped, privacy: .public) bottomDistance=\(distanceFromBottom, privacy: .public)"
         )
     }
 }
 #endif
-
-private struct TranscriptScrollGeometry {
-    let visibleBounds: CGRect
-    let contentBounds: CGRect
-    let documentFrame: CGRect
-    let contentIsFlipped: Bool
-}
-
-/// Reports only live, user-driven scrolling. Transcript layout changes and
-/// programmatic tail scrolling must not be mistaken for the reader scrolling up.
-private struct TranscriptLiveScrollObserver: NSViewRepresentable {
-    typealias DebugGeometryHandler = (_ event: String, _ geometry: TranscriptScrollGeometry) -> Void
-
-    let onScroll: (_ visibleBounds: CGRect, _ contentBounds: CGRect, _ contentIsFlipped: Bool) -> Void
-    let onDebugGeometry: DebugGeometryHandler?
-
-    func makeNSView(context: Context) -> ObserverView {
-        ObserverView(onScroll: onScroll, onDebugGeometry: onDebugGeometry)
-    }
-
-    func updateNSView(_ nsView: ObserverView, context: Context) {
-        nsView.onScroll = onScroll
-        nsView.onDebugGeometry = onDebugGeometry
-        nsView.attachToEnclosingScrollViewIfNeeded()
-    }
-
-    static func dismantleNSView(_ nsView: ObserverView, coordinator: ()) {
-        nsView.detach()
-    }
-
-    final class ObserverView: NSView {
-        var onScroll: (_ visibleBounds: CGRect, _ contentBounds: CGRect, _ contentIsFlipped: Bool) -> Void
-        var onDebugGeometry: DebugGeometryHandler?
-        private weak var observedScrollView: NSScrollView?
-        private var observers: [NSObjectProtocol] = []
-        private var attachmentGeneration = 0
-        private var hasPendingReport = false
-        private var pendingDebugWorkItem: DispatchWorkItem?
-
-        init(
-            onScroll: @escaping (_ visibleBounds: CGRect, _ contentBounds: CGRect, _ contentIsFlipped: Bool) -> Void,
-            onDebugGeometry: DebugGeometryHandler?
-        ) {
-            self.onScroll = onScroll
-            self.onDebugGeometry = onDebugGeometry
-            super.init(frame: .zero)
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) {
-            fatalError("init(coder:) has not been implemented")
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            attachToEnclosingScrollViewIfNeeded()
-            if observedScrollView == nil, window != nil {
-                DispatchQueue.main.async { [weak self] in
-                    self?.attachToEnclosingScrollViewIfNeeded()
-                }
-            }
-        }
-
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            nil
-        }
-
-        func attachToEnclosingScrollViewIfNeeded() {
-            guard let scrollView = enclosingScrollView,
-                  scrollView !== observedScrollView else { return }
-            detach()
-            observedScrollView = scrollView
-            let center = NotificationCenter.default
-            for name in [NSScrollView.didLiveScrollNotification, NSScrollView.didEndLiveScrollNotification] {
-                observers.append(center.addObserver(
-                    forName: name,
-                    object: scrollView,
-                    queue: .main
-                ) { [weak self] notification in
-                    let event = notification.name == NSScrollView.didEndLiveScrollNotification
-                        ? "live-scroll-ended"
-                        : "live-scroll"
-                    self?.schedulePositionReport(debugEvent: event)
-                })
-            }
-            attachDebugGeometryObservers(to: scrollView)
-            scheduleDebugGeometryReport(event: "attached")
-        }
-
-        func detach() {
-            attachmentGeneration &+= 1
-            hasPendingReport = false
-            pendingDebugWorkItem?.cancel()
-            pendingDebugWorkItem = nil
-            let center = NotificationCenter.default
-            observers.forEach(center.removeObserver)
-            observers.removeAll()
-            observedScrollView = nil
-        }
-
-        private func attachDebugGeometryObservers(to scrollView: NSScrollView) {
-            guard onDebugGeometry != nil, let documentView = scrollView.documentView else { return }
-            let center = NotificationCenter.default
-            scrollView.contentView.postsBoundsChangedNotifications = true
-            documentView.postsFrameChangedNotifications = true
-
-            observers.append(center.addObserver(
-                forName: NSView.boundsDidChangeNotification,
-                object: scrollView.contentView,
-                queue: .main
-            ) { [weak self] _ in
-                self?.scheduleDebugGeometryReport(event: "visible-bounds-changed")
-            })
-            observers.append(center.addObserver(
-                forName: NSView.frameDidChangeNotification,
-                object: documentView,
-                queue: .main
-            ) { [weak self] _ in
-                self?.scheduleDebugGeometryReport(event: "document-frame-changed")
-            })
-        }
-
-        /// AppKit can post live-scroll notifications while the scroll view is
-        /// still in its layout pass. Publishing SwiftUI state from that stack
-        /// can make the hosting view try to lay out recursively, so defer and
-        /// coalesce the report until the next main-queue turn.
-        private func schedulePositionReport(debugEvent: String) {
-            guard !hasPendingReport else { return }
-            hasPendingReport = true
-            let generation = attachmentGeneration
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.attachmentGeneration == generation else { return }
-                self.hasPendingReport = false
-                self.reportPosition(debugEvent: debugEvent)
-            }
-        }
-
-        private func scheduleDebugGeometryReport(event: String) {
-            guard onDebugGeometry != nil else { return }
-            let generation = attachmentGeneration
-            if event == "attached" {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.attachmentGeneration == generation else { return }
-                    self.reportDebugGeometry(event: event)
-                }
-                return
-            }
-
-            pendingDebugWorkItem?.cancel()
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self, self.attachmentGeneration == generation else { return }
-                self.pendingDebugWorkItem = nil
-                self.reportDebugGeometry(event: event)
-            }
-            pendingDebugWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
-        }
-
-        private func reportPosition(debugEvent: String) {
-            guard let scrollView = observedScrollView,
-                  let documentView = scrollView.documentView else { return }
-            if debugEvent == "live-scroll-ended" {
-                onDebugGeometry?(debugEvent, geometry(for: scrollView, documentView: documentView))
-            }
-            onScroll(
-                scrollView.contentView.documentVisibleRect,
-                documentView.bounds,
-                documentView.isFlipped
-            )
-        }
-
-        private func reportDebugGeometry(event: String) {
-            guard let scrollView = observedScrollView,
-                  let documentView = scrollView.documentView else { return }
-            onDebugGeometry?(event, geometry(for: scrollView, documentView: documentView))
-        }
-
-        private func geometry(for scrollView: NSScrollView, documentView: NSView) -> TranscriptScrollGeometry {
-            TranscriptScrollGeometry(
-                visibleBounds: scrollView.contentView.documentVisibleRect,
-                contentBounds: documentView.bounds,
-                documentFrame: documentView.frame,
-                contentIsFlipped: documentView.isFlipped
-            )
-        }
-
-        deinit {
-            detach()
-        }
-    }
-}
 
 struct RecipientCompletionContext {
     let command: String?

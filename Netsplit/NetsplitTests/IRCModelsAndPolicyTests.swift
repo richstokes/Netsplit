@@ -4,7 +4,9 @@ import SwiftUI
 import Testing
 @testable import Netsplit
 
-@Suite("IRC models and state policies")
+// These tests share UserDefaults.standard and include AppKit/SwiftUI integration
+// checks whose run-loop work must not overlap another test in this suite.
+@Suite("IRC models and state policies", .serialized)
 struct IRCModelsAndPolicyTests {
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
@@ -1760,23 +1762,6 @@ struct IRCModelsAndPolicyTests {
         #expect(signal.revision == 4)
     }
 
-    @Test("Transcript presentation expands retained history in bounded pages")
-    func expandsTranscriptPresentationInPages() {
-        let initial = IRCTranscriptPresentationPolicy.initialVisibleMessageLimit
-        let pageSize = IRCTranscriptPresentationPolicy.earlierMessagePageSize
-
-        #expect(initial < IRCConversationHistory.retentionLimit)
-        #expect(pageSize > 0)
-        #expect(IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
-            current: initial,
-            total: IRCConversationHistory.retentionLimit
-        ) == initial + pageSize)
-        #expect(IRCTranscriptPresentationPolicy.expandedVisibleMessageLimit(
-            current: IRCConversationHistory.retentionLimit - 100,
-            total: IRCConversationHistory.retentionLimit
-        ) == IRCConversationHistory.retentionLimit)
-    }
-
     @Test("Member list shortcut only applies to channels")
     @MainActor
     func ignoresMemberListToggleOutsideChannels() {
@@ -1788,36 +1773,42 @@ struct IRCModelsAndPolicyTests {
         #expect(state.showsMemberList == initialValue)
     }
 
-    @Test("Sidebar channel selection requests composer focus, including reselection")
+    @Test("Sidebar conversation selection requests composer focus, including reselection")
     @MainActor
     func focusesComposerForSidebarChannelSelection() throws {
         let state = IRCAppState()
         let firstChannel = SidebarItem.channel(UUID())
-        let secondChannel = SidebarItem.channel(UUID())
+        let directMessage = SidebarItem.directMessage(UUID())
 
         state.selectFromSidebar(firstChannel)
         let firstRequest = try #require(state.workspaceFocusRequest)
         #expect(state.selection == firstChannel)
         #expect(firstRequest.target == .composer(firstChannel))
 
-        state.selectFromSidebar(secondChannel)
+        state.selectFromSidebar(directMessage)
         let secondRequest = try #require(state.workspaceFocusRequest)
-        #expect(state.selection == secondChannel)
-        #expect(secondRequest.target == .composer(secondChannel))
+        #expect(state.selection == directMessage)
+        #expect(secondRequest.target == .composer(directMessage))
         #expect(secondRequest.id != firstRequest.id)
 
-        state.selectFromSidebar(secondChannel)
+        state.selectFromSidebar(directMessage)
         let reselectionRequest = try #require(state.workspaceFocusRequest)
-        #expect(reselectionRequest.target == .composer(secondChannel))
+        #expect(reselectionRequest.target == .composer(directMessage))
         #expect(reselectionRequest.id != secondRequest.id)
     }
 
-    @Test("Native composer becomes first responder when focus is requested")
+    @Test("Native composer is reused and becomes first responder when focus is requested")
     @MainActor
     func focusesNativeComposer() async throws {
         let state = IRCAppState()
         let profile = state.profiles[0]
         state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let alice = try #require(state.selection)
+        state.setDraft("Alice draft", for: alice)
+        state.startDirectMessage(with: "Bob", from: .server(profile.id))
+        let bob = try #require(state.selection)
+        state.setDraft("Bob draft", for: bob)
+        state.selectFromSidebar(alice)
 
         let hostingController = NSHostingController(
             rootView: ContentView(state: state)
@@ -1829,6 +1820,8 @@ struct IRCModelsAndPolicyTests {
             backing: .buffered,
             defer: false
         )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
         window.contentViewController = hostingController
         window.orderFrontRegardless()
         defer {
@@ -1837,20 +1830,324 @@ struct IRCModelsAndPolicyTests {
             window.close()
         }
 
-        try await Task.sleep(for: .milliseconds(100))
+        try await Self.waitUntil {
+            Self.composer(in: hostingController.view) != nil
+        }
         let initialComposer = try #require(Self.composer(in: hostingController.view))
+        try await Self.waitUntil {
+            window.firstResponder === initialComposer
+        }
         #expect(window.firstResponder === initialComposer)
+        #expect(initialComposer.string == "Alice draft")
 
         #expect(window.makeFirstResponder(nil))
         state.requestComposerFocus()
-        try await Task.sleep(for: .milliseconds(100))
+        try await Self.waitUntil {
+            window.firstResponder === initialComposer
+        }
         #expect(window.firstResponder === initialComposer)
 
-        state.startDirectMessage(with: "Bob", from: .server(profile.id))
-        try await Task.sleep(for: .milliseconds(100))
+        #expect(window.makeFirstResponder(nil))
+        state.selectFromSidebar(bob)
+        try await Self.waitUntil {
+            window.firstResponder === initialComposer
+                && initialComposer.string == "Bob draft"
+        }
         let switchedComposer = try #require(Self.composer(in: hostingController.view))
-        #expect(switchedComposer !== initialComposer)
+        #expect(switchedComposer === initialComposer)
         #expect(window.firstResponder === switchedComposer)
+        #expect(switchedComposer.string == "Bob draft")
+        #expect(!(switchedComposer.undoManager?.canUndo ?? false))
+
+        state.selectFromSidebar(alice)
+        try await Self.waitUntil {
+            initialComposer.string == "Alice draft"
+        }
+        #expect(Self.composer(in: hostingController.view) === initialComposer)
+        #expect(initialComposer.string == "Alice draft")
+    }
+
+    @Test("Native transcript virtualizes retained rows and initially positions at the tail")
+    @MainActor
+    func virtualizesNativeTranscript() async throws {
+        let messages = (0..<1_000).map { index in
+            IRCMessage(
+                sender: "tester",
+                text: index == 999
+                    ? String(repeating: "This message must wrap at the table width. ", count: 20)
+                    : "Message \(index)"
+            )
+        }
+        var initialGeometry: IRCTranscriptTableGeometry?
+        let hostingController = NSHostingController(
+            rootView: IRCTranscriptTable(
+                messages: messages,
+                estimatedRowHeight: 24,
+                rowSpacing: 0,
+                renderConfiguration: "test",
+                makeRow: { message in
+                    AnyView(
+                        Text(message.text)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    )
+                },
+                onInitialPositioned: { initialGeometry = $0 },
+                onFollowingTailChange: { _, _ in },
+                onTailPositioned: { _, _ in },
+                onGeometryChange: { _, _ in }
+            )
+            .frame(width: 320, height: 700)
+        )
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 700)
+        hostingController.view.layoutSubtreeIfNeeded()
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        #expect(scrollView.alphaValue == 0)
+
+        try await Task.sleep(for: .milliseconds(200))
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let geometry = try #require(initialGeometry)
+        let hostedRowCount = Self.views(
+            withIdentifier: "IRCTranscriptHostedRow",
+            in: hostingController.view
+        ).count
+
+        #expect(tableView.numberOfRows == messages.count + 2)
+        #expect(hostedRowCount > 0)
+        #expect(hostedRowCount < 100)
+        #expect(tableView.rect(ofRow: messages.count).height > 24)
+        #expect(scrollView.alphaValue == 1)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: geometry.visibleBounds,
+            contentBounds: geometry.contentBounds,
+            contentIsFlipped: geometry.contentIsFlipped,
+            tolerance: 1
+        ))
+    }
+
+    @Test("Short native transcripts grow upward from the bottom")
+    @MainActor
+    func bottomAlignsShortNativeTranscript() async throws {
+        var messages = [
+            IRCMessage(sender: "tester", text: "Only message")
+        ]
+        var didPositionInitially = false
+        var tailUpdateCount = 0
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in tailUpdateCount += 1 },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 700)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 700)
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        try await Self.waitUntil { didPositionInitially }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        let messageBottom = tableView.rect(ofRow: 1).maxY
+        let expectedMessageBottom = scrollView.contentView.bounds.height - 18
+
+        #expect(abs(messageBottom - expectedMessageBottom) <= 1)
+
+        messages.append(IRCMessage(sender: "tester", text: "Newest message"))
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { tailUpdateCount == 1 }
+
+        let newestMessageBottom = tableView.rect(ofRow: 2).maxY
+        #expect(abs(newestMessageBottom - expectedMessageBottom) <= 1)
+        #expect(tableView.rect(ofRow: 1).maxY < messageBottom)
+    }
+
+    @Test("An empty native transcript positions its first message once at the bottom")
+    @MainActor
+    func positionsFirstNativeTranscriptMessage() async throws {
+        var messages: [IRCMessage] = []
+        var initialPositionCount = 0
+        var tailUpdateCount = 0
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { _ in initialPositionCount += 1 },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in tailUpdateCount += 1 },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 700)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 700)
+        hostingController.view.layoutSubtreeIfNeeded()
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        #expect(scrollView.alphaValue == 0)
+
+        messages.append(IRCMessage(sender: "tester", text: "First message"))
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let expectedMessageBottom = scrollView.contentView.bounds.height - 18
+
+        #expect(tableView.numberOfRows == 3)
+        #expect(abs(tableView.rect(ofRow: 1).maxY - expectedMessageBottom) <= 1)
+        #expect(scrollView.alphaValue == 1)
+        #expect(initialPositionCount == 1)
+        #expect(tailUpdateCount == 0)
+    }
+
+    @Test("Native transcript appends with one settled animated tail update")
+    @MainActor
+    func appendsNativeTranscriptAtTail() async throws {
+        var messages = (0..<100).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var didPositionInitially = false
+        var tailUpdates: [(animated: Bool, geometry: IRCTranscriptTableGeometry)] = []
+        var rowHeightChangeCount = 0
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { animated, geometry in
+                        tailUpdates.append((animated, geometry))
+                    },
+                    onGeometryChange: { event, _ in
+                        if event == "row-height-changed" {
+                            rowHeightChangeCount += 1
+                        }
+                    }
+                )
+                .frame(width: 320, height: 700)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { didPositionInitially }
+        let initialTableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let initialContentHeight = initialTableView.frame.height
+        tailUpdates.removeAll()
+        rowHeightChangeCount = 0
+
+        messages.append(IRCMessage(sender: "tester", text: "Appended message"))
+        hostingController.rootView = rootView()
+
+        try await Self.waitUntil { !tailUpdates.isEmpty }
+        let updatedTableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let tailUpdate = try #require(tailUpdates.last)
+
+        #expect(updatedTableView === initialTableView)
+        #expect(updatedTableView.numberOfRows == messages.count + 2)
+        #expect(tailUpdates.count == 1)
+        #expect(tailUpdate.geometry.contentBounds.height > initialContentHeight)
+        #expect(tailUpdate.animated)
+        #expect(rowHeightChangeCount == 0)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: tailUpdate.geometry.visibleBounds,
+            contentBounds: tailUpdate.geometry.contentBounds,
+            contentIsFlipped: tailUpdate.geometry.contentIsFlipped,
+            tolerance: 1
+        ))
     }
 
     @Test("Conversation drafts remain separate and clear when emptied")
@@ -2122,6 +2419,40 @@ struct IRCModelsAndPolicyTests {
             }
         }
         return nil
+    }
+
+    @MainActor
+    private static func waitUntil(
+        timeout: Duration = .seconds(2),
+        _ condition: () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition(), clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    @MainActor
+    private static func view(withIdentifier identifier: String, in view: NSView) -> NSView? {
+        if view.identifier?.rawValue == identifier {
+            return view
+        }
+        for subview in view.subviews {
+            if let match = Self.view(withIdentifier: identifier, in: subview) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    @MainActor
+    private static func views(withIdentifier identifier: String, in view: NSView) -> [NSView] {
+        var matches = view.identifier?.rawValue == identifier ? [view] : []
+        for subview in view.subviews {
+            matches.append(contentsOf: Self.views(withIdentifier: identifier, in: subview))
+        }
+        return matches
     }
 
     private func attributes(
