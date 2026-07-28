@@ -1934,6 +1934,124 @@ struct IRCModelsAndPolicyTests {
         ))
     }
 
+    @Test("Native transcript reuses hosted cells without leaking row state or callbacks")
+    @MainActor
+    func reusesNativeTranscriptCells() async throws {
+        let messages = (0..<200).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var didPositionInitially = false
+        var renderedStateOwners: [UUID: UUID] = [:]
+
+        let hostingController = NSHostingController(
+            rootView: AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "reuse-test",
+                    makeRow: { message in
+                        AnyView(
+                            TranscriptTestStatefulRow(messageID: message.id) {
+                                renderedMessageID, stateOwnerMessageID in
+                                renderedStateOwners[renderedMessageID] = stateOwnerMessageID
+                            }
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 240)
+            )
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil {
+            didPositionInitially
+                && !Self.views(
+                    withIdentifier: "IRCTranscriptHostedRow",
+                    in: hostingController.view
+                ).isEmpty
+        }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let initialHostingViewIDs = Set(
+            Self.views(
+                withIdentifier: "IRCTranscriptHostedRow",
+                in: hostingController.view
+            ).map(ObjectIdentifier.init)
+        )
+
+        tableView.scrollRowToVisible(1)
+        tableView.layoutSubtreeIfNeeded()
+        try await Self.waitUntil {
+            let visibleRows = tableView.rows(in: tableView.visibleRect)
+            let currentHostingViewIDs = Set(
+                Self.views(
+                    withIdentifier: "IRCTranscriptHostedRow",
+                    in: hostingController.view
+                ).map(ObjectIdentifier.init)
+            )
+            return visibleRows.location != NSNotFound
+                && NSLocationInRange(1, visibleRows)
+                && !initialHostingViewIDs.isDisjoint(with: currentHostingViewIDs)
+        }
+
+        let reusedHostingView = try #require(
+            Self.views(
+                withIdentifier: "IRCTranscriptHostedRow",
+                in: hostingController.view
+            ).compactMap { $0 as? IntrinsicInvalidatingHostingView }
+                .first { initialHostingViewIDs.contains(ObjectIdentifier($0)) }
+        )
+        let reusedCell = try #require(reusedHostingView.superview as? NSTableCellView)
+        let reusedRow = tableView.row(for: reusedCell)
+        let reusedMessage = try #require(
+            messages.indices.contains(reusedRow - 1) ? messages[reusedRow - 1] : nil
+        )
+
+        try await Self.waitUntil {
+            renderedStateOwners[reusedMessage.id] != nil
+        }
+        #expect(reusedHostingView.representedMessageID == reusedMessage.id)
+        #expect(renderedStateOwners[reusedMessage.id] == reusedMessage.id)
+
+        var invalidatedMessageID: UUID?
+        let originalInvalidation = reusedHostingView.onIntrinsicSizeInvalidated
+        reusedHostingView.onIntrinsicSizeInvalidated = { messageID in
+            invalidatedMessageID = messageID
+        }
+        reusedHostingView.invalidateIntrinsicContentSize()
+        reusedHostingView.onIntrinsicSizeInvalidated = originalInvalidation
+        #expect(invalidatedMessageID == reusedMessage.id)
+
+        // Explicitly dismantle the representable and drain its queued AppKit
+        // invalidation before the next serialized integration test begins.
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Short native transcripts grow upward from the bottom")
     @MainActor
     func bottomAlignsShortNativeTranscript() async throws {
@@ -2716,5 +2834,44 @@ struct IRCModelsAndPolicyTests {
         let stringRange = try #require(text.range(of: substring))
         let attributedRange = try #require(Range(stringRange, in: attributedText))
         return attributedText[attributedRange].runs.first?.attributes ?? AttributeContainer()
+    }
+}
+
+private struct TranscriptTestStatefulRow: View {
+    let messageID: UUID
+    let onRender: (UUID, UUID) -> Void
+    @State private var stateOwnerMessageID: UUID
+
+    init(
+        messageID: UUID,
+        onRender: @escaping (UUID, UUID) -> Void
+    ) {
+        self.messageID = messageID
+        self.onRender = onRender
+        _stateOwnerMessageID = State(initialValue: messageID)
+    }
+
+    var body: some View {
+        TranscriptTestStateReporter(
+            messageID: messageID,
+            stateOwnerMessageID: stateOwnerMessageID,
+            onRender: onRender
+        )
+        .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
+    }
+}
+
+private struct TranscriptTestStateReporter: NSViewRepresentable {
+    let messageID: UUID
+    let stateOwnerMessageID: UUID
+    let onRender: (UUID, UUID) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        onRender(messageID, stateOwnerMessageID)
+        return NSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        onRender(messageID, stateOwnerMessageID)
     }
 }

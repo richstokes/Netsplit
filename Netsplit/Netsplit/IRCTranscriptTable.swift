@@ -120,6 +120,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         private static let topInset: CGFloat = 18
         private static let bottomInset: CGFloat = 18
+        private static let messageCellIdentifier = NSUserInterfaceItemIdentifier(
+            "IRCTranscriptMessageCell"
+        )
 
         private var parent: IRCTranscriptTable
         private var messages: [IRCMessage]
@@ -278,23 +281,24 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 )
             }
 
-            let cell = NSTableCellView()
-            let hostingView = IntrinsicInvalidatingHostingView(
-                rootView: sizedRow(message, width: currentContentWidth(in: tableView))
-            )
-            hostingView.identifier = NSUserInterfaceItemIdentifier("IRCTranscriptHostedRow")
-            hostingView.translatesAutoresizingMaskIntoConstraints = false
-            hostingView.sizingOptions = [.intrinsicContentSize]
-            hostingView.onIntrinsicSizeInvalidated = { [weak self] in
-                self?.scheduleHeightInvalidation(for: message.id)
+            let cell: TranscriptMessageCellView
+            if let reusableCell = tableView.makeView(
+                withIdentifier: Self.messageCellIdentifier,
+                owner: self
+            ) as? TranscriptMessageCellView {
+                cell = reusableCell
+            } else {
+                cell = TranscriptMessageCellView()
+                cell.identifier = Self.messageCellIdentifier
+                cell.hostingView.onIntrinsicSizeInvalidated = { [weak self] messageID in
+                    self?.scheduleHeightInvalidation(for: messageID)
+                }
             }
-            cell.addSubview(hostingView)
-            NSLayoutConstraint.activate([
-                hostingView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
-                hostingView.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-                hostingView.topAnchor.constraint(equalTo: cell.topAnchor),
-                hostingView.bottomAnchor.constraint(equalTo: cell.bottomAnchor)
-            ])
+            cell.hostingView.representedMessageID = message.id
+            cell.hostingView.rootView = sizedRow(
+                message,
+                width: currentContentWidth(in: tableView)
+            )
             return cell
         }
 
@@ -535,11 +539,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
                           atColumn: 0,
                           row: row,
                           makeIfNecessary: false
-                      ),
-                      let hostingView = cell.subviews.first(
-                          where: { $0 is IntrinsicInvalidatingHostingView }
-                      ) as? IntrinsicInvalidatingHostingView else { continue }
-                hostingView.rootView = sizedRow(message, width: width)
+                      ) as? TranscriptMessageCellView else { continue }
+                cell.hostingView.representedMessageID = message.id
+                cell.hostingView.rootView = sizedRow(message, width: width)
             }
         }
 
@@ -551,6 +553,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private func sizedRow(_ message: IRCMessage, width: CGFloat) -> AnyView {
             AnyView(
                 parent.makeRow(message)
+                    // The hosting view is reused; message identity gives each
+                    // row-local @State a distinct lifetime when retargeted.
+                    .id(message.id)
                     .frame(width: width, alignment: .leading)
             )
         }
@@ -758,12 +763,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 atColumn: 0,
                 row: row,
                 makeIfNecessary: false
-            ) else {
+            ) as? TranscriptMessageCellView else {
                 return nil
             }
-            return cell.subviews.first {
-                $0 is IntrinsicInvalidatingHostingView
-            } as? IntrinsicInvalidatingHostingView
+            return cell.hostingView
         }
 
         private func adjustTopSpacerForShortContent() {
@@ -832,12 +835,47 @@ final class TranscriptScrollView: NSScrollView {
     }
 }
 
-private final class IntrinsicInvalidatingHostingView: NSHostingView<AnyView> {
-    var onIntrinsicSizeInvalidated: (() -> Void)?
+final class IntrinsicInvalidatingHostingView: NSHostingView<AnyView> {
+    var representedMessageID: UUID?
+    var onIntrinsicSizeInvalidated: ((UUID) -> Void)?
 
     override func invalidateIntrinsicContentSize() {
         super.invalidateIntrinsicContentSize()
-        onIntrinsicSizeInvalidated?()
+        guard let representedMessageID else { return }
+        onIntrinsicSizeInvalidated?(representedMessageID)
+    }
+}
+
+private final class TranscriptMessageCellView: NSTableCellView {
+    let hostingView: IntrinsicInvalidatingHostingView
+
+    override init(frame frameRect: NSRect) {
+        hostingView = IntrinsicInvalidatingHostingView(rootView: AnyView(EmptyView()))
+        super.init(frame: frameRect)
+        hostingView.identifier = NSUserInterfaceItemIdentifier("IRCTranscriptHostedRow")
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        hostingView.sizingOptions = [.intrinsicContentSize]
+        addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    convenience init() {
+        self.init(frame: .zero)
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        hostingView.representedMessageID = nil
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 }
 
