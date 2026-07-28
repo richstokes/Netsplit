@@ -1381,6 +1381,7 @@ private struct ConversationTranscript: View {
     let messageSpacing: IRCMessageSpacing
     let channelEventVisibility: IRCChannelEventVisibility
     @ObservedObject private var updates: IRCRevisionSignal
+    @State private var previewExpansion = IRCMessagePreviewExpansionState()
 #if DEBUG
     @State private var debugInstanceID = UUID()
     @State private var debugLastRevisionLog = Date.distantPast
@@ -1474,7 +1475,10 @@ private struct ConversationTranscript: View {
             ].joined(separator: "|"),
             makeRow: { message in
                 AnyView(
-                    messageRow(for: message)
+                    messageRow(
+                        for: message,
+                        previewExpansion: previewExpansionBinding(for: message.id)
+                    )
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, textMetrics.spacing(24))
                         .environment(\.ircTextMetrics, textMetrics)
@@ -1491,6 +1495,11 @@ private struct ConversationTranscript: View {
         .accessibilityAddTraits(.updatesFrequently)
         .ircCustomWindowBackground()
         .accessibilityLabel("Conversation messages")
+        .onChange(of: allMessages.first?.id) { _, _ in
+            previewExpansion.retainMessages(
+                withIDs: Set(allMessages.lazy.map(\.id))
+            )
+        }
 #if DEBUG
         .onAppear {
             TranscriptDebugLog.state("appeared", context: debugContext)
@@ -1507,7 +1516,10 @@ private struct ConversationTranscript: View {
 #endif
     }
 
-    private func messageRow(for message: IRCMessage) -> some View {
+    private func messageRow(
+        for message: IRCMessage,
+        previewExpansion: Binding<Bool>
+    ) -> some View {
         MessageRow(
             message: message,
             state: state,
@@ -1518,9 +1530,21 @@ private struct ConversationTranscript: View {
             rendersIRCFormatting: rendersIRCFormatting,
             automaticallyPreviewsLinks: automaticallyPreviewsLinks,
             automaticallyPreviewsImages: automaticallyPreviewsImages,
-            messageSpacing: messageSpacing
+            messageSpacing: messageSpacing,
+            previewExpansion: previewExpansion
         )
         .id(message.id)
+    }
+
+    private func previewExpansionBinding(for messageID: UUID) -> Binding<Bool> {
+        Binding(
+            get: {
+                previewExpansion.isExpanded(for: messageID)
+            },
+            set: { isExpanded in
+                previewExpansion.setExpanded(isExpanded, for: messageID)
+            }
+        )
     }
 }
 
@@ -1972,6 +1996,7 @@ private struct MessageRow: View {
     let automaticallyPreviewsLinks: Bool
     let automaticallyPreviewsImages: Bool
     let messageSpacing: IRCMessageSpacing
+    @Binding var previewExpansion: Bool
     @State private var isSenderHovered = false
     @State private var showsFullSender = false
     @Environment(\.ircTextMetrics) private var textMetrics
@@ -2009,7 +2034,10 @@ private struct MessageRow: View {
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
-                    MessagePreviewStack(previews: previews)
+                    MessagePreviewStack(
+                        previews: previews,
+                        isExpanded: $previewExpansion
+                    )
                         .padding(.leading, textMetrics.spacing(20))
                 }
             } else {
@@ -2038,7 +2066,10 @@ private struct MessageRow: View {
                             .foregroundStyle(.primary)
                             .textSelection(.enabled)
                     }
-                    MessagePreviewStack(previews: previews)
+                    MessagePreviewStack(
+                        previews: previews,
+                        isExpanded: $previewExpansion
+                    )
                         .padding(.leading, senderColumnWidth + textMetrics.spacing(10))
                 }
             }

@@ -937,6 +937,31 @@ struct IRCModelsAndPolicyTests {
         ])
     }
 
+    @Test("Preview disclosure state follows message identity across row reuse")
+    func preservesCollapsedPreviewStateByMessage() {
+        let firstMessageID = UUID()
+        let secondMessageID = UUID()
+        var expansion = IRCMessagePreviewExpansionState()
+
+        #expect(expansion.isExpanded(for: firstMessageID))
+        #expect(expansion.isExpanded(for: secondMessageID))
+
+        expansion.setExpanded(false, for: firstMessageID)
+
+        #expect(!expansion.isExpanded(for: firstMessageID))
+        #expect(expansion.isExpanded(for: secondMessageID))
+
+        expansion.setExpanded(false, for: secondMessageID)
+        expansion.setExpanded(true, for: firstMessageID)
+
+        #expect(expansion.isExpanded(for: firstMessageID))
+        #expect(!expansion.isExpanded(for: secondMessageID))
+
+        expansion.retainMessages(withIDs: [firstMessageID])
+
+        #expect(expansion.isExpanded(for: secondMessageID))
+    }
+
     @Test("Automatic previews only appear for regular channel and direct messages")
     func limitsAutomaticPreviewsToRegularConversationMessages() {
         let notice = IRCMessage(

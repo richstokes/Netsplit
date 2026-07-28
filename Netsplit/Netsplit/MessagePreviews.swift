@@ -97,9 +97,29 @@ enum IRCPreviewFailureReason: Equatable {
     }
 }
 
+struct IRCMessagePreviewExpansionState: Equatable {
+    private var collapsedMessageIDs: Set<UUID> = []
+
+    func isExpanded(for messageID: UUID) -> Bool {
+        !collapsedMessageIDs.contains(messageID)
+    }
+
+    mutating func setExpanded(_ isExpanded: Bool, for messageID: UUID) {
+        if isExpanded {
+            collapsedMessageIDs.remove(messageID)
+        } else {
+            collapsedMessageIDs.insert(messageID)
+        }
+    }
+
+    mutating func retainMessages(withIDs messageIDs: Set<UUID>) {
+        collapsedMessageIDs.formIntersection(messageIDs)
+    }
+}
+
 struct MessagePreviewStack: View {
     let previews: [IRCMessagePreview]
-    @State private var isExpanded = true
+    @Binding var isExpanded: Bool
 
     var body: some View {
         if !previews.isEmpty {
