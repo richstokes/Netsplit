@@ -133,13 +133,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var lastViewportWidth: CGFloat = 0
         private var pendingHeightMessageIDs = Set<UUID>()
         private var heightInvalidationScheduled = false
+        private var fullHeightRefreshScheduled = false
         private var pendingTailWorkItem: DispatchWorkItem?
         private var lastAnimatedScroll = Date.distantPast
         private var isAwaitingTailPosition = false
         private var pendingTailStartOrigin: NSPoint?
         private var isRestoringReadingPosition = false
-        private var activeReadingAnchor: ReadingAnchor?
-        private var readingPositionRestoreGeneration = 0
         private var tailPositionGeneration = 0
         private var attachmentGeneration = 0
         private var hasPendingPositionReport = false
@@ -204,8 +203,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
             isAwaitingTailPosition = false
             pendingTailStartOrigin = nil
             isRestoringReadingPosition = false
-            activeReadingAnchor = nil
-            readingPositionRestoreGeneration &+= 1
+            pendingHeightMessageIDs.removeAll()
+            heightInvalidationScheduled = false
+            fullHeightRefreshScheduled = false
             tailPositionGeneration &+= 1
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
@@ -244,7 +244,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 tableView.rowHeight = parent.estimatedRowHeight
                 tableView.reloadData()
                 adjustTopSpacerForShortContent()
-                scheduleReadingPositionRestoration(
+                // Restore before updateNSView can paint the reloaded table.
+                // The deferred full-height sweep anchors again around row
+                // remeasurement once the new SwiftUI configuration settles.
+                finishReadingPositionRestoration(
                     readingAnchor,
                     event: "configuration-reloaded-anchor-restored"
                 )
@@ -346,11 +349,14 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
 
             adjustTopSpacerForShortContent()
-            scheduleReadingPositionRestoration(
+            finishReadingPositionRestoration(
                 readingAnchor,
                 event: "messages-reloaded-anchor-restored"
             )
             restorePendingTailStartOrigin()
+            // Restoration recomputes followingTail from the new geometry.
+            // Do not replace a restored reading anchor with a tail jump in
+            // the same update merely because it now fits within the viewport.
             if readingAnchor == nil, followingTail, hasPositionedInitially {
                 scheduleTailPosition()
             }
@@ -455,12 +461,6 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
         private func userDidScroll() {
-            if isRestoringReadingPosition {
-                readingPositionRestoreGeneration &+= 1
-                activeReadingAnchor = nil
-                isRestoringReadingPosition = false
-                scrollPositionDidChange(event: "reading-position-restoration-cancelled")
-            }
             guard isAwaitingTailPosition else { return }
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
@@ -510,8 +510,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.attachmentGeneration == generation else { return }
                 self.hasPendingWidthRefresh = false
-                self.refreshVisibleRowsForCurrentWidth()
+                // Mark the full sweep first so intrinsic-size invalidations
+                // caused by replacing the visible root views fold into it.
                 self.scheduleHeightRefresh()
+                self.refreshVisibleRowsForCurrentWidth()
             }
         }
 
@@ -549,9 +551,25 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
         private func scheduleHeightRefresh() {
-            guard let tableView else { return }
+            guard let tableView, !fullHeightRefreshScheduled else { return }
+            fullHeightRefreshScheduled = true
+            let generation = attachmentGeneration
             DispatchQueue.main.async { [weak self, weak tableView] in
-                guard let self, let tableView else { return }
+                guard let self else { return }
+                guard self.attachmentGeneration == generation,
+                      let tableView,
+                      self.tableView === tableView else {
+                    if self.attachmentGeneration == generation {
+                        self.fullHeightRefreshScheduled = false
+                    }
+                    return
+                }
+                defer {
+                    // Any row-specific invalidations received while this full
+                    // sweep was pending are covered by the sweep.
+                    self.pendingHeightMessageIDs.removeAll()
+                    self.fullHeightRefreshScheduled = false
+                }
                 let readingAnchor = self.beginReadingPositionRestoration()
                 let messageRows = IndexSet(
                     integersIn: 1..<(self.messages.count + 1)
@@ -563,6 +581,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     readingAnchor,
                     event: "height-refresh-anchor-restored"
                 )
+                // A restored reader position wins over any tail classification
+                // produced while recalculating the new geometry.
                 if readingAnchor == nil, self.followingTail {
                     if self.isAwaitingTailPosition {
                         self.restorePendingTailStartOrigin()
@@ -575,10 +595,19 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         private func scheduleHeightInvalidation(for messageID: UUID) {
             pendingHeightMessageIDs.insert(messageID)
+            guard !fullHeightRefreshScheduled else { return }
             guard !heightInvalidationScheduled else { return }
             heightInvalidationScheduled = true
+            let generation = attachmentGeneration
             DispatchQueue.main.async { [weak self] in
-                guard let self, let tableView = self.tableView else { return }
+                guard let self else { return }
+                guard self.attachmentGeneration == generation,
+                      let tableView = self.tableView else {
+                    if self.attachmentGeneration == generation {
+                        self.heightInvalidationScheduled = false
+                    }
+                    return
+                }
                 self.heightInvalidationScheduled = false
                 let rows = IndexSet(self.pendingHeightMessageIDs.compactMap { messageID in
                     guard let messageIndex = self.messages.firstIndex(where: { $0.id == messageID }) else {
@@ -610,6 +639,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // Appends already have one coalesced tail move pending. Only
                 // genuine later resizes, such as an async preview, reposition
                 // from the height path.
+                // A restored reader position still wins if its new geometry
+                // happens to classify it as being at the tail.
                 if readingAnchor == nil, self.followingTail {
                     if self.isAwaitingTailPosition {
                         self.restorePendingTailStartOrigin()
@@ -624,9 +655,6 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
         private func beginReadingPositionRestoration() -> ReadingAnchor? {
-            if let activeReadingAnchor {
-                return activeReadingAnchor
-            }
             guard hasPositionedInitially,
                   !followingTail,
                   let tableView,
@@ -646,7 +674,6 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
             guard !candidates.isEmpty else { return nil }
             let anchor = ReadingAnchor(candidates: candidates)
-            activeReadingAnchor = anchor
             isRestoringReadingPosition = true
             return anchor
         }
@@ -656,27 +683,11 @@ struct IRCTranscriptTable: NSViewRepresentable {
             event: String
         ) {
             guard let anchor else { return }
-            readingPositionRestoreGeneration &+= 1
-            restoreReadingPosition(anchor)
-            activeReadingAnchor = nil
-            isRestoringReadingPosition = false
-            scrollPositionDidChange(event: event)
-        }
-
-        private func scheduleReadingPositionRestoration(
-            _ anchor: ReadingAnchor?,
-            event: String
-        ) {
-            guard let anchor else { return }
-            readingPositionRestoreGeneration &+= 1
-            let restoreGeneration = readingPositionRestoreGeneration
-            let attachmentGeneration = self.attachmentGeneration
-            DispatchQueue.main.async { [weak self] in
-                guard let self,
-                      self.attachmentGeneration == attachmentGeneration,
-                      self.readingPositionRestoreGeneration == restoreGeneration else { return }
-                self.finishReadingPositionRestoration(anchor, event: event)
+            defer {
+                isRestoringReadingPosition = false
+                scrollPositionDidChange(event: event)
             }
+            restoreReadingPosition(anchor)
         }
 
         private func restoreReadingPosition(_ anchor: ReadingAnchor) {
