@@ -141,6 +141,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var observers: [NSObjectProtocol] = []
         private var hasPositionedInitially = false
         private var initialPositionScheduled = false
+        private var initialRevealScheduled = false
         private var followingTail: Bool
         private var topSpacerHeight = topInset
         private var lastViewportWidth: CGFloat = 0
@@ -221,6 +222,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             isRestoringReadingPosition = false
             pendingHeightMessageIDs.removeAll()
             initialPositionScheduled = false
+            initialRevealScheduled = false
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
             tailPositionGeneration &+= 1
@@ -330,7 +332,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
         func scheduleInitialPosition() {
             guard !messages.isEmpty,
                   !hasPositionedInitially,
-                  !initialPositionScheduled else { return }
+                  !initialPositionScheduled,
+                  !initialRevealScheduled else { return }
             initialPositionScheduled = true
             let generation = attachmentGeneration
             DispatchQueue.main.async { [weak self] in
@@ -366,14 +369,70 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     self.scheduleInitialPosition()
                     return
                 }
-                self.hasPositionedInitially = true
-                scrollView.alphaValue = 1
                 let geometry = self.geometry()
+                scrollView.displayIfNeeded()
+                self.scheduleInitialReveal(
+                    after: geometry,
+                    generation: generation
+                )
+            }
+        }
+
+        private func scheduleInitialReveal(
+            after settledGeometry: IRCTranscriptTableGeometry,
+            generation: Int
+        ) {
+            guard !initialRevealScheduled else { return }
+            initialRevealScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.attachmentGeneration == generation else { return }
+                self.initialRevealScheduled = false
+                guard let scrollView = self.scrollView,
+                      let tableView = self.tableView,
+                      !self.hasPositionedInitially else { return }
+                scrollView.layoutSubtreeIfNeeded()
+                tableView.layoutSubtreeIfNeeded()
+                let geometry = self.geometry()
+                guard !self.hasPendingInitialLayoutWork,
+                      self.initialGeometryMatches(settledGeometry, geometry),
+                      IRCTranscriptScrollPolicy.isAtBottom(
+                          visibleBounds: geometry.visibleBounds,
+                          contentBounds: geometry.contentBounds,
+                          contentIsFlipped: geometry.contentIsFlipped,
+                          tolerance: 1
+                      ) else {
+                    self.scheduleInitialPosition()
+                    return
+                }
+
+                // Commit settled content in a hidden turn, then reveal it
+                // without another scroll mutation or implicit animation.
+                self.hasPositionedInitially = true
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0
+                    context.allowsImplicitAnimation = false
+                    scrollView.alphaValue = 1
+                }
                 self.parent.onInitialPositioned?(geometry)
 #if DEBUG
                 self.parent.onGeometryChange?("attached", geometry)
 #endif
             }
+        }
+
+        private func initialGeometryMatches(
+            _ lhs: IRCTranscriptTableGeometry,
+            _ rhs: IRCTranscriptTableGeometry
+        ) -> Bool {
+            let tolerance: CGFloat = 0.5
+            return abs(lhs.visibleBounds.minX - rhs.visibleBounds.minX) <= tolerance
+                && abs(lhs.visibleBounds.minY - rhs.visibleBounds.minY) <= tolerance
+                && abs(lhs.visibleBounds.width - rhs.visibleBounds.width) <= tolerance
+                && abs(lhs.visibleBounds.height - rhs.visibleBounds.height) <= tolerance
+                && abs(lhs.documentFrame.minX - rhs.documentFrame.minX) <= tolerance
+                && abs(lhs.documentFrame.minY - rhs.documentFrame.minY) <= tolerance
+                && abs(lhs.documentFrame.width - rhs.documentFrame.width) <= tolerance
+                && abs(lhs.documentFrame.height - rhs.documentFrame.height) <= tolerance
         }
 
         private var hasPendingInitialLayoutWork: Bool {
@@ -523,6 +582,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         private func scrollPositionDidChange(event: String) {
             let geometry = geometry()
+            guard hasPositionedInitially else {
+#if DEBUG
+                scheduleDebugGeometryReport(event: event)
+#endif
+                return
+            }
             if isAwaitingTailPosition || isRestoringReadingPosition {
 #if DEBUG
                 scheduleDebugGeometryReport(event: event)
