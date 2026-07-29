@@ -1413,7 +1413,7 @@ private struct ConversationTranscript: View {
     let automaticallyPreviewsImages: Bool
     let messageSpacing: IRCMessageSpacing
     let channelEventVisibility: IRCChannelEventVisibility
-    let previewExpansion: IRCMessagePreviewExpansionStore
+    @ObservedObject var previewExpansion: IRCMessagePreviewExpansionStore
     @ObservedObject private var updates: IRCRevisionSignal
 #if DEBUG
     @State private var debugInstanceID = UUID()
@@ -1457,6 +1457,14 @@ private struct ConversationTranscript: View {
             for: selection,
             channelEventVisibility: channelEventVisibility
         )
+        let previewLayoutInvalidation: IRCTranscriptRowLayoutInvalidation? =
+            previewExpansion.latestLayoutChange.flatMap { change in
+            guard change.selection == selection else { return nil }
+            return IRCTranscriptRowLayoutInvalidation(
+                messageID: change.messageID,
+                revision: change.revision
+            )
+        }
 #if DEBUG
         let debugContext = TranscriptDebugContext(
             instanceID: debugInstanceID,
@@ -1508,6 +1516,7 @@ private struct ConversationTranscript: View {
                 String(describing: colorScheme),
                 state.applicationAppearance.rawValue
             ].joined(separator: "|"),
+            rowLayoutInvalidation: previewLayoutInvalidation,
             makeRow: { message in
                 AnyView(
                     messageRow(for: message)

@@ -14,6 +14,11 @@ struct IRCTranscriptTableGeometry {
     let contentIsFlipped: Bool
 }
 
+struct IRCTranscriptRowLayoutInvalidation: Equatable {
+    let messageID: UUID
+    let revision: UInt64
+}
+
 /// A view-based AppKit table that realizes only visible transcript rows while
 /// retaining the existing SwiftUI row implementation and its interactions.
 struct IRCTranscriptTable: NSViewRepresentable {
@@ -24,6 +29,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
     let estimatedRowHeight: CGFloat
     let rowSpacing: CGFloat
     let renderConfiguration: String
+    let rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation?
     let makeRow: (IRCMessage) -> AnyView
     let onInitialPositioned: ((IRCTranscriptTableGeometry) -> Void)?
     let onFollowingTailChange: ((Bool, IRCTranscriptTableGeometry) -> Void)?
@@ -36,6 +42,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         estimatedRowHeight: CGFloat,
         rowSpacing: CGFloat,
         renderConfiguration: String,
+        rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation? = nil,
         makeRow: @escaping (IRCMessage) -> AnyView,
         onInitialPositioned: ((IRCTranscriptTableGeometry) -> Void)? = nil,
         onFollowingTailChange: ((Bool, IRCTranscriptTableGeometry) -> Void)? = nil,
@@ -47,6 +54,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         self.estimatedRowHeight = estimatedRowHeight
         self.rowSpacing = rowSpacing
         self.renderConfiguration = renderConfiguration
+        self.rowLayoutInvalidation = rowLayoutInvalidation
         self.makeRow = makeRow
         self.onInitialPositioned = onInitialPositioned
         self.onFollowingTailChange = onFollowingTailChange
@@ -127,6 +135,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var parent: IRCTranscriptTable
         private var messages: [IRCMessage]
         private var renderConfiguration: String
+        private var rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation?
         private weak var scrollView: TranscriptScrollView?
         private weak var tableView: NSTableView?
         private var observers: [NSObjectProtocol] = []
@@ -155,6 +164,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             self.parent = parent
             messages = parent.messages
             renderConfiguration = parent.renderConfiguration
+            rowLayoutInvalidation = parent.rowLayoutInvalidation
             followingTail = true
         }
 
@@ -234,8 +244,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
         func update(parent: IRCTranscriptTable) {
             let oldMessages = messages
             let configurationChanged = renderConfiguration != parent.renderConfiguration
+            let rowLayoutChanged = rowLayoutInvalidation != parent.rowLayoutInvalidation
             self.parent = parent
             renderConfiguration = parent.renderConfiguration
+            rowLayoutInvalidation = parent.rowLayoutInvalidation
 
             guard let tableView else {
                 messages = parent.messages
@@ -259,6 +271,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 scheduleHeightRefresh()
             } else if parent.messages != oldMessages {
                 applyMessageUpdate(from: oldMessages, to: parent.messages, in: tableView)
+            }
+
+            if rowLayoutChanged, let rowLayoutInvalidation {
+                reloadForRowLayoutChange(
+                    rowLayoutInvalidation,
+                    in: tableView
+                )
             }
 
             if !hasPositionedInitially, !messages.isEmpty {
@@ -329,6 +348,26 @@ struct IRCTranscriptTable: NSViewRepresentable {
         // Keep updates to full reloadData(), insertRows, and
         // noteHeightOfRows. Row-scoped reloadData(forRowIndexes:columnIndexes:)
         // lays out hosted subviews incorrectly with automatic row heights.
+        private func reloadForRowLayoutChange(
+            _ invalidation: IRCTranscriptRowLayoutInvalidation,
+            in tableView: NSTableView
+        ) {
+            guard messages.contains(where: { $0.id == invalidation.messageID }) else {
+                return
+            }
+            let readingAnchor = beginReadingPositionRestoration()
+            tableView.reloadData()
+            tableView.layoutSubtreeIfNeeded()
+            adjustTopSpacerForShortContent()
+            finishReadingPositionRestoration(
+                readingAnchor,
+                event: "row-layout-reloaded-anchor-restored"
+            )
+            if readingAnchor == nil, followingTail {
+                positionAtTail()
+            }
+        }
+
         private func applyMessageUpdate(
             from oldMessages: [IRCMessage],
             to newMessages: [IRCMessage],
@@ -627,6 +666,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     guard let hostingView = self.hostingView(at: row, in: tableView) else {
                         return nil
                     }
+                    hostingView.layoutSubtreeIfNeeded()
                     let currentHeight = tableView.rect(ofRow: row).height
                     let proposedHeight = hostingView.fittingSize.height
                     guard currentHeight.isFinite,

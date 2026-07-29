@@ -98,8 +98,16 @@ enum IRCPreviewFailureReason: Equatable {
     }
 }
 
+struct IRCMessagePreviewLayoutChange: Equatable {
+    let selection: SidebarItem
+    let messageID: UUID
+    let revision: UInt64
+}
+
 final class IRCMessagePreviewExpansionStore: ObservableObject {
-    @Published private var collapsedMessageIDsBySelection: [SidebarItem: Set<UUID>] = [:]
+    @Published private(set) var latestLayoutChange: IRCMessagePreviewLayoutChange?
+    private var collapsedMessageIDsBySelection: [SidebarItem: Set<UUID>] = [:]
+    private var nextLayoutRevision: UInt64 = 0
 
     func isExpanded(for messageID: UUID, in selection: SidebarItem) -> Bool {
         !(collapsedMessageIDsBySelection[selection]?.contains(messageID) ?? false)
@@ -118,6 +126,9 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
         for messageID: UUID,
         in selection: SidebarItem
     ) {
+        guard isExpanded != self.isExpanded(for: messageID, in: selection) else {
+            return
+        }
         if isExpanded {
             collapsedMessageIDsBySelection[selection]?.remove(messageID)
             if collapsedMessageIDsBySelection[selection]?.isEmpty == true {
@@ -126,6 +137,12 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
         } else {
             collapsedMessageIDsBySelection[selection, default: []].insert(messageID)
         }
+        nextLayoutRevision &+= 1
+        latestLayoutChange = IRCMessagePreviewLayoutChange(
+            selection: selection,
+            messageID: messageID,
+            revision: nextLayoutRevision
+        )
     }
 
     func retainMessages(withIDs messageIDs: Set<UUID>, in selection: SidebarItem) {

@@ -1033,6 +1033,87 @@ struct IRCModelsAndPolicyTests {
         #expect(renderedExpansion == false)
     }
 
+    @Test("Re-expanding a retained preview updates its native transcript row height")
+    @MainActor
+    func remeasuresRetainedPreviewAfterExpansion() async throws {
+        let messages = (0..<5).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        let targetMessage = try #require(messages.last)
+        let selection = SidebarItem.channel(UUID())
+        let expansion = IRCMessagePreviewExpansionStore()
+        var didPositionInitially = false
+
+        // Simulate revisiting a channel whose preview was collapsed before
+        // this transcript and its reusable hosting cells were constructed.
+        expansion.setExpanded(
+            false,
+            for: targetMessage.id,
+            in: selection
+        )
+
+        let hostingController = NSHostingController(
+            rootView: AnyView(
+                PreviewExpansionHeightTestTranscript(
+                    messages: messages,
+                    targetMessageID: targetMessage.id,
+                    selection: selection,
+                    expansion: expansion,
+                    onInitialPositioned: { didPositionInitially = true }
+                )
+                .frame(width: 320, height: 240)
+            )
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil {
+            didPositionInitially
+                && Self.view(
+                    withIdentifier: "IRCTranscriptTable",
+                    in: hostingController.view
+                ) != nil
+        }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let targetRow = messages.count
+        let collapsedHeight = tableView.rect(ofRow: targetRow).height
+
+        expansion.setExpanded(
+            true,
+            for: targetMessage.id,
+            in: selection
+        )
+
+        try await Self.waitUntil(timeout: .seconds(3)) {
+            tableView.rect(ofRow: targetRow).height > collapsedHeight + 50
+        }
+        #expect(tableView.rect(ofRow: targetRow).height > collapsedHeight + 50)
+
+        // Drain any coalesced AppKit invalidation before the next serialized
+        // integration test starts.
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Automatic previews only appear for regular channel and direct messages")
     func limitsAutomaticPreviewsToRegularConversationMessages() {
         let notice = IRCMessage(
@@ -3019,6 +3100,66 @@ private struct PreviewExpansionTestReporter: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         onRender(isExpanded)
+    }
+}
+
+private struct PreviewExpansionHeightTestTranscript: View {
+    let messages: [IRCMessage]
+    let targetMessageID: UUID
+    let selection: SidebarItem
+    @ObservedObject var expansion: IRCMessagePreviewExpansionStore
+    let onInitialPositioned: () -> Void
+
+    var body: some View {
+        let rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation? =
+            expansion.latestLayoutChange.flatMap { change in
+            guard change.selection == selection else { return nil }
+            return IRCTranscriptRowLayoutInvalidation(
+                messageID: change.messageID,
+                revision: change.revision
+            )
+        }
+        IRCTranscriptTable(
+            messages: messages,
+            estimatedRowHeight: 24,
+            rowSpacing: 0,
+            renderConfiguration: "preview-height-test",
+            rowLayoutInvalidation: rowLayoutInvalidation,
+            makeRow: { message in
+                AnyView(
+                    PreviewExpansionHeightTestRow(
+                        messageID: message.id,
+                        targetMessageID: targetMessageID,
+                        selection: selection,
+                        expansion: expansion
+                    )
+                )
+            },
+            onInitialPositioned: { _ in onInitialPositioned() },
+            onFollowingTailChange: { _, _ in },
+            onTailPositioned: { _, _ in },
+            onGeometryChange: { _, _ in }
+        )
+    }
+}
+
+private struct PreviewExpansionHeightTestRow: View {
+    let messageID: UUID
+    let targetMessageID: UUID
+    let selection: SidebarItem
+    @ObservedObject var expansion: IRCMessagePreviewExpansionStore
+
+    var body: some View {
+        let isExpanded = expansion.isExpanded(
+            for: messageID,
+            in: selection
+        )
+        Color.clear
+            .frame(
+                maxWidth: .infinity,
+                minHeight: messageID == targetMessageID && isExpanded ? 120 : 30,
+                maxHeight: messageID == targetMessageID && isExpanded ? 120 : 30
+            )
     }
 }
 
