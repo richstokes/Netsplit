@@ -812,6 +812,9 @@ private struct ConversationView: View {
 
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
+                    // Keep this identity stable across selections. The native
+                    // transcript swaps hidden content in place after measuring
+                    // it; rebuilding here can expose AppKit's settling frames.
                     ConversationTranscript(
                         state: state,
                         selection: selection,
@@ -825,14 +828,6 @@ private struct ConversationView: View {
                         channelEventVisibility: state.channelEventVisibility,
                         previewExpansion: previewExpansion
                     )
-                    .id(selection)
-                    .transaction { transaction in
-                        // Sidebar/List selection can carry an animated
-                        // transaction into this identity replacement. The
-                        // transcript performs its own explicit AppKit tail
-                        // animation; channel entry itself must be stationary.
-                        transaction.animation = nil
-                    }
                     HStack(alignment: .bottom, spacing: 12) {
                         ZStack(alignment: .topLeading) {
                             IRCComposerTextView(
@@ -1507,6 +1502,7 @@ private struct ConversationTranscript: View {
 #endif
 
         IRCTranscriptTable(
+            contentIdentity: selection,
             messages: allMessages,
             updateRevision: revision,
             estimatedRowHeight: textMetrics.size(24),

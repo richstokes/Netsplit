@@ -22,6 +22,10 @@ struct IRCTranscriptRowLayoutInvalidation: Equatable {
 /// A view-based AppKit table that realizes only visible transcript rows while
 /// retaining the existing SwiftUI row implementation and its interactions.
 struct IRCTranscriptTable: NSViewRepresentable {
+    /// Identifies the conversation displayed by this retained native table.
+    /// A change replaces its content in place instead of rebuilding the
+    /// NSScrollView/NSTableView hierarchy.
+    let contentIdentity: SidebarItem?
     let messages: [IRCMessage]
     /// Makes the representable update when its conversation-scoped signal
     /// advances without treating that signal as a row-render configuration.
@@ -37,6 +41,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
     let onGeometryChange: ((String, IRCTranscriptTableGeometry) -> Void)?
 
     init(
+        contentIdentity: SidebarItem? = nil,
         messages: [IRCMessage],
         updateRevision: Int = 0,
         estimatedRowHeight: CGFloat,
@@ -49,6 +54,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         onTailPositioned: ((Bool, IRCTranscriptTableGeometry) -> Void)? = nil,
         onGeometryChange: ((String, IRCTranscriptTableGeometry) -> Void)? = nil
     ) {
+        self.contentIdentity = contentIdentity
         self.messages = messages
         self.updateRevision = updateRevision
         self.estimatedRowHeight = estimatedRowHeight
@@ -133,6 +139,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         )
 
         private var parent: IRCTranscriptTable
+        private var contentIdentity: SidebarItem?
         private var messages: [IRCMessage]
         private var renderConfiguration: String
         private var rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation?
@@ -163,6 +170,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         init(parent: IRCTranscriptTable) {
             self.parent = parent
+            contentIdentity = parent.contentIdentity
             messages = parent.messages
             renderConfiguration = parent.renderConfiguration
             rowLayoutInvalidation = parent.rowLayoutInvalidation
@@ -245,18 +253,26 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         func update(parent: IRCTranscriptTable) {
             let oldMessages = messages
+            let contentChanged = contentIdentity != parent.contentIdentity
             let configurationChanged = renderConfiguration != parent.renderConfiguration
             let rowLayoutChanged = rowLayoutInvalidation != parent.rowLayoutInvalidation
             self.parent = parent
+            contentIdentity = parent.contentIdentity
             renderConfiguration = parent.renderConfiguration
             rowLayoutInvalidation = parent.rowLayoutInvalidation
 
-            guard let tableView else {
+            guard let tableView, let scrollView else {
                 messages = parent.messages
                 return
             }
 
-            if configurationChanged {
+            if contentChanged {
+                replaceConversationContent(
+                    with: parent.messages,
+                    in: tableView,
+                    scrollView: scrollView
+                )
+            } else if configurationChanged {
                 let readingAnchor = beginReadingPositionRestoration()
                 messages = parent.messages
                 tableView.intercellSpacing.height = parent.rowSpacing
@@ -275,7 +291,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 applyMessageUpdate(from: oldMessages, to: parent.messages, in: tableView)
             }
 
-            if rowLayoutChanged, let rowLayoutInvalidation {
+            if !contentChanged, rowLayoutChanged, let rowLayoutInvalidation {
                 reloadForRowLayoutChange(
                     rowLayoutInvalidation,
                     in: tableView
@@ -285,6 +301,52 @@ struct IRCTranscriptTable: NSViewRepresentable {
             if !hasPositionedInitially, !messages.isEmpty {
                 scheduleInitialPosition()
             }
+        }
+
+        /// Reuse the native transcript hierarchy while giving each
+        /// conversation a fresh positioning and row-state lifecycle. The
+        /// replacement remains hidden until automatic row heights settle.
+        private func replaceConversationContent(
+            with newMessages: [IRCMessage],
+            in tableView: NSTableView,
+            scrollView: TranscriptScrollView
+        ) {
+            // Invalidate work queued for the outgoing conversation without
+            // detaching the observers or native view hierarchy.
+            attachmentGeneration &+= 1
+            pendingTailWorkItem?.cancel()
+            pendingTailWorkItem = nil
+            tailPositionGeneration &+= 1
+#if DEBUG
+            pendingDebugGeometryWorkItem?.cancel()
+            pendingDebugGeometryWorkItem = nil
+#endif
+
+            scrollView.alphaValue = 0
+            hasPositionedInitially = false
+            initialPositionScheduled = false
+            followingTail = true
+            topSpacerHeight = Self.topInset
+            pendingHeightMessageIDs.removeAll()
+            heightInvalidationScheduled = false
+            fullHeightRefreshScheduled = false
+            isAwaitingTailPosition = false
+            pendingTailStartOrigin = nil
+            isRestoringReadingPosition = false
+            hasPendingPositionReport = false
+            pendingFollowingTailReport = nil
+            hasPendingWidthRefresh = false
+            lastAnimatedScroll = .distantPast
+            lastViewportWidth = max(0, scrollView.contentView.bounds.width)
+
+            messages = newMessages
+            tableView.intercellSpacing.height = parent.rowSpacing
+            tableView.rowHeight = parent.estimatedRowHeight
+            tableView.reloadData()
+
+            // A full sweep gives automatic row heights their final width-aware
+            // values before scheduleInitialPosition reveals the new content.
+            scheduleHeightRefresh()
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int {
@@ -523,6 +585,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         private func scrollPositionDidChange(event: String) {
             let geometry = geometry()
+            guard hasPositionedInitially else {
+#if DEBUG
+                scheduleDebugGeometryReport(event: event)
+#endif
+                return
+            }
             if isAwaitingTailPosition || isRestoringReadingPosition {
 #if DEBUG
                 scheduleDebugGeometryReport(event: event)

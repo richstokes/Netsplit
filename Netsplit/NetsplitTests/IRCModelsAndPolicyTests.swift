@@ -2292,6 +2292,106 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
+    @Test("Native transcript retains its scroll view when conversation content changes")
+    @MainActor
+    func retainsNativeTranscriptAcrossConversationChanges() async throws {
+        var contentIdentity = SidebarItem.channel(UUID())
+        var messages = (0..<120).map {
+            IRCMessage(sender: "first", text: "First conversation message \($0)")
+        }
+        var initialGeometries: [IRCTranscriptTableGeometry] = []
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "conversation-replacement-test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { initialGeometries.append($0) },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 500)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        try await Self.waitUntil { initialGeometries.count == 1 }
+        let initialScrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        let initialTableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+
+        contentIdentity = .channel(UUID())
+        messages = (0..<75).map {
+            IRCMessage(
+                sender: "second",
+                text: String(repeating: "Second conversation message \($0). ", count: 3)
+            )
+        }
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        let hiddenScrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        #expect(hiddenScrollView === initialScrollView)
+        #expect(hiddenScrollView.alphaValue == 0)
+
+        try await Self.waitUntil { initialGeometries.count == 2 }
+        let finalScrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        let finalTableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let finalGeometry = try #require(initialGeometries.last)
+
+        #expect(finalScrollView === initialScrollView)
+        #expect(finalTableView === initialTableView)
+        #expect(finalTableView.numberOfRows == messages.count + 2)
+        #expect(finalScrollView.alphaValue == 1)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: finalGeometry.visibleBounds,
+            contentBounds: finalGeometry.contentBounds,
+            contentIsFlipped: finalGeometry.contentIsFlipped,
+            tolerance: 1
+        ))
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Native transcript reuses hosted cells without leaking row state or callbacks")
     @MainActor
     func reusesNativeTranscriptCells() async throws {
