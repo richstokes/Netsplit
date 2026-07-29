@@ -826,6 +826,13 @@ private struct ConversationView: View {
                         previewExpansion: previewExpansion
                     )
                     .id(selection)
+                    .transaction { transaction in
+                        // Sidebar/List selection can carry an animated
+                        // transaction into this identity replacement. The
+                        // transcript performs its own explicit AppKit tail
+                        // animation; channel entry itself must be stationary.
+                        transaction.animation = nil
+                    }
                     HStack(alignment: .bottom, spacing: 12) {
                         ZStack(alignment: .topLeading) {
                             IRCComposerTextView(

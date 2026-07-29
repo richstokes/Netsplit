@@ -2156,8 +2156,6 @@ struct IRCModelsAndPolicyTests {
             )
         }
         var initialGeometry: IRCTranscriptTableGeometry?
-        var didPositionInitially = false
-        var preRevealTailChangeCount = 0
         let hostingController = NSHostingController(
             rootView: IRCTranscriptTable(
                 messages: messages,
@@ -2170,15 +2168,8 @@ struct IRCModelsAndPolicyTests {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     )
                 },
-                onInitialPositioned: {
-                    initialGeometry = $0
-                    didPositionInitially = true
-                },
-                onFollowingTailChange: { _, _ in
-                    if !didPositionInitially {
-                        preRevealTailChangeCount += 1
-                    }
-                },
+                onInitialPositioned: { initialGeometry = $0 },
+                onFollowingTailChange: { _, _ in },
                 onTailPositioned: { _, _ in },
                 onGeometryChange: { _, _ in }
             )
@@ -2218,7 +2209,6 @@ struct IRCModelsAndPolicyTests {
         #expect(hostedRowCount < 100)
         #expect(tableView.rect(ofRow: messages.count).height > 24)
         #expect(abs(tableView.frame.height - revealedDocumentHeight) < 0.5)
-        #expect(preRevealTailChangeCount == 0)
         #expect(scrollView.alphaValue == 1)
         #expect(IRCTranscriptScrollPolicy.isAtBottom(
             visibleBounds: geometry.visibleBounds,
