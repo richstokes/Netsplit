@@ -140,6 +140,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private weak var tableView: NSTableView?
         private var observers: [NSObjectProtocol] = []
         private var hasPositionedInitially = false
+        private var initialPositionScheduled = false
         private var followingTail: Bool
         private var topSpacerHeight = topInset
         private var lastViewportWidth: CGFloat = 0
@@ -219,6 +220,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pendingTailStartOrigin = nil
             isRestoringReadingPosition = false
             pendingHeightMessageIDs.removeAll()
+            initialPositionScheduled = false
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
             tailPositionGeneration &+= 1
@@ -326,12 +328,33 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
         func scheduleInitialPosition() {
-            guard !messages.isEmpty else { return }
+            guard !messages.isEmpty,
+                  !hasPositionedInitially,
+                  !initialPositionScheduled else { return }
+            initialPositionScheduled = true
+            let generation = attachmentGeneration
             DispatchQueue.main.async { [weak self] in
-                guard let self,
-                      let scrollView = self.scrollView,
-                      self.tableView != nil,
+                guard let self, self.attachmentGeneration == generation else { return }
+                self.initialPositionScheduled = false
+                guard let scrollView = self.scrollView,
+                      let tableView = self.tableView,
                       !self.hasPositionedInitially else { return }
+                scrollView.layoutSubtreeIfNeeded()
+                tableView.layoutSubtreeIfNeeded()
+                let viewportSize = scrollView.contentView.bounds.size
+                guard viewportSize.width > 1,
+                      viewportSize.height > 1,
+                      tableView.bounds.width > 1 else {
+                    // A newly selected detail can briefly be realized at
+                    // zero size. Revealing or tail-positioning in that state
+                    // produces a visible second correction after split-view
+                    // layout supplies the real viewport.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { [weak self] in
+                        guard let self, self.attachmentGeneration == generation else { return }
+                        self.scheduleInitialPosition()
+                    }
+                    return
+                }
                 self.positionAtTail()
                 self.adjustTopSpacerForShortContent()
                 self.positionAtTail()

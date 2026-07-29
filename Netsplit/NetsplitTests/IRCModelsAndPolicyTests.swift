@@ -2148,6 +2148,80 @@ struct IRCModelsAndPolicyTests {
         ))
     }
 
+    @Test("Native transcript waits for a real viewport before initial positioning")
+    @MainActor
+    func defersInitialPositionUntilViewportIsLaidOut() async throws {
+        let messages = (0..<200).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var transcriptHeight: CGFloat = 0
+        var initialGeometry: IRCTranscriptTableGeometry?
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "deferred-initial-position-test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { initialGeometry = $0 },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: transcriptHeight)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 0)
+        hostingController.view.layoutSubtreeIfNeeded()
+        let initialScrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(initialGeometry == nil)
+        #expect(initialScrollView.alphaValue == 0)
+
+        transcriptHeight = 240
+        hostingController.rootView = rootView()
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        try await Self.waitUntil {
+            (initialGeometry?.visibleBounds.width ?? 0) > 1
+                && (initialGeometry?.visibleBounds.height ?? 0) > 1
+        }
+        let geometry = try #require(initialGeometry)
+        let positionedScrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        #expect(positionedScrollView.alphaValue == 1)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: geometry.visibleBounds,
+            contentBounds: geometry.contentBounds,
+            contentIsFlipped: geometry.contentIsFlipped,
+            tolerance: 1
+        ))
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Native transcript reuses hosted cells without leaking row state or callbacks")
     @MainActor
     func reusesNativeTranscriptCells() async throws {
