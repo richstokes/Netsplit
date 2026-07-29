@@ -144,7 +144,7 @@ These commands require the appropriate server or channel privileges.
 | `/mode <#channel> <flags> [arguments]` | View or change channel modes. |
 | `/ban <mask> [#channel] [reason]` | Set a custom ban mask, then kick matching members after the server confirms it. Defaults to the current channel. |
 | `/invite <nickname> <#channel>` | Invite a user to a channel. |
-| `/kick <#channel> <nickname> [reason]` | Remove a user from a channel. |
+| `/kick [#channel] <nickname> [reason]` | Remove a user from a channel. Defaults to the current channel. |
 | `/kill <nickname> <reason>` | Disconnect a user from the network (IRC operator only). |
 
 ### Local controls

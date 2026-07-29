@@ -582,6 +582,35 @@ struct IRCModelsAndPolicyTests {
         ) == IRCBanCommand(mask: "*!*@*.example.com", channel: "#swift", reason: nil))
     }
 
+    @Test("Kick commands use an explicit channel or fall back to the current channel")
+    func parsesKickCommands() {
+        #expect(IRCKickCommand.parse(
+            "Alice",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == IRCKickCommand(channel: "#swift", nickname: "Alice", reason: nil))
+        #expect(IRCKickCommand.parse(
+            "Alice repeated abuse",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == IRCKickCommand(channel: "#swift", nickname: "Alice", reason: "repeated abuse"))
+        #expect(IRCKickCommand.parse(
+            "&help Alice repeated abuse",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == IRCKickCommand(channel: "&help", nickname: "Alice", reason: "repeated abuse"))
+        #expect(IRCKickCommand.parse(
+            "Alice",
+            defaultChannel: nil,
+            channelTypes: ["#", "&"]
+        ) == nil)
+        #expect(IRCKickCommand.parse(
+            "#swift",
+            defaultChannel: "#help",
+            channelTypes: ["#", "&"]
+        ) == nil)
+    }
+
     @Test("Custom ban masks match complete member identities with IRC wildcards")
     func matchesCustomBanMasks() {
         let alice = ChannelMember(

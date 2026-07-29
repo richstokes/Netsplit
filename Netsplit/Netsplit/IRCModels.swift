@@ -1476,6 +1476,31 @@ struct IRCBanCommand: Equatable {
     }
 }
 
+struct IRCKickCommand: Equatable {
+    var channel: String
+    var nickname: String
+    var reason: String?
+
+    static func parse(
+        _ argument: String,
+        defaultChannel: String?,
+        channelTypes: Set<Character>
+    ) -> IRCKickCommand? {
+        let fields = argument.split(maxSplits: 2, whereSeparator: \.isWhitespace).map(String.init)
+        guard let first = fields.first, !first.isEmpty else { return nil }
+
+        let hasExplicitChannel = first.first.map(channelTypes.contains) == true
+        let channel = hasExplicitChannel ? first : defaultChannel
+        let nicknameIndex = hasExplicitChannel ? 1 : 0
+        guard let channel, !channel.isEmpty, fields.indices.contains(nicknameIndex) else { return nil }
+
+        let nickname = fields[nicknameIndex]
+        let reasonFields = fields.dropFirst(nicknameIndex + 1)
+        let reason = reasonFields.isEmpty ? nil : reasonFields.joined(separator: " ")
+        return IRCKickCommand(channel: channel, nickname: nickname, reason: reason)
+    }
+}
+
 enum IRCBanConfirmationPolicy {
     static func pendingMaskIndex(
         in pendingMasks: [String],

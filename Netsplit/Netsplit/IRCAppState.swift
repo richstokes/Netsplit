@@ -2012,17 +2012,31 @@ final class IRCAppState: ObservableObject {
             connections[profile.id]?.send(command: "INVITE \(fields[0]) \(fields[1])")
             appendSystem("Inviting \(fields[0]) to \(fields[1])…", for: item)
         case "KICK":
-            let fields = argument.split(separator: " ", maxSplits: 2).map(String.init)
-            guard fields.count >= 2 else {
-                appendSystem("Usage: /kick #channel nickname [reason]", for: item)
+            let defaultChannel: String? = if case .channel(let channelID) = item {
+                channels.first(where: { $0.id == channelID })?.name
+            } else {
+                nil
+            }
+            guard let kick = IRCKickCommand.parse(
+                argument,
+                defaultChannel: defaultChannel,
+                channelTypes: features(for: profile.id).channelTypes
+            ) else {
+                appendSystem("Usage: /kick [#channel] nickname [reason]", for: item)
                 return
             }
-            let reason = fields.count > 2 ? fields[2] : nil
-            let key = kickKey(serverID: profile.id, channel: fields[0], nickname: fields[1])
-            pendingKicks[key] = PendingKick(serverID: profile.id, channel: fields[0], nickname: fields[1], destination: item)
-            let command = reason.map { "KICK \(fields[0]) \(fields[1]) :\($0)" } ?? "KICK \(fields[0]) \(fields[1])"
+            let key = kickKey(serverID: profile.id, channel: kick.channel, nickname: kick.nickname)
+            pendingKicks[key] = PendingKick(
+                serverID: profile.id,
+                channel: kick.channel,
+                nickname: kick.nickname,
+                destination: item
+            )
+            let command = kick.reason.map {
+                "KICK \(kick.channel) \(kick.nickname) :\($0)"
+            } ?? "KICK \(kick.channel) \(kick.nickname)"
             connections[profile.id]?.send(command: command)
-            appendSystem("Kicking \(fields[1]) from \(fields[0])…", for: item)
+            appendSystem("Kicking \(kick.nickname) from \(kick.channel)…", for: item)
         case "KILL":
             let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
             guard fields.count == 2 else {
