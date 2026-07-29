@@ -1725,6 +1725,7 @@ final class IRCAppState: ObservableObject {
         }
         guard let profile = profile(for: item) else { return }
         let localCommands: Set<String> = [
+            "CLEAR",
             "SHOWIGNORES", "IGNORE", "UNIGNORE",
             "SHOWMUTES", "MUTE", "UNMUTE",
             "QUIT", "DISCONNECT"
@@ -1734,6 +1735,12 @@ final class IRCAppState: ObservableObject {
         }
         let sessionID = sessionIDs[profile.id]
         switch command {
+        case "CLEAR":
+            guard argument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                appendSystem("Usage: /clear", for: item)
+                return
+            }
+            clearTranscript(for: item)
         case "SHOWIGNORES":
             let ignoredNicknames = (profile.ignoredNicknames ?? [])
                 .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
@@ -1948,10 +1955,13 @@ final class IRCAppState: ObservableObject {
             connections[profile.id]?.send(command: "WHO \(target)")
             appendSystem("Looking up \(target)…", for: item)
         case "MOTD":
-            pendingMOTDDestinations[profile.id] = item
             let target = argument.trimmingCharacters(in: .whitespacesAndNewlines)
-            connections[profile.id]?.send(command: target.isEmpty ? "MOTD" : "MOTD \(target)")
-            appendSystem("Requesting the message of the day…", for: item)
+            requestMOTD(
+                from: profile,
+                target: target,
+                deliveringTo: item,
+                announcesRequest: true
+            )
         case "TOPIC":
             executeTopic(argument, on: profile, from: item)
         case "MODE":
@@ -2209,7 +2219,7 @@ final class IRCAppState: ObservableObject {
         }
     }
 
-    private func handle(_ wire: IRCWireMessage, profile: ServerProfile) {
+    func handle(_ wire: IRCWireMessage, profile: ServerProfile) {
         let previousIncomingMessageTimestamp = incomingMessageTimestamp
         incomingMessageTimestamp = IRCServerTimeParser.date(from: wire.tags["time"] ?? nil)
         defer { incomingMessageTimestamp = previousIncomingMessageTimestamp }
@@ -2225,6 +2235,11 @@ final class IRCAppState: ObservableObject {
             connectionStatuses[profile.id] = .online
             cancelScheduledReconnect(for: profile.id, resetAttempts: true)
             appendSystem(wire.trailing ?? "Connected.", for: .server(profile.id))
+            requestMOTD(
+                from: profile,
+                deliveringTo: .server(profile.id),
+                announcesRequest: false
+            )
             runPostRegistrationSequence(for: profile)
         case "005":
             updateServerFeatures(from: wire, serverID: profile.id)
@@ -2893,6 +2908,19 @@ final class IRCAppState: ObservableObject {
             appendSystem(wire.trailing ?? "This server has no message of the day.", for: destination)
         default:
             break
+        }
+    }
+
+    private func requestMOTD(
+        from profile: ServerProfile,
+        target: String = "",
+        deliveringTo destination: SidebarItem,
+        announcesRequest: Bool
+    ) {
+        pendingMOTDDestinations[profile.id] = destination
+        connections[profile.id]?.send(command: target.isEmpty ? "MOTD" : "MOTD \(target)")
+        if announcesRequest {
+            appendSystem("Requesting the message of the day…", for: destination)
         }
     }
 
@@ -3999,6 +4027,12 @@ final class IRCAppState: ObservableObject {
 
     private func appendSystem(_ text: String, for item: SidebarItem) {
         append(IRCMessage(sender: "System", text: text, isSystem: true), for: item)
+    }
+
+    private func clearTranscript(for item: SidebarItem) {
+        guard let id = conversationID(for: item) else { return }
+        conversations[id] = []
+        messagesDidChange(for: id)
     }
 
     private func appendChannelEvent(

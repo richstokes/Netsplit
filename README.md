@@ -152,6 +152,7 @@ These commands require the appropriate server or channel privileges.
 
 | Command | Description |
 | --- | --- |
+| `/clear` | Clear the transcript for the selected server, channel, or private message. |
 | `/ignore <nickname>` | Hide messages and notices from a nickname on the current network. |
 | `/unignore <nickname>` | Restore messages and notices from a nickname on the current network. |
 | `/showignores` | List ignored nicknames for the current network. |

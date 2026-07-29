@@ -1943,6 +1943,69 @@ struct IRCModelsAndPolicyTests {
         #expect(replacementBobUpdates.revision == 0)
     }
 
+    @Test("Clear removes only the selected transcript and works while disconnected")
+    @MainActor
+    func clearsSelectedTranscript() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let alice = try #require(state.selection)
+        state.startDirectMessage(with: "Bob", from: .server(profile.id))
+        let bob = try #require(state.selection)
+        let aliceMessages = state.messages(for: alice, channelEventVisibility: .alwaysShow)
+        let aliceUpdates = state.messageUpdates(for: alice)
+
+        #expect(!aliceMessages.isEmpty)
+        #expect(!state.messages(for: bob, channelEventVisibility: .alwaysShow).isEmpty)
+        #expect(state.send("/clear", to: alice))
+
+        #expect(state.messages(for: alice, channelEventVisibility: .alwaysShow).isEmpty)
+        #expect(!state.messages(for: bob, channelEventVisibility: .alwaysShow).isEmpty)
+        #expect(aliceUpdates.revision == 1)
+    }
+
+    @Test("Automatic MOTD replies route to their server transcript")
+    @MainActor
+    func routesAutomaticMOTDToMatchingServer() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let selectedConversation = try #require(state.selection)
+        let selectedMessages = state.messages(
+            for: selectedConversation,
+            channelEventVisibility: .alwaysShow
+        )
+
+        state.handle(
+            try #require(IRCWireMessage(line: ":irc.example.org 001 tester :Connected")),
+            profile: profile
+        )
+        state.handle(
+            try #require(IRCWireMessage(line: ":irc.example.org 375 tester :- Message of the Day -")),
+            profile: profile
+        )
+        state.handle(
+            try #require(IRCWireMessage(line: ":irc.example.org 372 tester :- Welcome")),
+            profile: profile
+        )
+        state.handle(
+            try #require(IRCWireMessage(line: ":irc.example.org 376 tester :End of /MOTD")),
+            profile: profile
+        )
+
+        #expect(state.selection == selectedConversation)
+        #expect(
+            state.messages(for: selectedConversation, channelEventVisibility: .alwaysShow)
+                == selectedMessages
+        )
+        #expect(
+            state.messages(for: .server(profile.id), channelEventVisibility: .alwaysShow)
+                .map(\.text)
+                .suffix(3)
+                == ["Connected", "- Message of the Day -", "- Welcome"]
+        )
+    }
+
     @Test("Transcript update signals throttle bursts without starving trailing updates")
     @MainActor
     func throttlesTranscriptUpdateBursts() async throws {

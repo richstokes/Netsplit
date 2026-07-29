@@ -1013,7 +1013,7 @@ private struct ConversationView: View {
     }
 
     private static let supportedCommands = [
-        "AWAY", "BAN", "CTCP", "DISCONNECT", "IGNORE", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
+        "AWAY", "BAN", "CLEAR", "CTCP", "DISCONNECT", "IGNORE", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
         "MODE", "MOTD", "MSG", "MUTE", "NAMES", "NICK", "NOTICE", "PART",
         "PING", "QUERY", "QUIT", "SERVER", "SHOWIGNORES", "SHOWMUTES", "SLAP", "TOPIC",
         "UNIGNORE", "UNMUTE", "VERSION",
