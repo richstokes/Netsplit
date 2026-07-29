@@ -1381,7 +1381,7 @@ private struct ConversationTranscript: View {
     let messageSpacing: IRCMessageSpacing
     let channelEventVisibility: IRCChannelEventVisibility
     @ObservedObject private var updates: IRCRevisionSignal
-    @State private var previewExpansion = IRCMessagePreviewExpansionState()
+    @StateObject private var previewExpansion = IRCMessagePreviewExpansionStore()
 #if DEBUG
     @State private var debugInstanceID = UUID()
     @State private var debugLastRevisionLog = Date.distantPast
@@ -1475,10 +1475,7 @@ private struct ConversationTranscript: View {
             ].joined(separator: "|"),
             makeRow: { message in
                 AnyView(
-                    messageRow(
-                        for: message,
-                        previewExpansion: previewExpansionBinding(for: message.id)
-                    )
+                    messageRow(for: message)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, textMetrics.spacing(24))
                         .environment(\.ircTextMetrics, textMetrics)
@@ -1516,10 +1513,7 @@ private struct ConversationTranscript: View {
 #endif
     }
 
-    private func messageRow(
-        for message: IRCMessage,
-        previewExpansion: Binding<Bool>
-    ) -> some View {
+    private func messageRow(for message: IRCMessage) -> some View {
         MessageRow(
             message: message,
             state: state,
@@ -1534,17 +1528,6 @@ private struct ConversationTranscript: View {
             previewExpansion: previewExpansion
         )
         .id(message.id)
-    }
-
-    private func previewExpansionBinding(for messageID: UUID) -> Binding<Bool> {
-        Binding(
-            get: {
-                previewExpansion.isExpanded(for: messageID)
-            },
-            set: { isExpanded in
-                previewExpansion.setExpanded(isExpanded, for: messageID)
-            }
-        )
     }
 }
 
@@ -1996,7 +1979,7 @@ private struct MessageRow: View {
     let automaticallyPreviewsLinks: Bool
     let automaticallyPreviewsImages: Bool
     let messageSpacing: IRCMessageSpacing
-    @Binding var previewExpansion: Bool
+    let previewExpansion: IRCMessagePreviewExpansionStore
     @State private var isSenderHovered = false
     @State private var showsFullSender = false
     @Environment(\.ircTextMetrics) private var textMetrics
@@ -2036,7 +2019,8 @@ private struct MessageRow: View {
                     }
                     MessagePreviewStack(
                         previews: previews,
-                        isExpanded: $previewExpansion
+                        messageID: message.id,
+                        expansion: previewExpansion
                     )
                         .padding(.leading, textMetrics.spacing(20))
                 }
@@ -2068,7 +2052,8 @@ private struct MessageRow: View {
                     }
                     MessagePreviewStack(
                         previews: previews,
-                        isExpanded: $previewExpansion
+                        messageID: message.id,
+                        expansion: previewExpansion
                     )
                         .padding(.leading, senderColumnWidth + textMetrics.spacing(10))
                 }

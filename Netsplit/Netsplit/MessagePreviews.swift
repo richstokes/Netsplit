@@ -4,6 +4,7 @@
 //
 
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
@@ -97,14 +98,18 @@ enum IRCPreviewFailureReason: Equatable {
     }
 }
 
-struct IRCMessagePreviewExpansionState: Equatable {
-    private var collapsedMessageIDs: Set<UUID> = []
+final class IRCMessagePreviewExpansionStore: ObservableObject {
+    @Published private var collapsedMessageIDs: Set<UUID> = []
 
     func isExpanded(for messageID: UUID) -> Bool {
         !collapsedMessageIDs.contains(messageID)
     }
 
-    mutating func setExpanded(_ isExpanded: Bool, for messageID: UUID) {
+    func toggle(for messageID: UUID) {
+        setExpanded(!isExpanded(for: messageID), for: messageID)
+    }
+
+    func setExpanded(_ isExpanded: Bool, for messageID: UUID) {
         if isExpanded {
             collapsedMessageIDs.remove(messageID)
         } else {
@@ -112,20 +117,25 @@ struct IRCMessagePreviewExpansionState: Equatable {
         }
     }
 
-    mutating func retainMessages(withIDs messageIDs: Set<UUID>) {
+    func retainMessages(withIDs messageIDs: Set<UUID>) {
         collapsedMessageIDs.formIntersection(messageIDs)
     }
 }
 
 struct MessagePreviewStack: View {
     let previews: [IRCMessagePreview]
-    @Binding var isExpanded: Bool
+    let messageID: UUID
+    @ObservedObject var expansion: IRCMessagePreviewExpansionStore
+
+    private var isExpanded: Bool {
+        expansion.isExpanded(for: messageID)
+    }
 
     var body: some View {
         if !previews.isEmpty {
             VStack(alignment: .leading, spacing: 5) {
                 Button {
-                    isExpanded.toggle()
+                    expansion.toggle(for: messageID)
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")

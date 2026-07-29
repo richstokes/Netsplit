@@ -941,12 +941,12 @@ struct IRCModelsAndPolicyTests {
     func preservesCollapsedPreviewStateByMessage() {
         let firstMessageID = UUID()
         let secondMessageID = UUID()
-        var expansion = IRCMessagePreviewExpansionState()
+        let expansion = IRCMessagePreviewExpansionStore()
 
         #expect(expansion.isExpanded(for: firstMessageID))
         #expect(expansion.isExpanded(for: secondMessageID))
 
-        expansion.setExpanded(false, for: firstMessageID)
+        expansion.toggle(for: firstMessageID)
 
         #expect(!expansion.isExpanded(for: firstMessageID))
         #expect(expansion.isExpanded(for: secondMessageID))
@@ -960,6 +960,37 @@ struct IRCModelsAndPolicyTests {
         expansion.retainMessages(withIDs: [firstMessageID])
 
         #expect(expansion.isExpanded(for: secondMessageID))
+    }
+
+    @Test("Preview disclosure updates an existing hosted row")
+    @MainActor
+    func updatesHostedRowWhenPreviewExpansionChanges() async throws {
+        let messageID = UUID()
+        let expansion = IRCMessagePreviewExpansionStore()
+        var renderedExpansion: Bool?
+        let hostingController = NSHostingController(
+            rootView: PreviewExpansionObservationTestRow(
+                messageID: messageID,
+                expansion: expansion,
+                onRender: { renderedExpansion = $0 }
+            )
+        )
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 40)
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        try await Self.waitUntil {
+            renderedExpansion == true
+        }
+        #expect(renderedExpansion == true)
+
+        // This is the same store operation used by the disclosure button.
+        // The hosting root is intentionally not replaced between toggles.
+        expansion.toggle(for: messageID)
+
+        try await Self.waitUntil {
+            renderedExpansion == false
+        }
+        #expect(renderedExpansion == false)
     }
 
     @Test("Automatic previews only appear for regular channel and direct messages")
@@ -2883,6 +2914,33 @@ private struct TranscriptTestStatefulRow: View {
             onRender: onRender
         )
         .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
+    }
+}
+
+private struct PreviewExpansionObservationTestRow: View {
+    let messageID: UUID
+    @ObservedObject var expansion: IRCMessagePreviewExpansionStore
+    let onRender: (Bool) -> Void
+
+    var body: some View {
+        PreviewExpansionTestReporter(
+            isExpanded: expansion.isExpanded(for: messageID),
+            onRender: onRender
+        )
+    }
+}
+
+private struct PreviewExpansionTestReporter: NSViewRepresentable {
+    let isExpanded: Bool
+    let onRender: (Bool) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        onRender(isExpanded)
+        return NSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        onRender(isExpanded)
     }
 }
 
