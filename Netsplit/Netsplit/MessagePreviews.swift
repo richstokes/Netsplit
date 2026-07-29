@@ -99,43 +99,58 @@ enum IRCPreviewFailureReason: Equatable {
 }
 
 final class IRCMessagePreviewExpansionStore: ObservableObject {
-    @Published private var collapsedMessageIDs: Set<UUID> = []
+    @Published private var collapsedMessageIDsBySelection: [SidebarItem: Set<UUID>] = [:]
 
-    func isExpanded(for messageID: UUID) -> Bool {
-        !collapsedMessageIDs.contains(messageID)
+    func isExpanded(for messageID: UUID, in selection: SidebarItem) -> Bool {
+        !(collapsedMessageIDsBySelection[selection]?.contains(messageID) ?? false)
     }
 
-    func toggle(for messageID: UUID) {
-        setExpanded(!isExpanded(for: messageID), for: messageID)
+    func toggle(for messageID: UUID, in selection: SidebarItem) {
+        setExpanded(
+            !isExpanded(for: messageID, in: selection),
+            for: messageID,
+            in: selection
+        )
     }
 
-    func setExpanded(_ isExpanded: Bool, for messageID: UUID) {
+    func setExpanded(
+        _ isExpanded: Bool,
+        for messageID: UUID,
+        in selection: SidebarItem
+    ) {
         if isExpanded {
-            collapsedMessageIDs.remove(messageID)
+            collapsedMessageIDsBySelection[selection]?.remove(messageID)
+            if collapsedMessageIDsBySelection[selection]?.isEmpty == true {
+                collapsedMessageIDsBySelection.removeValue(forKey: selection)
+            }
         } else {
-            collapsedMessageIDs.insert(messageID)
+            collapsedMessageIDsBySelection[selection, default: []].insert(messageID)
         }
     }
 
-    func retainMessages(withIDs messageIDs: Set<UUID>) {
-        collapsedMessageIDs.formIntersection(messageIDs)
+    func retainMessages(withIDs messageIDs: Set<UUID>, in selection: SidebarItem) {
+        collapsedMessageIDsBySelection[selection]?.formIntersection(messageIDs)
+        if collapsedMessageIDsBySelection[selection]?.isEmpty == true {
+            collapsedMessageIDsBySelection.removeValue(forKey: selection)
+        }
     }
 }
 
 struct MessagePreviewStack: View {
     let previews: [IRCMessagePreview]
     let messageID: UUID
+    let selection: SidebarItem
     @ObservedObject var expansion: IRCMessagePreviewExpansionStore
 
     private var isExpanded: Bool {
-        expansion.isExpanded(for: messageID)
+        expansion.isExpanded(for: messageID, in: selection)
     }
 
     var body: some View {
         if !previews.isEmpty {
             VStack(alignment: .leading, spacing: 5) {
                 Button {
-                    expansion.toggle(for: messageID)
+                    expansion.toggle(for: messageID, in: selection)
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")

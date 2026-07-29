@@ -937,40 +937,51 @@ struct IRCModelsAndPolicyTests {
         ])
     }
 
-    @Test("Preview disclosure state follows message identity across row reuse")
-    func preservesCollapsedPreviewStateByMessage() {
+    @Test("Preview disclosure state survives row reuse and channel changes")
+    func preservesCollapsedPreviewStateByMessageAndChannel() {
         let firstMessageID = UUID()
         let secondMessageID = UUID()
+        let firstChannel = SidebarItem.channel(UUID())
+        let secondChannel = SidebarItem.channel(UUID())
         let expansion = IRCMessagePreviewExpansionStore()
 
-        #expect(expansion.isExpanded(for: firstMessageID))
-        #expect(expansion.isExpanded(for: secondMessageID))
+        #expect(expansion.isExpanded(for: firstMessageID, in: firstChannel))
+        #expect(expansion.isExpanded(for: secondMessageID, in: secondChannel))
 
-        expansion.toggle(for: firstMessageID)
+        expansion.toggle(for: firstMessageID, in: firstChannel)
 
-        #expect(!expansion.isExpanded(for: firstMessageID))
-        #expect(expansion.isExpanded(for: secondMessageID))
+        #expect(!expansion.isExpanded(for: firstMessageID, in: firstChannel))
+        #expect(expansion.isExpanded(for: secondMessageID, in: secondChannel))
 
-        expansion.setExpanded(false, for: secondMessageID)
-        expansion.setExpanded(true, for: firstMessageID)
+        expansion.setExpanded(false, for: secondMessageID, in: secondChannel)
 
-        #expect(expansion.isExpanded(for: firstMessageID))
-        #expect(!expansion.isExpanded(for: secondMessageID))
+        #expect(!expansion.isExpanded(for: firstMessageID, in: firstChannel))
+        #expect(!expansion.isExpanded(for: secondMessageID, in: secondChannel))
 
-        expansion.retainMessages(withIDs: [firstMessageID])
+        // Visiting and cleaning up another channel must not discard the first
+        // channel's disclosure choice.
+        expansion.retainMessages(withIDs: [secondMessageID], in: secondChannel)
 
-        #expect(expansion.isExpanded(for: secondMessageID))
+        #expect(!expansion.isExpanded(for: firstMessageID, in: firstChannel))
+
+        expansion.setExpanded(true, for: firstMessageID, in: firstChannel)
+        expansion.retainMessages(withIDs: [firstMessageID], in: firstChannel)
+
+        #expect(expansion.isExpanded(for: firstMessageID, in: firstChannel))
+        #expect(!expansion.isExpanded(for: secondMessageID, in: secondChannel))
     }
 
     @Test("Preview disclosure updates an existing hosted row")
     @MainActor
     func updatesHostedRowWhenPreviewExpansionChanges() async throws {
         let messageID = UUID()
+        let selection = SidebarItem.channel(UUID())
         let expansion = IRCMessagePreviewExpansionStore()
         var renderedExpansion: Bool?
         let hostingController = NSHostingController(
             rootView: PreviewExpansionObservationTestRow(
                 messageID: messageID,
+                selection: selection,
                 expansion: expansion,
                 onRender: { renderedExpansion = $0 }
             )
@@ -985,7 +996,7 @@ struct IRCModelsAndPolicyTests {
 
         // This is the same store operation used by the disclosure button.
         // The hosting root is intentionally not replaced between toggles.
-        expansion.toggle(for: messageID)
+        expansion.toggle(for: messageID, in: selection)
 
         try await Self.waitUntil {
             renderedExpansion == false
@@ -1499,6 +1510,43 @@ struct IRCModelsAndPolicyTests {
         #expect(!activity.hasMention)
         #expect(activity.indicator == nil)
         #expect(activity.accessibilityDescription == nil)
+    }
+
+    @Test("Marking a server read clears only that server's conversation activity")
+    func clearsConversationActivityForOneServer() {
+        let serverID = UUID()
+        let otherServerID = UUID()
+        var conversations = [
+            Conversation(
+                name: "#swift",
+                serverID: serverID,
+                hasUnread: true,
+                hasMention: true
+            ),
+            Conversation(
+                name: "Alice",
+                serverID: serverID,
+                hasUnread: true
+            ),
+            Conversation(
+                name: "#other",
+                serverID: otherServerID,
+                hasUnread: true,
+                hasMention: true
+            )
+        ]
+
+        IRCConversationActivityPolicy.clearActivity(
+            for: serverID,
+            in: &conversations
+        )
+
+        #expect(!conversations[0].hasUnread)
+        #expect(!conversations[0].hasMention)
+        #expect(!conversations[1].hasUnread)
+        #expect(!conversations[1].hasMention)
+        #expect(conversations[2].hasUnread)
+        #expect(conversations[2].hasMention)
     }
 
     @Test("Muted conversation merges discard unread activity")
@@ -2919,12 +2967,13 @@ private struct TranscriptTestStatefulRow: View {
 
 private struct PreviewExpansionObservationTestRow: View {
     let messageID: UUID
+    let selection: SidebarItem
     @ObservedObject var expansion: IRCMessagePreviewExpansionStore
     let onRender: (Bool) -> Void
 
     var body: some View {
         PreviewExpansionTestReporter(
-            isExpanded: expansion.isExpanded(for: messageID),
+            isExpanded: expansion.isExpanded(for: messageID, in: selection),
             onRender: onRender
         )
     }

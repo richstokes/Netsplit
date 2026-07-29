@@ -769,7 +769,7 @@ struct ChannelBrowser: View {
     @State private var search = ""
     @FocusState private var isSearchFocused: Bool
 
-    private var profile: ServerProfile? { state.selectedProfile }
+    private var profile: ServerProfile? { state.channelBrowserProfile }
     private var availableChannels: [ChannelListing] { state.channelListings(for: profile?.id) }
     private var isLoading: Bool { state.isChannelListingInProgress(for: profile?.id) }
 
@@ -919,7 +919,10 @@ struct ChannelBrowser: View {
                     } description: {
                         Text("The server did not return any channels for this request.")
                     } actions: {
-                        Button("Try Again") { state.requestChannelListing(forceRefresh: true) }
+                        Button("Try Again") {
+                            guard let profile else { return }
+                            state.requestChannelListing(for: profile, forceRefresh: true)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .padding(.bottom, 36)

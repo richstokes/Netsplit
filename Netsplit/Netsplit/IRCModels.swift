@@ -1052,6 +1052,13 @@ enum IRCConversationActivityPolicy {
         guard !conversationIsMuted else { return false }
         return existingHasUnread || incomingHasUnread
     }
+
+    static func clearActivity(for serverID: UUID, in conversations: inout [Conversation]) {
+        for index in conversations.indices where conversations[index].serverID == serverID {
+            conversations[index].hasUnread = false
+            conversations[index].hasMention = false
+        }
+    }
 }
 
 struct IRCServerActivity: Equatable {

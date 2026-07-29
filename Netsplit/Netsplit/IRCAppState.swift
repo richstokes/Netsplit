@@ -136,6 +136,7 @@ final class IRCAppState: ObservableObject {
     @Published private var unreadInviteCountsByServer: [UUID: Int] = [:]
     @Published private var channelTopics: [UUID: String] = [:]
     @Published var isChannelBrowserPresented = false
+    @Published private(set) var channelBrowserProfileID: UUID?
     @Published private var listedChannelsByServer: [UUID: [ChannelListing]] = [:]
     @Published private var channelListsInProgress: Set<UUID> = []
     @Published private var channelBanLists: [UUID: [IRCBanEntry]] = [:]
@@ -326,7 +327,16 @@ final class IRCAppState: ObservableObject {
 
     var canBrowseSelectedChannels: Bool {
         guard let profile = selectedProfile else { return false }
-        return registeredServerIDs.contains(profile.id)
+        return canBrowseChannels(for: profile)
+    }
+
+    var channelBrowserProfile: ServerProfile? {
+        guard let channelBrowserProfileID else { return nil }
+        return profiles.first { $0.id == channelBrowserProfileID }
+    }
+
+    func canBrowseChannels(for profile: ServerProfile) -> Bool {
+        registeredServerIDs.contains(profile.id)
     }
 
     var canToggleMemberList: Bool {
@@ -510,6 +520,16 @@ final class IRCAppState: ObservableObject {
             serverID: profile.id,
             conversations: (channels + directMessages).filter { !isMuted($0) }
         )
+    }
+
+    func hasUnreadActivity(for profile: ServerProfile) -> Bool {
+        unreadInviteCountsByServer[profile.id, default: 0] > 0
+            || channels.contains {
+                $0.serverID == profile.id && ($0.hasUnread || $0.hasMention)
+            }
+            || directMessages.contains {
+                $0.serverID == profile.id && ($0.hasUnread || $0.hasMention)
+            }
     }
 
     func unreadInviteCount(for profile: ServerProfile) -> Int {
@@ -1138,6 +1158,18 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    func markAllRead(for profile: ServerProfile) {
+        IRCConversationActivityPolicy.clearActivity(
+            for: profile.id,
+            in: &channels
+        )
+        IRCConversationActivityPolicy.clearActivity(
+            for: profile.id,
+            in: &directMessages
+        )
+        unreadInviteCountsByServer.removeValue(forKey: profile.id)
+    }
+
     func members(for item: SidebarItem) -> [ChannelMember] {
         guard case .channel(let id) = item else { return [] }
         guard let profile = profile(for: item) else { return [] }
@@ -1310,6 +1342,10 @@ final class IRCAppState: ObservableObject {
     func requestChannelListing(forceRefresh: Bool = false) {
         guard let profile = selectedProfile else { return }
         requestChannelListing(for: profile, forceRefresh: forceRefresh)
+    }
+
+    func requestChannelListing(for profile: ServerProfile, forceRefresh: Bool = false) {
+        requestChannelListing(for: profile, arguments: "", forceRefresh: forceRefresh)
     }
 
     func title(for item: SidebarItem) -> String {
@@ -4231,6 +4267,7 @@ final class IRCAppState: ObservableObject {
             appendSystem("Wait for the server to finish connecting before browsing channels.", for: .server(profile.id))
             return
         }
+        channelBrowserProfileID = profile.id
         isChannelBrowserPresented = true
         guard !channelListsInProgress.contains(profile.id) else { return }
 

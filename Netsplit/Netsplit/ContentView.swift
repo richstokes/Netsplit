@@ -42,6 +42,7 @@ struct ContentView: View {
     @State private var showAddServer = false
     @State private var editingProfile: ServerProfile?
     @State private var banListChannel: Conversation?
+    @StateObject private var previewExpansion = IRCMessagePreviewExpansionStore()
     @FocusState private var workspaceFocus: IRCWorkspaceFocus?
 
     private var textMetrics: IRCTextMetrics { IRCTextMetrics(bodySize: state.transcriptFontSize) }
@@ -72,7 +73,12 @@ struct ContentView: View {
                 if state.selection == .connectionCenter || state.selection == nil {
                     ConnectionCenterView(state: state, showAddServer: $showAddServer, editingProfile: $editingProfile)
                 } else if let selection = state.selection {
-                    ConversationView(state: state, selection: selection, workspaceFocus: $workspaceFocus)
+                    ConversationView(
+                        state: state,
+                        selection: selection,
+                        previewExpansion: previewExpansion,
+                        workspaceFocus: $workspaceFocus
+                    )
                 }
             }
             .toolbar {
@@ -180,24 +186,8 @@ private struct SidebarView: View {
                     ServerRow(profile: profile, state: state)
                         .tag(SidebarItem.server(profile.id))
                         .contextMenu {
-                            if !state.isOneOffServer(profile) {
-                                Button("Edit Profile…") { editingProfile = profile }
-                                Divider()
-                            }
-                            if case .failed = state.status(for: profile) {
-                                Button("Retry Now") { state.toggleConnection(for: profile) }
-                            }
-                            Button("Reconnect") {
-                                state.reconnect(profile)
-                            }
-                            Button(state.isWaitingToReconnect(profile) ? "Stop Reconnecting" : "Disconnect") {
-                                state.disconnect(profile)
-                            }
-                            if !profile.isBuiltIn && !state.isOneOffServer(profile) {
-                                Divider()
-                                Button("Delete Server Profile", role: .destructive) { state.delete(profile) }
-                            }
-                    }
+                            serverContextMenu(for: profile)
+                        }
 
                     if !collapsedProfileIDs.contains(profile.id) {
                         ForEach(state.channels(for: profile)) { channel in
@@ -282,6 +272,9 @@ private struct SidebarView: View {
                     }
                     .font(.system(size: textMetrics.size(11), weight: .semibold))
                     .textCase(nil)
+                    .contextMenu {
+                        serverContextMenu(for: profile)
+                    }
                 }
             }
         }
@@ -339,6 +332,44 @@ private struct SidebarView: View {
             .padding(.horizontal, textMetrics.spacing(13))
             .frame(height: textMetrics.spacing(38))
             .ircBarBackground()
+        }
+    }
+
+    @ViewBuilder
+    private func serverContextMenu(for profile: ServerProfile) -> some View {
+        Button("Browse Channels…", systemImage: "list.bullet.rectangle") {
+            state.requestChannelListing(for: profile)
+        }
+        .disabled(!state.canBrowseChannels(for: profile))
+
+        Button("Mark All as Read", systemImage: "checkmark.circle") {
+            state.markAllRead(for: profile)
+        }
+        .disabled(!state.hasUnreadActivity(for: profile))
+
+        Divider()
+
+        if !state.isOneOffServer(profile) {
+            Button("Edit Profile…", systemImage: "pencil") {
+                editingProfile = profile
+            }
+            Divider()
+        }
+        if case .failed = state.status(for: profile) {
+            Button("Retry Now") { state.toggleConnection(for: profile) }
+        }
+        Button("Reconnect", systemImage: "arrow.clockwise") {
+            state.reconnect(profile)
+        }
+        Button(
+            state.isWaitingToReconnect(profile) ? "Stop Reconnecting" : "Disconnect",
+            systemImage: state.isWaitingToReconnect(profile) ? "xmark.circle" : "bolt.slash"
+        ) {
+            state.disconnect(profile)
+        }
+        if !profile.isBuiltIn && !state.isOneOffServer(profile) {
+            Divider()
+            Button("Delete Server Profile", role: .destructive) { state.delete(profile) }
         }
     }
 
@@ -707,6 +738,7 @@ private struct ServerProfileCard: View {
 private struct ConversationView: View {
     @ObservedObject var state: IRCAppState
     let selection: SidebarItem
+    let previewExpansion: IRCMessagePreviewExpansionStore
     @FocusState.Binding var workspaceFocus: IRCWorkspaceFocus?
     @State private var draft = ""
     @State private var tabCompletion: RecipientTabCompletion?
@@ -790,7 +822,8 @@ private struct ConversationView: View {
                         automaticallyPreviewsLinks: state.automaticallyPreviewsLinks,
                         automaticallyPreviewsImages: state.automaticallyPreviewsImages,
                         messageSpacing: state.messageSpacing,
-                        channelEventVisibility: state.channelEventVisibility
+                        channelEventVisibility: state.channelEventVisibility,
+                        previewExpansion: previewExpansion
                     )
                     .id(selection)
                     HStack(alignment: .bottom, spacing: 12) {
@@ -1380,8 +1413,8 @@ private struct ConversationTranscript: View {
     let automaticallyPreviewsImages: Bool
     let messageSpacing: IRCMessageSpacing
     let channelEventVisibility: IRCChannelEventVisibility
+    let previewExpansion: IRCMessagePreviewExpansionStore
     @ObservedObject private var updates: IRCRevisionSignal
-    @StateObject private var previewExpansion = IRCMessagePreviewExpansionStore()
 #if DEBUG
     @State private var debugInstanceID = UUID()
     @State private var debugLastRevisionLog = Date.distantPast
@@ -1401,7 +1434,8 @@ private struct ConversationTranscript: View {
         automaticallyPreviewsLinks: Bool,
         automaticallyPreviewsImages: Bool,
         messageSpacing: IRCMessageSpacing,
-        channelEventVisibility: IRCChannelEventVisibility
+        channelEventVisibility: IRCChannelEventVisibility,
+        previewExpansion: IRCMessagePreviewExpansionStore
     ) {
         self.state = state
         self.selection = selection
@@ -1413,6 +1447,7 @@ private struct ConversationTranscript: View {
         self.automaticallyPreviewsImages = automaticallyPreviewsImages
         self.messageSpacing = messageSpacing
         self.channelEventVisibility = channelEventVisibility
+        self.previewExpansion = previewExpansion
         _updates = ObservedObject(wrappedValue: state.messageUpdates(for: selection))
     }
 
@@ -1494,7 +1529,8 @@ private struct ConversationTranscript: View {
         .accessibilityLabel("Conversation messages")
         .onChange(of: allMessages.first?.id) { _, _ in
             previewExpansion.retainMessages(
-                withIDs: Set(allMessages.lazy.map(\.id))
+                withIDs: Set(allMessages.lazy.map(\.id)),
+                in: selection
             )
         }
 #if DEBUG
@@ -2020,6 +2056,7 @@ private struct MessageRow: View {
                     MessagePreviewStack(
                         previews: previews,
                         messageID: message.id,
+                        selection: selection,
                         expansion: previewExpansion
                     )
                         .padding(.leading, textMetrics.spacing(20))
@@ -2053,6 +2090,7 @@ private struct MessageRow: View {
                     MessagePreviewStack(
                         previews: previews,
                         messageID: message.id,
+                        selection: selection,
                         expansion: previewExpansion
                     )
                         .padding(.leading, senderColumnWidth + textMetrics.spacing(10))
