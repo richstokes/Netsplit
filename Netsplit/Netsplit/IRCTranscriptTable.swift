@@ -358,6 +358,14 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 self.positionAtTail()
                 self.adjustTopSpacerForShortContent()
                 self.positionAtTail()
+                guard !self.hasPendingInitialLayoutWork else {
+                    // Positioning realizes the tail rows and can discover the
+                    // viewport width for the first time. Let the resulting
+                    // hosting-view invalidations and full height sweep finish
+                    // before exposing geometry based on row estimates.
+                    self.scheduleInitialPosition()
+                    return
+                }
                 self.hasPositionedInitially = true
                 scrollView.alphaValue = 1
                 let geometry = self.geometry()
@@ -366,6 +374,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 self.parent.onGeometryChange?("attached", geometry)
 #endif
             }
+        }
+
+        private var hasPendingInitialLayoutWork: Bool {
+            hasPendingWidthRefresh
+                || fullHeightRefreshScheduled
+                || heightInvalidationScheduled
+                || !pendingHeightMessageIDs.isEmpty
         }
 
         // Keep updates to full reloadData(), insertRows, and

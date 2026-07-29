@@ -2134,11 +2134,18 @@ struct IRCModelsAndPolicyTests {
             withIdentifier: "IRCTranscriptHostedRow",
             in: hostingController.view
         ).count
+        let revealedDocumentHeight = geometry.documentFrame.height
+
+        // Initial positioning must not expose the table while its first
+        // viewport-width and automatic-row-height refresh is still pending.
+        try await Task.sleep(for: .milliseconds(100))
+        hostingController.view.layoutSubtreeIfNeeded()
 
         #expect(tableView.numberOfRows == messages.count + 2)
         #expect(hostedRowCount > 0)
         #expect(hostedRowCount < 100)
         #expect(tableView.rect(ofRow: messages.count).height > 24)
+        #expect(abs(tableView.frame.height - revealedDocumentHeight) < 0.5)
         #expect(scrollView.alphaValue == 1)
         #expect(IRCTranscriptScrollPolicy.isAtBottom(
             visibleBounds: geometry.visibleBounds,
