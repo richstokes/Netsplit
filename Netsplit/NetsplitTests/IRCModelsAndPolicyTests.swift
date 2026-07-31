@@ -35,6 +35,21 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.system.palette == nil)
     }
 
+    @Test("Every theme provides restrained connection presentation text")
+    func exposesThemeConnectionPresentations() {
+        for appearance in IRCApplicationAppearance.allCases {
+            let presentation = appearance.connectionPresentation
+            #expect(!presentation.title.isEmpty)
+            #expect(!presentation.description.isEmpty)
+            #expect(!presentation.connectingLabel.isEmpty)
+        }
+
+        #expect(IRCApplicationAppearance.system.connectionPresentation.title == "Connections")
+        #expect(IRCApplicationAppearance.c64.connectionPresentation.title == "READY.")
+        #expect(IRCApplicationAppearance.c64.connectionPresentation.connectingLabel == "CONNECTING...")
+        #expect(IRCApplicationAppearance.cyberpunk.connectionPresentation.connectingLabel == "ESTABLISHING LINK…")
+    }
+
     @Test("Theme menu swatches preserve their original colors")
     func preservesThemeMenuSwatchColors() {
         for appearance in IRCApplicationAppearance.allCases {

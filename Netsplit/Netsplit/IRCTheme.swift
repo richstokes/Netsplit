@@ -5,6 +5,13 @@
 
 import SwiftUI
 
+struct IRCConnectionPresentation {
+    let title: String
+    let description: String
+    let connectingLabel: String
+    let fontDesign: Font.Design
+}
+
 struct IRCThemePalette {
     let background: Color
     let bar: Color
@@ -273,6 +280,70 @@ private extension Color {
 }
 
 extension IRCApplicationAppearance {
+    var connectionPresentation: IRCConnectionPresentation {
+        let standardDescription = "Choose a network to connect, or add a profile for your own server. Active networks and their channels stay focused in the sidebar."
+        let profileDescription = "Choose a server profile to connect. Active networks and channels remain available in the sidebar."
+
+        switch self {
+        case .system, .light, .dark:
+            return IRCConnectionPresentation(
+                title: "Connections",
+                description: standardDescription,
+                connectingLabel: "Connecting…",
+                fontDesign: .default
+            )
+        case .catppuccinLatte, .catppuccinMocha:
+            return IRCConnectionPresentation(
+                title: "Network Connections",
+                description: profileDescription,
+                connectingLabel: "Opening connection…",
+                fontDesign: .rounded
+            )
+        case .githubLight, .githubDark:
+            return IRCConnectionPresentation(
+                title: "Server Connections",
+                description: profileDescription,
+                connectingLabel: "Connecting to server…",
+                fontDesign: .default
+            )
+        case .rosePineDawn, .rosePine:
+            return IRCConnectionPresentation(
+                title: "Networks",
+                description: profileDescription,
+                connectingLabel: "Joining network…",
+                fontDesign: .rounded
+            )
+        case .solarizedSepia:
+            return IRCConnectionPresentation(
+                title: "Network Directory",
+                description: profileDescription,
+                connectingLabel: "Opening connection…",
+                fontDesign: .default
+            )
+        case .cyberpunk:
+            return IRCConnectionPresentation(
+                title: "NETWORK LINKS",
+                description: "Select a server profile to establish a network link. Active links remain available in the sidebar.",
+                connectingLabel: "ESTABLISHING LINK…",
+                fontDesign: .monospaced
+            )
+        case .c64:
+            return IRCConnectionPresentation(
+                title: "READY.",
+                description: "SELECT A SERVER PROFILE TO CONNECT. ACTIVE NETWORKS AND CHANNELS APPEAR IN THE SIDEBAR.",
+                connectingLabel: "CONNECTING...",
+                fontDesign: .monospaced
+            )
+        case .greyscale:
+            return IRCConnectionPresentation(
+                title: "Connections",
+                description: "Select a server profile to connect. Active networks and channels remain in the sidebar.",
+                connectingLabel: "Connecting…",
+                fontDesign: .default
+            )
+        }
+    }
+
     var palette: IRCThemePalette? {
         switch self {
         case .system, .light, .dark: return nil

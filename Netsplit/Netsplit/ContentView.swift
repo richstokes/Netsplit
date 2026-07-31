@@ -590,6 +590,10 @@ private struct ConnectionCenterView: View {
 
     @Environment(\.ircTextMetrics) private var textMetrics
 
+    private var presentation: IRCConnectionPresentation {
+        state.applicationAppearance.connectionPresentation
+    }
+
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: textMetrics.spacing(330), maximum: textMetrics.spacing(480)), spacing: 18)]
     }
@@ -599,12 +603,19 @@ private struct ConnectionCenterView: View {
             VStack(alignment: .leading, spacing: 28) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("Connections", systemImage: "bolt.horizontal.circle.fill")
-                            .font(.system(size: textMetrics.size(30), weight: .bold))
+                        Label(presentation.title, systemImage: "bolt.horizontal.circle.fill")
+                            .font(.system(
+                                size: textMetrics.size(30),
+                                weight: .bold,
+                                design: presentation.fontDesign
+                            ))
                             .foregroundStyle(.tint)
                             .accessibilityAddTraits(.isHeader)
-                        Text("Choose a network to connect, or add a profile for your own server. Active networks and their channels stay focused in the sidebar.")
-                            .font(.system(size: textMetrics.size(15)))
+                        Text(presentation.description)
+                            .font(.system(
+                                size: textMetrics.size(15),
+                                design: presentation.fontDesign
+                            ))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -640,7 +651,16 @@ private struct ServerProfileCard: View {
 
     private var statusText: String {
         if state.isWaitingToReconnect(profile) { return "Reconnecting" }
+        if state.status(for: profile) == .connecting {
+            return state.applicationAppearance.connectionPresentation.connectingLabel
+        }
         return state.isActive(profile) ? state.status(for: profile).label : "Ready"
+    }
+
+    private var statusFontDesign: Font.Design {
+        state.status(for: profile) == .connecting
+            ? state.applicationAppearance.connectionPresentation.fontDesign
+            : .default
     }
 
     private var statusTint: Color {
@@ -665,7 +685,11 @@ private struct ServerProfileCard: View {
                 }
                 Spacer()
                 Label(statusText, systemImage: "circle.fill")
-                    .font(.system(size: textMetrics.size(11), weight: .medium))
+                    .font(.system(
+                        size: textMetrics.size(11),
+                        weight: .medium,
+                        design: statusFontDesign
+                    ))
                     .foregroundStyle(statusTint)
                     .labelStyle(.titleAndIcon)
                     .padding(.horizontal, 9)
