@@ -328,11 +328,15 @@ struct NetsplitApp: App {
             ContentView(state: state)
                 .frame(minWidth: 920, minHeight: 620)
                 .ircApplicationAppearance(state.applicationAppearance)
+                .background {
+                    // Resolve this scene's window directly. NSApp.keyWindow may
+                    // be the About or Settings window when this view updates.
+                    MainWindowReader { window in
+                        appDelegate.mainWindow = window
+                    }
+                }
                 .onAppear {
                     appDelegate.state = state
-                    DispatchQueue.main.async {
-                        appDelegate.mainWindow = NSApp.keyWindow
-                    }
                 }
                 .task {
                     state.connectProfilesConfiguredForLaunch()
@@ -412,6 +416,37 @@ struct NetsplitApp: App {
         Settings {
             SettingsView(state: state)
                 .ircApplicationAppearance(state.applicationAppearance)
+        }
+    }
+}
+
+private struct MainWindowReader: NSViewRepresentable {
+    let windowDidChange: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> WindowObservingView {
+        WindowObservingView(windowDidChange: windowDidChange)
+    }
+
+    func updateNSView(_ nsView: WindowObservingView, context: Context) {
+        nsView.windowDidChange = windowDidChange
+    }
+
+    final class WindowObservingView: NSView {
+        var windowDidChange: (NSWindow?) -> Void
+
+        init(windowDidChange: @escaping (NSWindow?) -> Void) {
+            self.windowDidChange = windowDidChange
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            windowDidChange(window)
         }
     }
 }
