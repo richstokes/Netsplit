@@ -151,9 +151,11 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var followingTail: Bool
         private var topSpacerHeight = topInset
         private var lastViewportWidth: CGFloat = 0
+        private var lastViewportHeight: CGFloat = 0
         private var pendingHeightMessageIDs = Set<UUID>()
         private var heightInvalidationScheduled = false
         private var fullHeightRefreshScheduled = false
+        private var viewportHeightReconciliationScheduled = false
         private var pendingTailWorkItem: DispatchWorkItem?
         private var lastAnimatedScroll = Date.distantPast
         private var isAwaitingTailPosition = false
@@ -183,6 +185,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
             self.tableView = tableView
             scrollView.onViewportWidthChange = { [weak self] width in
                 self?.viewportWidthDidChange(width)
+            }
+            scrollView.onViewportHeightChange = { [weak self] height in
+                self?.viewportHeightDidChange(height)
             }
             scrollView.onUserScroll = { [weak self] in
                 self?.userDidScroll()
@@ -231,6 +236,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             initialPositionScheduled = false
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
+            viewportHeightReconciliationScheduled = false
             tailPositionGeneration &+= 1
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
@@ -243,6 +249,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             observers.forEach(center.removeObserver)
             observers.removeAll()
             scrollView?.onViewportWidthChange = nil
+            scrollView?.onViewportHeightChange = nil
             scrollView?.onUserScroll = nil
             tableView?.delegate = nil
             tableView?.dataSource = nil
@@ -330,6 +337,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pendingHeightMessageIDs.removeAll()
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
+            viewportHeightReconciliationScheduled = false
             isAwaitingTailPosition = false
             pendingTailStartOrigin = nil
             isRestoringReadingPosition = false
@@ -338,6 +346,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             hasPendingWidthRefresh = false
             lastAnimatedScroll = .distantPast
             lastViewportWidth = max(0, scrollView.contentView.bounds.width)
+            lastViewportHeight = max(0, scrollView.contentView.bounds.height)
 
             messages = newMessages
             tableView.intercellSpacing.height = parent.rowSpacing
@@ -558,8 +567,23 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 restorePendingTailStartOrigin()
             }
             guard animated else {
+                // Realize the final row first, then use the resulting exact
+                // document height. scrollRowToVisible alone can leave an
+                // automatic-height table overscrolled by the last estimate
+                // correction, exposing blank space below the transcript.
                 tableView.scrollRowToVisible(tableView.numberOfRows - 1)
-                scrollView.reflectScrolledClipView(scrollView.contentView)
+                tableView.layoutSubtreeIfNeeded()
+                let clipView = scrollView.contentView
+                if let targetOrigin = tailOrigin() {
+                    let targetBounds = NSRect(
+                        origin: targetOrigin,
+                        size: clipView.bounds.size
+                    )
+                    clipView.setBoundsOrigin(
+                        clipView.constrainBoundsRect(targetBounds).origin
+                    )
+                }
+                scrollView.reflectScrolledClipView(clipView)
                 completion?(false)
                 return
             }
@@ -668,6 +692,33 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // caused by replacing the visible root views fold into it.
                 self.scheduleHeightRefresh()
                 self.refreshVisibleRowsForCurrentWidth()
+            }
+        }
+
+        private func viewportHeightDidChange(_ height: CGFloat) {
+            guard height > 0, abs(height - lastViewportHeight) > 0.5 else { return }
+            lastViewportHeight = height
+            guard hasPositionedInitially,
+                  followingTail,
+                  !viewportHeightReconciliationScheduled else { return }
+            viewportHeightReconciliationScheduled = true
+            let generation = attachmentGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard self.attachmentGeneration == generation else { return }
+                self.viewportHeightReconciliationScheduled = false
+                guard self.hasPositionedInitially,
+                      self.followingTail,
+                      !self.isRestoringReadingPosition else { return }
+                // Height-only layout changes do not invalidate hosted rows,
+                // but they do change the spacer needed to keep a short
+                // transcript growing upward from the bottom.
+                self.adjustTopSpacerForShortContent()
+                // A pending append owns the eventual tail move. Updating its
+                // short-content spacer is still necessary, but an immediate
+                // jump here would bypass the coalesced arrival animation.
+                guard !self.isAwaitingTailPosition else { return }
+                self.positionAtTail()
             }
         }
 
@@ -964,15 +1015,24 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
 final class TranscriptScrollView: NSScrollView {
     var onViewportWidthChange: ((CGFloat) -> Void)?
+    var onViewportHeightChange: ((CGFloat) -> Void)?
     var onUserScroll: (() -> Void)?
     private var lastReportedViewportWidth: CGFloat = 0
+    private var lastReportedViewportHeight: CGFloat = 0
 
     override func layout() {
         super.layout()
-        let width = contentView.bounds.width
-        guard width > 0, abs(width - lastReportedViewportWidth) > 0.5 else { return }
-        lastReportedViewportWidth = width
-        onViewportWidthChange?(width)
+        let viewportSize = contentView.bounds.size
+        if viewportSize.width > 0,
+           abs(viewportSize.width - lastReportedViewportWidth) > 0.5 {
+            lastReportedViewportWidth = viewportSize.width
+            onViewportWidthChange?(viewportSize.width)
+        }
+        if viewportSize.height > 0,
+           abs(viewportSize.height - lastReportedViewportHeight) > 0.5 {
+            lastReportedViewportHeight = viewportSize.height
+            onViewportHeightChange?(viewportSize.height)
+        }
     }
 
     override func scrollWheel(with event: NSEvent) {

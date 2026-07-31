@@ -2380,12 +2380,95 @@ struct IRCModelsAndPolicyTests {
         #expect(finalTableView === initialTableView)
         #expect(finalTableView.numberOfRows == messages.count + 2)
         #expect(finalScrollView.alphaValue == 1)
+        let finalBottomDistance = finalGeometry.contentBounds.maxY
+            - finalGeometry.visibleBounds.maxY
+        #expect(abs(finalBottomDistance) <= 1)
         #expect(IRCTranscriptScrollPolicy.isAtBottom(
             visibleBounds: finalGeometry.visibleBounds,
             contentBounds: finalGeometry.contentBounds,
             contentIsFlipped: finalGeometry.contentIsFlipped,
             tolerance: 1
         ))
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    @Test("Retained conversation stays bottom-aligned when its viewport height settles")
+    @MainActor
+    func bottomAlignsRetainedConversationAfterViewportHeightChange() async throws {
+        var contentIdentity = SidebarItem.channel(UUID())
+        var messages = (0..<80).map {
+            IRCMessage(sender: "first", text: "First conversation message \($0)")
+        }
+        var transcriptHeight: CGFloat = 500
+        var initialPositionCount = 0
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "viewport-height-reconciliation-test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(height: 24, alignment: .leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { _ in initialPositionCount += 1 },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: transcriptHeight)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 1 }
+
+        contentIdentity = .channel(UUID())
+        messages = (0..<10).map {
+            IRCMessage(sender: "second", text: "Short conversation message \($0)")
+        }
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 2 }
+
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+
+        transcriptHeight = 700
+        hostingController.rootView = rootView()
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 700)
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil {
+            let newestMessageBottom = tableView.rect(ofRow: messages.count).maxY
+            let expectedMessageBottom = scrollView.contentView.bounds.height - 18
+            return abs(newestMessageBottom - expectedMessageBottom) <= 1
+        }
+
+        let newestMessageBottom = tableView.rect(ofRow: messages.count).maxY
+        let expectedMessageBottom = scrollView.contentView.bounds.height - 18
+
+        #expect(abs(newestMessageBottom - expectedMessageBottom) <= 1)
 
         hostingController.rootView = AnyView(EmptyView())
         hostingController.view.layoutSubtreeIfNeeded()
