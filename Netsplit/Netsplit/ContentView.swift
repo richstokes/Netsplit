@@ -2125,7 +2125,7 @@ private struct MessageRow: View {
 
     private var serverMessageFont: Font {
         let design: Font.Design = usesMonospacedServerMessages ? .monospaced : chatFont.design
-        return .system(size: textMetrics.size(14), design: design)
+        return .system(size: textMetrics.bodySize, design: design)
     }
 
     @ViewBuilder
