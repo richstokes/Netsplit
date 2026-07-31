@@ -759,6 +759,15 @@ private struct ConversationView: View {
     private var subtitle: String { state.subtitle(for: selection) }
     private var isChannel: Bool { if case .channel = selection { return true }; return false }
     private var channelTopic: String? { state.topic(for: selection) }
+    private var memberListPresentation: Binding<Bool> {
+        Binding(
+            get: { isChannel && state.showsMemberList },
+            set: { isPresented in
+                guard isChannel, state.showsMemberList != isPresented else { return }
+                state.toggleMemberList()
+            }
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -883,11 +892,16 @@ private struct ConversationView: View {
                     .padding(.vertical, textMetrics.spacing(14))
                     .ircBarBackground()
                 }
-                if isChannel && state.showsMemberList {
-                    Divider()
-                        .ircDivider()
+            }
+            .inspector(isPresented: memberListPresentation) {
+                if isChannel {
                     ChannelMemberList(state: state, selection: selection)
                         .id(selection)
+                        .inspectorColumnWidth(
+                            min: textMetrics.spacing(210),
+                            ideal: textMetrics.spacing(238),
+                            max: textMetrics.spacing(310)
+                        )
                 }
             }
         }
