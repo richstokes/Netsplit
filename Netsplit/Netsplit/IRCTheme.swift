@@ -202,6 +202,8 @@ private struct IRCWorkspaceThemeModifier: ViewModifier {
             content
                 .foregroundStyle(palette.text, palette.secondaryText)
                 .background(palette.background.ignoresSafeArea())
+                .toolbarBackground(palette.bar, for: .windowToolbar)
+                .toolbarBackground(.visible, for: .windowToolbar)
         } else {
             content
         }
