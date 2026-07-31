@@ -41,6 +41,20 @@ struct IRCThemePalette {
         0x9CCFD8, 0xC4A7E7, 0xF6C177, 0xEBBCBA,
         0xEB6F92, 0x3E8FB0, 0x908CAA, 0xE0DEF4
     ]
+    static let rosePineDawnBackgroundHex: UInt32 = 0xFAF4ED
+    static let rosePineDawnBarHex: UInt32 = 0xF2E9E1
+    static let rosePineDawnSecondaryTextHex: UInt32 = 0x625D75
+    static let rosePineDawnNicknameHexValues: [UInt32] = [
+        0x286983, 0xA14360, 0x6E5A8A, 0xA8504D,
+        0x8A5900, 0x356C75, 0x625D75, 0x3F5F8F
+    ]
+    static let pastelDaybreakBackgroundHex: UInt32 = 0xFFF9F5
+    static let pastelDaybreakBarHex: UInt32 = 0xF2EDFA
+    static let pastelDaybreakSecondaryTextHex: UInt32 = 0x665A76
+    static let pastelDaybreakNicknameHexValues: [UInt32] = [
+        0x386F79, 0x795596, 0xA24E6C, 0x875B18,
+        0x3F7456, 0x4B6495, 0xA34E49, 0x6E587F
+    ]
     static let greyscaleBackgroundHex: UInt32 = 0x161616
     static let greyscaleBarHex: UInt32 = 0x101010
     static let greyscaleSecondaryTextHex: UInt32 = 0xA6A6A6
@@ -132,6 +146,42 @@ struct IRCThemePalette {
             Color(hex: 0xFFA657), Color(hex: 0xD29922),
             Color(hex: 0x7EE787), Color(hex: 0x39C5CF)
         ]
+    )
+
+    // Adapted from the canonical Rosé Pine Dawn palette. Identity colors retain
+    // its muted hues while being darkened enough for small text on the light base.
+    static let rosePineDawn = IRCThemePalette(
+        background: Color(hex: rosePineDawnBackgroundHex),
+        bar: Color(hex: rosePineDawnBarHex),
+        panel: Color(hex: 0xFFFAF3),
+        field: Color(hex: 0xEAE2DC),
+        border: Color(hex: 0xCCC7C2),
+        text: Color(hex: 0x575279),
+        secondaryText: Color(hex: rosePineDawnSecondaryTextHex),
+        accent: Color(hex: 0x286983),
+        emphasizedBackground: Color(hex: 0xDFDAD9),
+        emphasizedText: Color(hex: 0x575279),
+        warningSecondaryText: Color(hex: 0xA14360),
+        prominentButtonText: Color(hex: 0xFAF4ED),
+        nicknameColors: rosePineDawnNicknameHexValues.map { Color(hex: $0) }
+    )
+
+    // A soft daylight palette with cream, lavender, powder-blue, mint, and blush
+    // surfaces. Deeper versions of those hues keep small identity text legible.
+    static let pastelDaybreak = IRCThemePalette(
+        background: Color(hex: pastelDaybreakBackgroundHex),
+        bar: Color(hex: pastelDaybreakBarHex),
+        panel: Color(hex: 0xEEF5FB),
+        field: Color(hex: 0xE9F5F0),
+        border: Color(hex: 0xD8CEE4),
+        text: Color(hex: 0x493F58),
+        secondaryText: Color(hex: pastelDaybreakSecondaryTextHex),
+        accent: Color(hex: 0x7D519B),
+        emphasizedBackground: Color(hex: 0xF7E2EA),
+        emphasizedText: Color(hex: 0x493F58),
+        warningSecondaryText: Color(hex: 0xA24E6C),
+        prominentButtonText: Color(hex: 0xFFF9F5),
+        nicknameColors: pastelDaybreakNicknameHexValues.map { Color(hex: $0) }
     )
 
     // Adapted from the canonical Rosé Pine palette. The brighter Moon pine is
@@ -230,6 +280,8 @@ extension IRCApplicationAppearance {
         case .catppuccinMocha: return .catppuccinMocha
         case .githubLight: return .githubLight
         case .githubDark: return .githubDark
+        case .rosePineDawn: return .rosePineDawn
+        case .pastelDaybreak: return .pastelDaybreak
         case .rosePine: return .rosePine
         case .cyberpunk: return .cyberpunk
         case .c64: return .c64

@@ -10,11 +10,13 @@ import Testing
 struct IRCModelsAndPolicyTests {
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
-        #expect(IRCApplicationAppearance.allCases.count == 11)
+        #expect(IRCApplicationAppearance.allCases.count == 13)
         #expect(IRCApplicationAppearance.catppuccinLatte.colorScheme == .light)
         #expect(IRCApplicationAppearance.catppuccinMocha.colorScheme == .dark)
         #expect(IRCApplicationAppearance.githubLight.colorScheme == .light)
         #expect(IRCApplicationAppearance.githubDark.colorScheme == .dark)
+        #expect(IRCApplicationAppearance.rosePineDawn.colorScheme == .light)
+        #expect(IRCApplicationAppearance.pastelDaybreak.colorScheme == .light)
         #expect(IRCApplicationAppearance.rosePine.colorScheme == .dark)
         #expect(IRCApplicationAppearance.cyberpunk.colorScheme == .dark)
         #expect(IRCApplicationAppearance.c64.colorScheme == .dark)
@@ -23,6 +25,8 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.catppuccinMocha.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubLight.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubDark.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.rosePineDawn.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.pastelDaybreak.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.rosePine.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.cyberpunk.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.c64.palette?.nicknameColors.count == 8)
@@ -41,6 +45,34 @@ struct IRCModelsAndPolicyTests {
         #expect(Self.contrastRatio(
             foreground: IRCThemePalette.catppuccinLatteSecondaryTextHex,
             background: IRCThemePalette.catppuccinLatteBarHex
+        ) >= 4.5)
+    }
+
+    @Test("Pastel Daybreak text colors meet normal-text contrast")
+    func validatesPastelDaybreakTextContrast() {
+        for color in IRCThemePalette.pastelDaybreakNicknameHexValues {
+            #expect(Self.contrastRatio(
+                foreground: color,
+                background: IRCThemePalette.pastelDaybreakBackgroundHex
+            ) >= 4.5)
+        }
+        #expect(Self.contrastRatio(
+            foreground: IRCThemePalette.pastelDaybreakSecondaryTextHex,
+            background: IRCThemePalette.pastelDaybreakBarHex
+        ) >= 4.5)
+    }
+
+    @Test("Rose Pine Dawn text colors meet normal-text contrast")
+    func validatesRosePineDawnTextContrast() {
+        for color in IRCThemePalette.rosePineDawnNicknameHexValues {
+            #expect(Self.contrastRatio(
+                foreground: color,
+                background: IRCThemePalette.rosePineDawnBackgroundHex
+            ) >= 4.5)
+        }
+        #expect(Self.contrastRatio(
+            foreground: IRCThemePalette.rosePineDawnSecondaryTextHex,
+            background: IRCThemePalette.rosePineDawnBarHex
         ) >= 4.5)
     }
 
