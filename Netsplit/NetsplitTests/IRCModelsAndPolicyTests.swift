@@ -16,7 +16,8 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.githubLight.colorScheme == .light)
         #expect(IRCApplicationAppearance.githubDark.colorScheme == .dark)
         #expect(IRCApplicationAppearance.rosePineDawn.colorScheme == .light)
-        #expect(IRCApplicationAppearance.pastelDaybreak.colorScheme == .light)
+        #expect(IRCApplicationAppearance.solarizedSepia.colorScheme == .light)
+        #expect(IRCApplicationAppearance.solarizedSepia.rawValue == "pastelDaybreak")
         #expect(IRCApplicationAppearance.rosePine.colorScheme == .dark)
         #expect(IRCApplicationAppearance.cyberpunk.colorScheme == .dark)
         #expect(IRCApplicationAppearance.c64.colorScheme == .dark)
@@ -26,7 +27,7 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.githubLight.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubDark.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.rosePineDawn.palette?.nicknameColors.count == 8)
-        #expect(IRCApplicationAppearance.pastelDaybreak.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.solarizedSepia.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.rosePine.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.cyberpunk.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.c64.palette?.nicknameColors.count == 8)
@@ -48,17 +49,17 @@ struct IRCModelsAndPolicyTests {
         ) >= 4.5)
     }
 
-    @Test("Pastel Daybreak text colors meet normal-text contrast")
-    func validatesPastelDaybreakTextContrast() {
-        for color in IRCThemePalette.pastelDaybreakNicknameHexValues {
+    @Test("Solarized Sepia text colors meet normal-text contrast")
+    func validatesSolarizedSepiaTextContrast() {
+        for color in IRCThemePalette.solarizedSepiaNicknameHexValues {
             #expect(Self.contrastRatio(
                 foreground: color,
-                background: IRCThemePalette.pastelDaybreakBackgroundHex
+                background: IRCThemePalette.solarizedSepiaBackgroundHex
             ) >= 4.5)
         }
         #expect(Self.contrastRatio(
-            foreground: IRCThemePalette.pastelDaybreakSecondaryTextHex,
-            background: IRCThemePalette.pastelDaybreakBarHex
+            foreground: IRCThemePalette.solarizedSepiaSecondaryTextHex,
+            background: IRCThemePalette.solarizedSepiaBarHex
         ) >= 4.5)
     }
 

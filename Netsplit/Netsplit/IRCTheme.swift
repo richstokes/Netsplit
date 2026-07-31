@@ -48,12 +48,12 @@ struct IRCThemePalette {
         0x286983, 0xA14360, 0x6E5A8A, 0xA8504D,
         0x8A5900, 0x356C75, 0x625D75, 0x3F5F8F
     ]
-    static let pastelDaybreakBackgroundHex: UInt32 = 0xFFF9F5
-    static let pastelDaybreakBarHex: UInt32 = 0xF2EDFA
-    static let pastelDaybreakSecondaryTextHex: UInt32 = 0x665A76
-    static let pastelDaybreakNicknameHexValues: [UInt32] = [
-        0x386F79, 0x795596, 0xA24E6C, 0x875B18,
-        0x3F7456, 0x4B6495, 0xA34E49, 0x6E587F
+    static let solarizedSepiaBackgroundHex: UInt32 = 0xF7EEDB
+    static let solarizedSepiaBarHex: UInt32 = 0xEDE2CA
+    static let solarizedSepiaSecondaryTextHex: UInt32 = 0x665E4E
+    static let solarizedSepiaNicknameHexValues: [UInt32] = [
+        0x2D6F73, 0x7B5F17, 0x9A4738, 0x8B3F64,
+        0x4F5F93, 0x3F6E45, 0x76547E, 0x81532D
     ]
     static let greyscaleBackgroundHex: UInt32 = 0x161616
     static let greyscaleBarHex: UInt32 = 0x101010
@@ -166,22 +166,22 @@ struct IRCThemePalette {
         nicknameColors: rosePineDawnNicknameHexValues.map { Color(hex: $0) }
     )
 
-    // A soft daylight palette with cream, lavender, powder-blue, mint, and blush
-    // surfaces. Deeper versions of those hues keep small identity text legible.
-    static let pastelDaybreak = IRCThemePalette(
-        background: Color(hex: pastelDaybreakBackgroundHex),
-        bar: Color(hex: pastelDaybreakBarHex),
-        panel: Color(hex: 0xEEF5FB),
-        field: Color(hex: 0xE9F5F0),
-        border: Color(hex: 0xD8CEE4),
-        text: Color(hex: 0x493F58),
-        secondaryText: Color(hex: pastelDaybreakSecondaryTextHex),
-        accent: Color(hex: 0x7D519B),
-        emphasizedBackground: Color(hex: 0xF7E2EA),
-        emphasizedText: Color(hex: 0x493F58),
-        warningSecondaryText: Color(hex: 0xA24E6C),
-        prominentButtonText: Color(hex: 0xFFF9F5),
-        nicknameColors: pastelDaybreakNicknameHexValues.map { Color(hex: $0) }
+    // Solarized-inspired hues on a warmer parchment base. Large surfaces stay
+    // within one sepia family while muted spectrum colors identify participants.
+    static let solarizedSepia = IRCThemePalette(
+        background: Color(hex: solarizedSepiaBackgroundHex),
+        bar: Color(hex: solarizedSepiaBarHex),
+        panel: Color(hex: 0xF3E8D3),
+        field: Color(hex: 0xE4D8BC),
+        border: Color(hex: 0xCBBE9F),
+        text: Color(hex: 0x4A4335),
+        secondaryText: Color(hex: solarizedSepiaSecondaryTextHex),
+        accent: Color(hex: 0x2D6F73),
+        emphasizedBackground: Color(hex: 0xDDD0B3),
+        emphasizedText: Color(hex: 0x3F392E),
+        warningSecondaryText: Color(hex: 0x9A4738),
+        prominentButtonText: Color(hex: 0xFFF8E8),
+        nicknameColors: solarizedSepiaNicknameHexValues.map { Color(hex: $0) }
     )
 
     // Adapted from the canonical Rosé Pine palette. The brighter Moon pine is
@@ -281,7 +281,7 @@ extension IRCApplicationAppearance {
         case .githubLight: return .githubLight
         case .githubDark: return .githubDark
         case .rosePineDawn: return .rosePineDawn
-        case .pastelDaybreak: return .pastelDaybreak
+        case .solarizedSepia: return .solarizedSepia
         case .rosePine: return .rosePine
         case .cyberpunk: return .cyberpunk
         case .c64: return .c64

@@ -17,7 +17,8 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
     case githubLight
     case githubDark
     case rosePineDawn
-    case pastelDaybreak
+    // Preserve the original stored value so existing selections migrate in place.
+    case solarizedSepia = "pastelDaybreak"
     case rosePine
     case cyberpunk
     case c64
@@ -35,7 +36,7 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
         case .githubLight: return "GitHub Light"
         case .githubDark: return "GitHub Dark"
         case .rosePineDawn: return "Rose Pine Dawn"
-        case .pastelDaybreak: return "Pastel Daybreak"
+        case .solarizedSepia: return "Solarized Sepia"
         case .rosePine: return "Rose Pine"
         case .cyberpunk: return "Cyberpunk"
         case .c64: return "C64"
@@ -46,7 +47,7 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
     var colorScheme: ColorScheme? {
         switch self {
         case .system: return nil
-        case .light, .catppuccinLatte, .githubLight, .rosePineDawn, .pastelDaybreak: return .light
+        case .light, .catppuccinLatte, .githubLight, .rosePineDawn, .solarizedSepia: return .light
         case .dark, .catppuccinMocha, .githubDark, .rosePine, .cyberpunk, .c64, .greyscale: return .dark
         }
     }
