@@ -1615,6 +1615,23 @@ enum SidebarItem: Hashable {
     }
 }
 
+enum IRCDisconnectSelectionPolicy {
+    static func fallback(
+        afterDisconnecting disconnectedServerID: UUID,
+        selectedServerID: UUID?,
+        orderedActiveServerIDs: [UUID]
+    ) -> SidebarItem? {
+        guard selectedServerID == disconnectedServerID else { return nil }
+
+        let remainingServerIDs = orderedActiveServerIDs.filter { $0 != disconnectedServerID }
+        guard !remainingServerIDs.isEmpty else { return .connectionCenter }
+
+        let disconnectedIndex = orderedActiveServerIDs.firstIndex(of: disconnectedServerID) ?? 0
+        let fallbackIndex = min(disconnectedIndex, remainingServerIDs.count - 1)
+        return .server(remainingServerIDs[fallbackIndex])
+    }
+}
+
 enum IRCJumpDestinationKind: String, Hashable {
     case server = "Server"
     case channel = "Channel"

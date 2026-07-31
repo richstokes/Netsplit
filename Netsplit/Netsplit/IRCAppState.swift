@@ -885,7 +885,7 @@ final class IRCAppState: ObservableObject {
 
     func reconnect(_ profile: ServerProfile) {
         let wasOneOffServer = isOneOffServer(profile)
-        disconnect(profile)
+        disconnect(profile, moveSelection: false)
         if wasOneOffServer {
             oneOffServerIDs.insert(profile.id)
             profiles.append(profile)
@@ -949,7 +949,13 @@ final class IRCAppState: ObservableObject {
         }
     }
 
-    func disconnect(_ profile: ServerProfile, reason: String? = nil) {
+    func disconnect(
+        _ profile: ServerProfile,
+        reason: String? = nil,
+        moveSelection: Bool = true
+    ) {
+        let orderedActiveServerIDs = activeProfiles.map(\.id)
+        let selectedServerID = selection.flatMap { self.profile(for: $0)?.id }
         pendingLaunchConnectionIDs.remove(profile.id)
         systemSleepState.remove(profile.id)
         pendingWakeRestoreServerIDs.remove(profile.id)
@@ -969,6 +975,15 @@ final class IRCAppState: ObservableObject {
         observedLocalSourcePrefixes.removeValue(forKey: profile.id)
         if let transport {
             retainWhileQuitting(transport, reason: reason ?? resolvedQuitMessage())
+        }
+        if moveSelection,
+           let fallback = IRCDisconnectSelectionPolicy.fallback(
+               afterDisconnecting: profile.id,
+               selectedServerID: selectedServerID,
+               orderedActiveServerIDs: orderedActiveServerIDs
+           ) {
+            removeNavigationHistory(for: profile.id)
+            selectWithoutRecordingHistory(fallback)
         }
         if oneOffServerIDs.remove(profile.id) != nil {
             removeConversations(for: profile.id)
@@ -3125,10 +3140,19 @@ final class IRCAppState: ObservableObject {
     }
 
     private func selectFromHistory(_ destination: SidebarItem) {
+        selectWithoutRecordingHistory(destination)
+        requestComposerFocus()
+    }
+
+    private func selectWithoutRecordingHistory(_ destination: SidebarItem) {
         isNavigatingSelectionHistory = true
         selection = destination
         isNavigatingSelectionHistory = false
-        requestComposerFocus()
+    }
+
+    private func removeNavigationHistory(for serverID: UUID) {
+        backSelectionHistory.removeAll { profile(for: $0)?.id == serverID }
+        forwardSelectionHistory.removeAll { profile(for: $0)?.id == serverID }
     }
 
     private func appendToBackHistory(_ item: SidebarItem) {

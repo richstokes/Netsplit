@@ -16,6 +16,54 @@ struct ServerProfileTests {
         ])
     }
 
+    @Test("Disconnecting the selected server chooses the next active server")
+    func selectsNextServerAfterDisconnect() {
+        let first = UUID()
+        let selected = UUID()
+        let next = UUID()
+
+        #expect(IRCDisconnectSelectionPolicy.fallback(
+            afterDisconnecting: selected,
+            selectedServerID: selected,
+            orderedActiveServerIDs: [first, selected, next]
+        ) == .server(next))
+    }
+
+    @Test("Disconnecting the last selected server chooses the previous active server")
+    func selectsPreviousServerAfterDisconnectingLast() {
+        let previous = UUID()
+        let selected = UUID()
+
+        #expect(IRCDisconnectSelectionPolicy.fallback(
+            afterDisconnecting: selected,
+            selectedServerID: selected,
+            orderedActiveServerIDs: [previous, selected]
+        ) == .server(previous))
+    }
+
+    @Test("Disconnecting the only selected server opens Connections")
+    func opensConnectionsAfterDisconnectingOnlyServer() {
+        let selected = UUID()
+
+        #expect(IRCDisconnectSelectionPolicy.fallback(
+            afterDisconnecting: selected,
+            selectedServerID: selected,
+            orderedActiveServerIDs: [selected]
+        ) == .connectionCenter)
+    }
+
+    @Test("Disconnecting a background server preserves the current selection")
+    func preservesSelectionAfterDisconnectingBackgroundServer() {
+        let selected = UUID()
+        let disconnected = UUID()
+
+        #expect(IRCDisconnectSelectionPolicy.fallback(
+            afterDisconnecting: disconnected,
+            selectedServerID: selected,
+            orderedActiveServerIDs: [selected, disconnected]
+        ) == nil)
+    }
+
     @Test("Decodes legacy profiles with safe defaults for newer fields")
     func decodesLegacyProfile() throws {
         let json = Data(#"{"name":"Legacy","hostname":"irc.example.com","port":6697,"useTLS":true}"#.utf8)
