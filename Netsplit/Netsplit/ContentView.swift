@@ -376,7 +376,11 @@ private struct SidebarView: View {
         }
         if !profile.isBuiltIn && !state.isOneOffServer(profile) {
             Divider()
-            Button("Delete Server Profile", role: .destructive) { state.delete(profile) }
+            Button(role: .destructive) {
+                state.delete(profile)
+            } label: {
+                Label("Delete Server Profile", systemImage: "trash")
+            }
         }
     }
 
