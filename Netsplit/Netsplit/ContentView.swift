@@ -763,8 +763,16 @@ private struct ConversationView: View {
         Binding(
             get: { isChannel && state.showsMemberList },
             set: { isPresented in
-                guard isChannel, state.showsMemberList != isPresented else { return }
-                state.showsMemberList = isPresented
+                // The toolbar/menu owns opening. Ignore a restored `true`
+                // from a newly materialized inspector so switching contexts
+                // cannot silently override the user's hidden preference. An
+                // outgoing inspector can also report its dismissal after the
+                // selection has changed; that is not a user preference change.
+                guard state.selection == selection,
+                      isChannel,
+                      !isPresented,
+                      state.showsMemberList else { return }
+                state.showsMemberList = false
             }
         )
     }
