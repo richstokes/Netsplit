@@ -374,7 +374,7 @@ extension IRCApplicationAppearance {
     case .dark:
       return Color(hex: 0x2C2C2E)
     default:
-      return palette?.background ?? .accentColor
+      return palette?.accent ?? .accentColor
     }
   }
 
@@ -386,9 +386,6 @@ extension IRCApplicationAppearance {
       let path = NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1))
       NSColor(previewColor).setFill()
       path.fill()
-      NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
-      path.lineWidth = 0.5
-      path.stroke()
       return true
     }
     image.isTemplate = false
