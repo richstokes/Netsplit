@@ -2,9 +2,30 @@ import Foundation
 import Security
 
 enum KeychainStore {
-    private static let service = "richstokes.irc"
+    enum Operation: Equatable {
+        case read
+        case save
+        case remove
+    }
 
-    static func value(for account: String) -> String {
+    struct AccessError: Error {
+        let operation: Operation
+        let status: OSStatus
+    }
+
+    // Keep this value stable: existing App Store credentials use it.
+    static let productionService = "richstokes.irc"
+    static let developmentService = "richstokes.irc.debug"
+
+    static var service: String {
+#if DEBUG
+        developmentService
+#else
+        productionService
+#endif
+    }
+
+    static func value(for account: String) throws -> String {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -13,31 +34,69 @@ enum KeychainStore {
             kSecMatchLimit: kSecMatchLimitOne
         ]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return "" }
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return "" }
+        guard status == errSecSuccess else {
+            throw AccessError(operation: .read, status: status)
+        }
+        guard let data = result as? Data else { return "" }
         return String(decoding: data, as: UTF8.self)
     }
 
-    static func set(_ value: String, for account: String) {
+    static func set(_ value: String, for account: String) throws {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecAttrAccount: account
         ]
         guard !value.isEmpty else {
-            SecItemDelete(query as CFDictionary)
+            let status = SecItemDelete(query as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw AccessError(operation: .remove, status: status)
+            }
             return
         }
         let data = Data(value.utf8)
         let update: [CFString: Any] = [kSecValueData: data]
-        if SecItemUpdate(query as CFDictionary, update as CFDictionary) == errSecItemNotFound {
+        let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if updateStatus == errSecItemNotFound {
             var newItem = query
+            let metadata = itemMetadata(for: account)
+            newItem[kSecAttrLabel] = metadata.label
+            newItem[kSecAttrDescription] = metadata.description
             newItem[kSecValueData] = data
-            SecItemAdd(newItem as CFDictionary, nil)
+            let addStatus = SecItemAdd(newItem as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                throw AccessError(operation: .save, status: addStatus)
+            }
+        } else if updateStatus != errSecSuccess {
+            throw AccessError(operation: .save, status: updateStatus)
         }
     }
 
-    static func remove(account: String) {
-        set("", for: account)
+    static func remove(account: String) throws {
+        try set("", for: account)
+    }
+
+    static func itemMetadata(for account: String) -> (label: String, description: String) {
+        let purpose: String
+        switch account.split(separator: ".", maxSplits: 1).first {
+        case "server-password":
+            purpose = "Server Password"
+        case "sasl-password":
+            purpose = "SASL Password"
+        case "ssh-password":
+            purpose = "SSH Password"
+        case "ssh-private-key":
+            purpose = "SSH Private Key"
+        case "on-connect-commands":
+            purpose = "On-Connect Commands"
+        default:
+            purpose = "Saved Credential"
+        }
+        return (
+            label: "Netsplit \(purpose)",
+            description: "Secure connection information saved by Netsplit"
+        )
     }
 }

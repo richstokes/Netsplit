@@ -57,6 +57,12 @@ final class IRCRevisionSignal: ObservableObject {
 
 @MainActor
 final class IRCAppState: ObservableObject {
+    struct KeychainAccessIssue: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
+
     private struct ScheduledReconnect {
         let requestID: UUID
         let reason: IRCReconnectReason
@@ -142,6 +148,7 @@ final class IRCAppState: ObservableObject {
     @Published private var channelBanLists: [UUID: [IRCBanEntry]] = [:]
     @Published private var channelBanListRequests = Set<UUID>()
     @Published private var channelBanListErrors: [UUID: String] = [:]
+    @Published var keychainAccessIssue: KeychainAccessIssue?
 
     private var conversations: [UUID: [IRCMessage]] = [:]
     private var conversationDrafts: [SidebarItem: String] = [:]
@@ -208,6 +215,7 @@ final class IRCAppState: ObservableObject {
     private let wakeRecoveryStagger: TimeInterval = 0.2
     private static let defaultQuitMessage = "Closing macOS client"
     private var hasStartedLaunchConnections = false
+    private var hasReportedKeychainAccessIssue = false
     private var systemSleepState = IRCSystemSleepStateMachine()
     private var sleepPausedReconnectReasons: [UUID: IRCReconnectReason] = [:]
     private var pendingWakeRestoreServerIDs = Set<UUID>()
@@ -569,23 +577,23 @@ final class IRCAppState: ObservableObject {
     }
 
     func serverPassword(for profile: ServerProfile) -> String {
-        KeychainStore.value(for: credentialAccount(profile: profile, kind: "server-password"))
+        credentialValue(for: profile, kind: "server-password")
     }
 
     func saslPassword(for profile: ServerProfile) -> String {
-        KeychainStore.value(for: credentialAccount(profile: profile, kind: "sasl-password"))
+        credentialValue(for: profile, kind: "sasl-password")
     }
 
     func sshPassword(for profile: ServerProfile) -> String {
-        KeychainStore.value(for: credentialAccount(profile: profile, kind: "ssh-password"))
+        credentialValue(for: profile, kind: "ssh-password")
     }
 
     func sshPrivateKey(for profile: ServerProfile) -> String {
-        KeychainStore.value(for: credentialAccount(profile: profile, kind: "ssh-private-key"))
+        credentialValue(for: profile, kind: "ssh-private-key")
     }
 
     func onConnectCommands(for profile: ServerProfile) -> IRCOnConnectCommandPhases {
-        let encoded = KeychainStore.value(for: credentialAccount(profile: profile, kind: "on-connect-commands"))
+        let encoded = credentialValue(for: profile, kind: "on-connect-commands")
         guard let data = encoded.data(using: .utf8),
               let commands = try? JSONDecoder().decode(IRCOnConnectCommandPhases.self, from: data) else {
             return IRCOnConnectCommandPhases()
@@ -1050,11 +1058,11 @@ final class IRCAppState: ObservableObject {
         guard !profile.isBuiltIn else { return }
         disconnect(profile)
         removeConversations(for: profile.id)
-        KeychainStore.remove(account: credentialAccount(profile: profile, kind: "server-password"))
-        KeychainStore.remove(account: credentialAccount(profile: profile, kind: "sasl-password"))
-        KeychainStore.remove(account: credentialAccount(profile: profile, kind: "on-connect-commands"))
-        KeychainStore.remove(account: credentialAccount(profile: profile, kind: "ssh-password"))
-        KeychainStore.remove(account: credentialAccount(profile: profile, kind: "ssh-private-key"))
+        removeCredential(for: profile, kind: "server-password")
+        removeCredential(for: profile, kind: "sasl-password")
+        removeCredential(for: profile, kind: "on-connect-commands")
+        removeCredential(for: profile, kind: "ssh-password")
+        removeCredential(for: profile, kind: "ssh-private-key")
         profiles.removeAll { $0.id == profile.id }
         saveProfiles()
     }
@@ -4391,17 +4399,18 @@ final class IRCAppState: ObservableObject {
     }
 
     private func saveCredentials(for profile: ServerProfile, serverPassword: String, saslPassword: String, onConnectCommands: IRCOnConnectCommandPhases, sshPassword: String, sshPrivateKey: String) {
-        KeychainStore.set(serverPassword, for: credentialAccount(profile: profile, kind: "server-password"))
-        KeychainStore.set(saslPassword, for: credentialAccount(profile: profile, kind: "sasl-password"))
+        setCredential(serverPassword, for: profile, kind: "server-password")
+        setCredential(saslPassword, for: profile, kind: "sasl-password")
         let cleanedCommands = onConnectCommands.removingBlankCommands
         let encodedCommands = (try? JSONEncoder().encode(cleanedCommands))
             .map { String(decoding: $0, as: UTF8.self) } ?? ""
-        KeychainStore.set(
+        setCredential(
             cleanedCommands.isEmpty ? "" : encodedCommands,
-            for: credentialAccount(profile: profile, kind: "on-connect-commands")
+            for: profile,
+            kind: "on-connect-commands"
         )
-        KeychainStore.set(sshPassword, for: credentialAccount(profile: profile, kind: "ssh-password"))
-        KeychainStore.set(sshPrivateKey, for: credentialAccount(profile: profile, kind: "ssh-private-key"))
+        setCredential(sshPassword, for: profile, kind: "ssh-password")
+        setCredential(sshPrivateKey, for: profile, kind: "ssh-private-key")
     }
 
     private func applySSHSettings(to profile: inout ServerProfile, enabled: Bool, hostname: String, port: UInt16, username: String, keyFilename: String?) {
@@ -4416,6 +4425,47 @@ final class IRCAppState: ObservableObject {
 
     private func credentialAccount(profile: ServerProfile, kind: String) -> String {
         "\(kind).\(profile.id.uuidString)"
+    }
+
+    private func credentialValue(for profile: ServerProfile, kind: String) -> String {
+        do {
+            return try KeychainStore.value(for: credentialAccount(profile: profile, kind: kind))
+        } catch {
+            reportKeychainAccessIssue(error)
+            return ""
+        }
+    }
+
+    private func setCredential(_ value: String, for profile: ServerProfile, kind: String) {
+        do {
+            try KeychainStore.set(value, for: credentialAccount(profile: profile, kind: kind))
+        } catch {
+            reportKeychainAccessIssue(error)
+        }
+    }
+
+    private func removeCredential(for profile: ServerProfile, kind: String) {
+        do {
+            try KeychainStore.remove(account: credentialAccount(profile: profile, kind: kind))
+        } catch {
+            reportKeychainAccessIssue(error)
+        }
+    }
+
+    private func reportKeychainAccessIssue(_ error: Error) {
+        guard !hasReportedKeychainAccessIssue else { return }
+        hasReportedKeychainAccessIssue = true
+
+        let operation = (error as? KeychainStore.AccessError)?.operation
+        let isSaving = operation == .save
+        keychainAccessIssue = KeychainAccessIssue(
+            title: isSaving ? "Couldn’t Save Credentials" : "Couldn’t Access Saved Credentials",
+            message: """
+            macOS did not allow Netsplit to \(isSaving ? "save information in" : "access information from") your login Keychain. Your server profiles are still safe, but passwords, SSH credentials, or on-connect commands may be unavailable.
+
+            This can happen after switching between development and App Store builds. If macOS asks again, choose “Always Allow”, or re-enter the affected credential in the server profile.
+            """
+        )
     }
 
     private static func anonymousNickname() -> String {

@@ -146,6 +146,13 @@ struct ContentView: View {
         }) {
             JumpPalette(state: state)
         }
+        .alert(item: $state.keychainAccessIssue) { issue in
+            Alert(
+                title: Text(issue.title),
+                message: Text(issue.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
 #if DEBUG
         .onChange(of: state.selection) { _, selection in
             TranscriptDebugLog.navigation("root-selection-changed", selection: selection)
