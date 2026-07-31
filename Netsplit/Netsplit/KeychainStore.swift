@@ -13,17 +13,8 @@ enum KeychainStore {
         let status: OSStatus
     }
 
-    // Keep this value stable: existing App Store credentials use it.
-    static let productionService = "richstokes.irc"
-    static let developmentService = "richstokes.irc.debug"
-
-    static var service: String {
-#if DEBUG
-        developmentService
-#else
-        productionService
-#endif
-    }
+    // Keep this value stable: all existing credentials use it.
+    static let service = "richstokes.irc"
 
     static func value(for account: String) throws -> String {
         let query: [CFString: Any] = [

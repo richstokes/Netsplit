@@ -5,22 +5,7 @@ import Testing
 struct KeychainStoreTests {
     @Test("Production service remains compatible with existing credentials")
     func preservesProductionService() {
-        #expect(KeychainStore.productionService == "richstokes.irc")
-    }
-
-    @Test("Development credentials use an isolated service")
-    func isolatesDevelopmentService() {
-        #expect(KeychainStore.developmentService == "richstokes.irc.debug")
-        #expect(KeychainStore.developmentService != KeychainStore.productionService)
-    }
-
-    @Test("Active service follows the build configuration")
-    func selectsConfigurationService() {
-#if DEBUG
-        #expect(KeychainStore.service == KeychainStore.developmentService)
-#else
-        #expect(KeychainStore.service == KeychainStore.productionService)
-#endif
+        #expect(KeychainStore.service == "richstokes.irc")
     }
 
     @Test("New credentials have a human-readable Keychain label")
