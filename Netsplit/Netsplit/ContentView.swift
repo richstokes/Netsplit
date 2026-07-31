@@ -1770,6 +1770,7 @@ private struct ChannelMemberRow: View {
     let selection: SidebarItem
     @State private var isHovered = false
     @Environment(\.ircTextMetrics) private var textMetrics
+    @Environment(\.ircThemePalette) private var themePalette
 
     var body: some View {
         HStack(spacing: textMetrics.spacing(8)) {
@@ -1782,7 +1783,11 @@ private struct ChannelMemberRow: View {
                         .font(.system(size: textMetrics.size(12), weight: .bold, design: .monospaced))
                 }
             }
-            .foregroundStyle(member.role == nil || isIgnored ? Color.secondary : Color.accentColor)
+            .foregroundStyle(
+                member.role == nil || isIgnored
+                    ? Color.secondary
+                    : themePalette?.accent ?? Color.accentColor
+            )
             .frame(width: textMetrics.spacing(14), alignment: .center)
 
             Text(member.nickname)
