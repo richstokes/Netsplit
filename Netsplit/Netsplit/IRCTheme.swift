@@ -290,7 +290,33 @@ extension IRCApplicationAppearance {
     }
 
     var previewColor: Color {
-        palette?.accent ?? .accentColor
+        switch self {
+        case .system:
+            return Color(nsColor: .controlAccentColor)
+        case .light:
+            return Color(hex: 0xF2F2F0)
+        case .dark:
+            return Color(hex: 0x2C2C2E)
+        default:
+            return palette?.accent ?? .accentColor
+        }
+    }
+
+    var previewImage: NSImage {
+        let image = NSImage(
+            size: NSSize(width: 12, height: 12),
+            flipped: false
+        ) { rect in
+            let path = NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1))
+            NSColor(previewColor).setFill()
+            path.fill()
+            NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 }
 

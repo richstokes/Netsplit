@@ -35,6 +35,15 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.system.palette == nil)
     }
 
+    @Test("Theme menu swatches preserve their original colors")
+    func preservesThemeMenuSwatchColors() {
+        for appearance in IRCApplicationAppearance.allCases {
+            let image = appearance.previewImage
+            #expect(image.size == NSSize(width: 12, height: 12))
+            #expect(!image.isTemplate)
+        }
+    }
+
     @Test("Catppuccin Latte text colors meet normal-text contrast")
     func validatesCatppuccinLatteTextContrast() {
         for color in IRCThemePalette.catppuccinLatteNicknameHexValues {

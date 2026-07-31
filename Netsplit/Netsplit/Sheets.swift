@@ -1030,17 +1030,11 @@ struct SettingsView: View {
             Section("Chat Appearance") {
                 Picker("Theme", selection: $state.applicationAppearance) {
                     ForEach(IRCApplicationAppearance.allCases) { appearance in
-                        Group {
-                            if appearance.palette == nil {
-                                Text(appearance.label)
-                            } else {
-                                Label {
-                                    Text(appearance.label)
-                                } icon: {
-                                    Image(systemName: "circle.fill")
-                                        .foregroundStyle(appearance.previewColor)
-                                }
-                            }
+                        Label {
+                            Text(appearance.label)
+                        } icon: {
+                            Image(nsImage: appearance.previewImage)
+                                .renderingMode(.original)
                         }
                         .tag(appearance)
                     }
