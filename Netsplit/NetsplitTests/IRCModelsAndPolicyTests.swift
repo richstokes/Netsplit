@@ -10,16 +10,18 @@ import Testing
 struct IRCModelsAndPolicyTests {
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
-        #expect(IRCApplicationAppearance.allCases.count == 8)
+        #expect(IRCApplicationAppearance.allCases.count == 9)
         #expect(IRCApplicationAppearance.catppuccinLatte.colorScheme == .light)
         #expect(IRCApplicationAppearance.catppuccinMocha.colorScheme == .dark)
         #expect(IRCApplicationAppearance.githubLight.colorScheme == .light)
         #expect(IRCApplicationAppearance.githubDark.colorScheme == .dark)
+        #expect(IRCApplicationAppearance.cyberpunk.colorScheme == .dark)
         #expect(IRCApplicationAppearance.c64.colorScheme == .dark)
         #expect(IRCApplicationAppearance.catppuccinLatte.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.catppuccinMocha.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubLight.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubDark.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.cyberpunk.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.c64.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.system.palette == nil)
     }
@@ -35,6 +37,20 @@ struct IRCModelsAndPolicyTests {
         #expect(Self.contrastRatio(
             foreground: IRCThemePalette.catppuccinLatteSecondaryTextHex,
             background: IRCThemePalette.catppuccinLatteBarHex
+        ) >= 4.5)
+    }
+
+    @Test("Cyberpunk text colors meet normal-text contrast")
+    func validatesCyberpunkTextContrast() {
+        for color in IRCThemePalette.cyberpunkNicknameHexValues {
+            #expect(Self.contrastRatio(
+                foreground: color,
+                background: IRCThemePalette.cyberpunkBackgroundHex
+            ) >= 4.5)
+        }
+        #expect(Self.contrastRatio(
+            foreground: IRCThemePalette.cyberpunkSecondaryTextHex,
+            background: IRCThemePalette.cyberpunkBarHex
         ) >= 4.5)
     }
 
