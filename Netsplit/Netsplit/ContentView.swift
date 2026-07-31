@@ -764,7 +764,7 @@ private struct ConversationView: View {
             get: { isChannel && state.showsMemberList },
             set: { isPresented in
                 guard isChannel, state.showsMemberList != isPresented else { return }
-                state.toggleMemberList()
+                state.showsMemberList = isPresented
             }
         )
     }
