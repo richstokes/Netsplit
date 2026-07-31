@@ -10,15 +10,17 @@ import Testing
 struct IRCModelsAndPolicyTests {
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
-        #expect(IRCApplicationAppearance.allCases.count == 7)
+        #expect(IRCApplicationAppearance.allCases.count == 8)
         #expect(IRCApplicationAppearance.catppuccinLatte.colorScheme == .light)
         #expect(IRCApplicationAppearance.catppuccinMocha.colorScheme == .dark)
         #expect(IRCApplicationAppearance.githubLight.colorScheme == .light)
         #expect(IRCApplicationAppearance.githubDark.colorScheme == .dark)
+        #expect(IRCApplicationAppearance.c64.colorScheme == .dark)
         #expect(IRCApplicationAppearance.catppuccinLatte.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.catppuccinMocha.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubLight.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubDark.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.c64.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.system.palette == nil)
     }
 
