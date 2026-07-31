@@ -298,7 +298,7 @@ extension IRCApplicationAppearance {
         case .dark:
             return Color(hex: 0x2C2C2E)
         default:
-            return palette?.accent ?? .accentColor
+            return palette?.background ?? .accentColor
         }
     }
 
