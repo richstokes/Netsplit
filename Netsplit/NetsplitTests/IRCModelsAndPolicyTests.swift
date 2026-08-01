@@ -542,7 +542,7 @@ struct IRCModelsAndPolicyTests {
     @Test("WHOIS channel lists preserve channels and remove membership prefixes")
     func parsesWhoisChannels() {
         let channels = IRCWhoisChannelParser.channels(
-            from: "@#operators +#voiced #general &local +modeless not-a-channel #general"
+            from: "@+#operators @#voiced #general &local +modeless @+modeless not-a-channel #general"
         )
         #expect(channels == ["#operators", "#voiced", "#general", "&local", "+modeless"])
     }
@@ -2213,14 +2213,17 @@ struct IRCModelsAndPolicyTests {
     func rendersAdvertisedChannelLinks() throws {
         let message = IRCMessage(
             sender: "System",
-            text: "Alice is on: @#operators +#voiced",
+            text: "Alice is on: @+#operators @#voiced @+#local",
             isSystem: true,
-            channelLinks: ["#operators", "#voiced"]
+            channelLinks: IRCWhoisChannelParser.channels(
+                from: "@+#operators @#voiced @+#local"
+            )
         )
         let rendered = IRCMessageTextRenderer.linkifiedText(for: message)
 
         #expect(try link(for: "#operators", occurrence: 0, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#operators")
         #expect(try link(for: "#voiced", occurrence: 0, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#voiced")
+        #expect(try link(for: "#local", occurrence: 0, in: rendered).flatMap(IRCInternalLink.channelName(from:)) == "#local")
     }
 
     @Test("System message rendering preserves generic senders and prefixes event senders")

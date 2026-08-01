@@ -1472,8 +1472,15 @@ enum IRCWhoisChannelParser {
         var channel = token
         while channel.count > 1, let first = channel.first {
             let remainder = channel.dropFirst()
-            guard membership.prefixes.contains(first),
-                  remainder.first.map(channelTypes.contains) == true else { break }
+            guard membership.prefixes.contains(first) else { break }
+
+            // A prefix can also be a valid channel type (notably `+`). Keep
+            // it when it begins the channel name, but remove it when another
+            // channel type follows, as in the stacked WHOIS token `@+#swift`.
+            if channelTypes.contains(first),
+               remainder.first.map(channelTypes.contains) != true {
+                break
+            }
             channel.removeFirst()
         }
         guard let first = channel.first, channelTypes.contains(first) else { return nil }
