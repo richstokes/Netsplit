@@ -156,6 +156,31 @@ struct IRCFramingAndCommandTests {
         #expect(bounded.count == 255)
     }
 
+    @Test("Bounds tagged commands without charging IRCv3 tags to the message limit")
+    func framesTaggedCommands() {
+        let tagPrefix = "@label=request-1 "
+        let result = IRCOutboundCommandFraming.frame(
+            "\(tagPrefix)PRIVMSG #swift :hello world",
+            maximumMessageBytes: 20
+        )
+        guard case .framed(let command, let wasTruncated) = result else {
+            Issue.record("Expected a valid tagged command")
+            return
+        }
+        #expect(command.hasPrefix(tagPrefix))
+        #expect(String(command.dropFirst(tagPrefix.count)).utf8.count == 20)
+        #expect(wasTruncated)
+
+        let oversizedTags = "@" + String(
+            repeating: "x",
+            count: IRCOutboundCommandFraming.maximumClientTagSectionBytes
+        ) + " PRIVMSG #swift :hello"
+        #expect(IRCOutboundCommandFraming.frame(
+            oversizedTags,
+            maximumMessageBytes: IRCTextFraming.maximumLineBytes
+        ) == .tagsTooLong)
+    }
+
     @Test("Splits long Unicode messages into complete, reconstructable wire-safe chunks")
     func chunksUnicodeMessages() {
         let prefix = "PRIVMSG #swift :"

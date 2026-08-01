@@ -277,22 +277,126 @@ enum IRCCapability {
     "userhost-in-names",
     "chghost",
     "echo-message",
+    "batch",
+    "labeled-response",
+    "standard-replies",
   ]
 
+  private static let dependencies: [String: Set<String>] = [
+    "labeled-response": ["batch"],
+  ]
+
+  static func requestablePreferred(
+    advertised: Set<String>,
+    enabled: Set<String>
+  ) -> [String] {
+    preferred.filter { capability in
+      guard advertised.contains(capability), !enabled.contains(capability) else {
+        return false
+      }
+      return dependencies[capability]?.isSubset(of: advertised) != false
+    }
+  }
+
+  static func enabledCapabilities(
+    afterRemoving removed: Set<String>,
+    from enabled: Set<String>
+  ) -> Set<String> {
+    var remaining = enabled.subtracting(removed)
+    while true {
+      let invalid = Set(remaining.filter { capability in
+        guard let required = dependencies[capability] else { return false }
+        return !required.isSubset(of: remaining)
+      })
+      guard !invalid.isEmpty else { return remaining }
+      remaining.subtract(invalid)
+    }
+  }
+
+  struct Advertisement: Equatable {
+    var name: String
+    var value: String?
+  }
+
+  static func advertisement(from advertisedValue: String) -> Advertisement {
+    let normalizedValue = advertisedValue.drop(while: { $0 == "-" })
+    let components = normalizedValue.split(
+      separator: "=",
+      maxSplits: 1,
+      omittingEmptySubsequences: false
+    )
+    return Advertisement(
+      name: components.first.map(String.init) ?? "",
+      value: components.count == 2 ? String(components[1]) : nil
+    )
+  }
+
   static func name(from advertisedValue: String) -> String {
-    String(
-      advertisedValue.drop(while: { $0 == "-" }).split(separator: "=", maxSplits: 1).first ?? "")
+    advertisement(from: advertisedValue).name
   }
 
   static func saslMechanisms(from advertisedValue: String) -> Set<String>? {
-    let normalizedValue = advertisedValue.drop(while: { $0 == "-" })
-    guard name(from: advertisedValue) == "sasl",
-      let separator = normalizedValue.firstIndex(of: "=")
-    else { return nil }
+    let advertisement = advertisement(from: advertisedValue)
+    guard advertisement.name == "sasl", let value = advertisement.value else { return nil }
     return Set(
-      normalizedValue[normalizedValue.index(after: separator)...]
+      value
         .split(separator: ",")
         .map { $0.uppercased() })
+  }
+}
+
+struct IRCStandardReply: Equatable {
+  enum Kind: String, Equatable {
+    case failure = "FAIL"
+    case warning = "WARN"
+    case note = "NOTE"
+  }
+
+  var kind: Kind
+  var command: String
+  var code: String
+  var context: [String]
+  var description: String
+
+  init?(wire: IRCWireMessage) {
+    guard let kind = Kind(rawValue: wire.command) else { return nil }
+
+    let replyParameters: ArraySlice<String>
+    let description: String
+    if let trailing = wire.trailing {
+      guard wire.parameters.count >= 2 else { return nil }
+      replyParameters = wire.parameters[...]
+      description = trailing
+    } else {
+      guard wire.parameters.count >= 3, let finalParameter = wire.parameters.last else {
+        return nil
+      }
+      replyParameters = wire.parameters.dropLast()
+      description = finalParameter
+    }
+
+    self.kind = kind
+    command = replyParameters[replyParameters.startIndex].uppercased()
+    code = replyParameters[replyParameters.index(after: replyParameters.startIndex)].uppercased()
+    context = Array(replyParameters.dropFirst(2))
+    self.description = description
+  }
+
+  var displayText: String {
+    let subject = command == "*" ? code : "\(command) \(code)"
+    switch kind {
+    case .failure: return "\(subject): \(description)"
+    case .warning: return "Warning — \(subject): \(description)"
+    case .note: return "\(subject): \(description)"
+    }
+  }
+}
+
+enum IRCNumericReply {
+  static func isError(_ command: String) -> Bool {
+    command.count == 3
+      && command.allSatisfy(\.isNumber)
+      && (400...599).contains(Int(command) ?? 0)
   }
 }
 
@@ -683,6 +787,43 @@ enum IRCTextFraming {
       if !chunk.isEmpty { result.append(chunk) }
     }
     return result
+  }
+}
+
+enum IRCOutboundCommandFramingResult: Equatable {
+  case framed(command: String, wasTruncated: Bool)
+  case tagsTooLong
+}
+
+enum IRCOutboundCommandFraming {
+  static let maximumClientTagSectionBytes = 4_096
+
+  static func frame(
+    _ command: String,
+    maximumMessageBytes: Int
+  ) -> IRCOutboundCommandFramingResult {
+    let singleLine = IRCTextFraming.sanitizedSingleLine(command)
+    let tagPrefix: String
+    let commandWithoutTags: String
+    if singleLine.hasPrefix("@"), let separator = singleLine.firstIndex(of: " ") {
+      tagPrefix = String(singleLine[...separator])
+      commandWithoutTags = String(singleLine[singleLine.index(after: separator)...])
+    } else {
+      tagPrefix = ""
+      commandWithoutTags = singleLine
+    }
+
+    guard tagPrefix.utf8.count <= maximumClientTagSectionBytes else {
+      return .tagsTooLong
+    }
+    let boundedMessage = IRCTextFraming.prefix(
+      commandWithoutTags,
+      fittingUTF8ByteCount: maximumMessageBytes
+    )
+    return .framed(
+      command: tagPrefix + boundedMessage,
+      wasTruncated: boundedMessage != commandWithoutTags
+    )
   }
 }
 

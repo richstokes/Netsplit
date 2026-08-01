@@ -68,53 +68,148 @@ enum IRCSASLNegotiationState: Equatable {
 
 struct IRCAdvertisedCapabilities: Equatable {
     var names = Set<String>()
+    var values: [String: String] = [:]
     var saslMechanisms: Set<String>?
+
+    mutating func apply(_ advertisedValues: [String]) {
+        for advertisedValue in advertisedValues {
+            let advertisement = IRCCapability.advertisement(from: advertisedValue)
+            guard !advertisement.name.isEmpty else { continue }
+            names.insert(advertisement.name)
+            if let value = advertisement.value {
+                values[advertisement.name] = value
+            } else {
+                values.removeValue(forKey: advertisement.name)
+            }
+            if advertisement.name == "sasl" {
+                saslMechanisms = IRCCapability.saslMechanisms(from: advertisedValue)
+            }
+        }
+    }
+
+    mutating func remove(_ capabilityNames: Set<String>) {
+        names.subtract(capabilityNames)
+        capabilityNames.forEach { values.removeValue(forKey: $0) }
+        if capabilityNames.contains("sasl") {
+            saslMechanisms = nil
+        }
+    }
 }
 
 enum IRCCapabilityNegotiationState: Equatable {
-    case active(IRCAdvertisedCapabilities, sasl: IRCSASLNegotiationState?)
-    case ended(IRCAdvertisedCapabilities, sasl: IRCSASLNegotiationState?)
+    case active(
+        IRCAdvertisedCapabilities,
+        enabled: Set<String>,
+        sasl: IRCSASLNegotiationState?
+    )
+    case ended(
+        IRCAdvertisedCapabilities,
+        enabled: Set<String>,
+        sasl: IRCSASLNegotiationState?
+    )
 
     var advertised: IRCAdvertisedCapabilities {
         switch self {
-        case .active(let advertised, _), .ended(let advertised, _):
+        case .active(let advertised, _, _), .ended(let advertised, _, _):
             advertised
+        }
+    }
+
+    var enabled: Set<String> {
+        switch self {
+        case .active(_, let enabled, _), .ended(_, let enabled, _):
+            enabled
         }
     }
 
     var sasl: IRCSASLNegotiationState? {
         switch self {
-        case .active(_, let sasl), .ended(_, let sasl):
+        case .active(_, _, let sasl), .ended(_, _, let sasl):
             sasl
         }
     }
 
     func replacingAdvertised(_ advertised: IRCAdvertisedCapabilities) -> Self {
         switch self {
-        case .active(_, let sasl):
-            .active(advertised, sasl: sasl)
-        case .ended(_, let sasl):
-            .ended(advertised, sasl: sasl)
+        case .active(_, let enabled, let sasl):
+            .active(advertised, enabled: enabled, sasl: sasl)
+        case .ended(_, let enabled, let sasl):
+            .ended(advertised, enabled: enabled, sasl: sasl)
+        }
+    }
+
+    func replacingEnabled(_ enabled: Set<String>) -> Self {
+        switch self {
+        case .active(let advertised, _, let sasl):
+            .active(advertised, enabled: enabled, sasl: sasl)
+        case .ended(let advertised, _, let sasl):
+            .ended(advertised, enabled: enabled, sasl: sasl)
+        }
+    }
+
+    func acknowledging(_ capabilityTokens: [String]) -> Self {
+        var nextEnabled = enabled
+        var removed = Set<String>()
+        for token in capabilityTokens {
+            let name = IRCCapability.name(from: token)
+            guard !name.isEmpty else { continue }
+            if token.hasPrefix("-") {
+                nextEnabled.remove(name)
+                removed.insert(name)
+            } else {
+                nextEnabled.insert(name)
+            }
+        }
+        nextEnabled = IRCCapability.enabledCapabilities(
+            afterRemoving: removed,
+            from: nextEnabled
+        )
+        return replacingEnabled(nextEnabled)
+    }
+
+    func removing(_ capabilityNames: Set<String>) -> Self {
+        // cap-notify is implicit and cannot be disabled after CAP LS 302.
+        let removableNames = capabilityNames.subtracting(["cap-notify"])
+        var nextAdvertised = advertised
+        nextAdvertised.remove(removableNames)
+        var nextState = replacingAdvertised(nextAdvertised)
+            .replacingEnabled(IRCCapability.enabledCapabilities(
+                afterRemoving: removableNames,
+                from: enabled
+            ))
+        if removableNames.contains("sasl"), let sasl {
+            nextState = nextState.replacingSASL(.pending(sasl.credentials))
+        }
+        return nextState
+    }
+
+    func replacingSASL(_ nextSASL: IRCSASLNegotiationState?) -> Self {
+        switch self {
+        case .active(let advertised, let enabled, _):
+            .active(advertised, enabled: enabled, sasl: nextSASL)
+        case .ended(let advertised, let enabled, _):
+            .ended(advertised, enabled: enabled, sasl: nextSASL)
         }
     }
 
     func ending() -> Self {
         switch self {
-        case .active(let advertised, let sasl):
-            .ended(advertised, sasl: sasl)
+        case .active(let advertised, let enabled, let sasl):
+            .ended(advertised, enabled: enabled, sasl: sasl)
         case .ended:
             self
         }
     }
 
     func markingSASLResponseSent() -> Self? {
-        switch self {
-        case .active(let advertised, .pending(let credentials)):
-            .active(advertised, sasl: .responseSent(credentials))
-        case .ended(let advertised, .pending(let credentials)):
-            .ended(advertised, sasl: .responseSent(credentials))
-        case .active(_, .responseSent), .active(_, nil),
-             .ended(_, .responseSent), .ended(_, nil):
+        guard enabled.contains("sasl") else { return nil }
+        return switch self {
+        case .active(let advertised, let enabled, .pending(let credentials)):
+            .active(advertised, enabled: enabled, sasl: .responseSent(credentials))
+        case .ended(let advertised, let enabled, .pending(let credentials)):
+            .ended(advertised, enabled: enabled, sasl: .responseSent(credentials))
+        case .active(_, _, .responseSent), .active(_, _, nil),
+             .ended(_, _, .responseSent), .ended(_, _, nil):
             nil
         }
     }
@@ -128,6 +223,8 @@ struct IRCRegistrationState: Equatable {
         self.serverPassword = serverPassword
         capabilityNegotiation = .active(
             IRCAdvertisedCapabilities(),
+            // CAP LS 302 implicitly enables cap-notify for the connection.
+            enabled: ["cap-notify"],
             sasl: saslCredentials.map(IRCSASLNegotiationState.pending)
         )
     }
@@ -566,8 +663,15 @@ struct IRCWireMessage {
             for rawTag in rawTags.split(separator: ";") {
                 let pair = rawTag.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
                 let key = String(pair[0])
-                let value = pair.count == 2 ? Self.unescapeTagValue(String(pair[1])) : nil
-                tags[key] = value
+                let unescapedValue = pair.count == 2
+                    ? Self.unescapeTagValue(String(pair[1]))
+                    : nil
+                // IRCv3 requires `key=` to have the same meaning as `key`.
+                // Preserve the key while normalizing both forms to a nil value;
+                // this also ensures a final empty duplicate replaces an earlier
+                // non-empty value rather than removing the dictionary entry.
+                let value = unescapedValue?.isEmpty == true ? nil : unescapedValue
+                tags[key] = .some(value)
             }
             remainder = String(remainder[remainder.index(after: space)...])
         }
@@ -651,6 +755,10 @@ final class IRCConnection {
         subsystem: Bundle.main.bundleIdentifier ?? "Netsplit",
         category: "IRCConnection"
     )
+
+    func isCapabilityEnabled(_ name: String) -> Bool {
+        phase.registration?.capabilityNegotiation.enabled.contains(name) == true
+    }
 
     func connect(profile: ServerProfile, nickname: String, realName: String, serverPassword: String, saslUsername: String?, saslPassword: String, sshPassword: String, sshPrivateKey: String) {
         disconnect()
@@ -1104,13 +1212,20 @@ final class IRCConnection {
             completion?(false)
             return
         }
-        let singleLine = IRCTextFraming.sanitizedSingleLine(command)
-        let boundedCommand = IRCTextFraming.prefix(
-            singleLine,
-            fittingUTF8ByteCount: maximumOutboundLineBytes
-        )
-        if boundedCommand != singleLine {
-            eventHandler?(.notice("An outgoing IRC command exceeded the server line limit and was truncated."))
+        let boundedCommand: String
+        switch IRCOutboundCommandFraming.frame(
+            command,
+            maximumMessageBytes: maximumOutboundLineBytes
+        ) {
+        case .tagsTooLong:
+            eventHandler?(.notice("Outgoing IRC message tags exceeded the IRCv3 byte limit."))
+            completion?(false)
+            return
+        case .framed(let command, let wasTruncated):
+            boundedCommand = command
+            if wasTruncated {
+                eventHandler?(.notice("An outgoing IRC command exceeded the server line limit and was truncated."))
+            }
         }
         let line = boundedCommand + "\r\n"
         switch transport {
@@ -1388,22 +1503,17 @@ final class IRCConnection {
         case "LS":
             let advertisedValues = (message.trailing ?? "").split(separator: " ").map(String.init)
             var advertised = registration.capabilityNegotiation.advertised
-            advertised.names.formUnion(
-                advertisedValues.map { IRCCapability.name(from: $0) }
-            )
-            for advertisedValue in advertisedValues {
-                guard let mechanisms = IRCCapability.saslMechanisms(from: advertisedValue) else {
-                    continue
-                }
-                advertised.saslMechanisms = (advertised.saslMechanisms ?? []).union(mechanisms)
-            }
+            advertised.apply(advertisedValues)
             registration.capabilityNegotiation =
                 registration.capabilityNegotiation.replacingAdvertised(advertised)
             phase = phase.replacingRegistration(registration)
             // An asterisk after LS signals a multi-line capability list.
             let hasMore = message.parameters.dropFirst(2).contains("*")
             guard !hasMore else { return }
-            var supported = IRCCapability.preferred.filter { advertised.names.contains($0) }
+            var supported = IRCCapability.requestablePreferred(
+                advertised: advertised.names,
+                enabled: registration.capabilityNegotiation.enabled
+            )
             if registration.capabilityNegotiation.sasl != nil {
                 if advertised.names.contains("sasl"),
                    IRCSASL.canUsePlain(advertisedMechanisms: advertised.saslMechanisms) {
@@ -1420,8 +1530,15 @@ final class IRCConnection {
                 send(command: "CAP REQ :\(supported.joined(separator: " "))")
             }
         case "ACK":
-            let acknowledged = (message.trailing ?? "").split(separator: " ").map { IRCCapability.name(from: String($0)) }
-            if acknowledged.contains("sasl"), registration.capabilityNegotiation.sasl != nil {
+            let acknowledgedTokens = (message.trailing ?? "").split(separator: " ").map(String.init)
+            registration.capabilityNegotiation =
+                registration.capabilityNegotiation.acknowledging(acknowledgedTokens)
+            phase = phase.replacingRegistration(registration)
+            let acknowledgedSASL = acknowledgedTokens.contains {
+                !$0.hasPrefix("-") && IRCCapability.name(from: $0) == "sasl"
+            }
+            if acknowledgedSASL,
+               registration.capabilityNegotiation.sasl != nil {
                 send(command: "AUTHENTICATE PLAIN")
             } else {
                 endCapabilityNegotiation()
@@ -1434,6 +1551,37 @@ final class IRCConnection {
                 eventHandler?(.notice("The server declined SASL authentication."))
             }
             endCapabilityNegotiation()
+        case "NEW":
+            let advertisedValues = (message.trailing ?? "").split(separator: " ").map(String.init)
+            let newNames = Set(advertisedValues.map { IRCCapability.name(from: $0) })
+            var advertised = registration.capabilityNegotiation.advertised
+            advertised.apply(advertisedValues)
+            registration.capabilityNegotiation =
+                registration.capabilityNegotiation.replacingAdvertised(advertised)
+            phase = phase.replacingRegistration(registration)
+
+            var requested = IRCCapability.requestablePreferred(
+                advertised: advertised.names,
+                enabled: registration.capabilityNegotiation.enabled
+            )
+            if newNames.contains("sasl"),
+               registration.capabilityNegotiation.sasl != nil,
+               !registration.capabilityNegotiation.enabled.contains("sasl"),
+               IRCSASL.canUsePlain(advertisedMechanisms: advertised.saslMechanisms) {
+                requested.append("sasl")
+            }
+            if !requested.isEmpty {
+                send(command: "CAP REQ :\(requested.joined(separator: " "))")
+            }
+        case "DEL":
+            let removed = Set(
+                (message.trailing ?? "").split(separator: " ").map {
+                    IRCCapability.name(from: String($0))
+                }
+            )
+            registration.capabilityNegotiation =
+                registration.capabilityNegotiation.removing(removed)
+            phase = phase.replacingRegistration(registration)
         default:
             break
         }
@@ -1462,13 +1610,21 @@ final class IRCConnection {
     }
 
     private func handleSASLNumeric(_ message: IRCWireMessage) {
+        guard let negotiation = phase.registration?.capabilityNegotiation,
+              negotiation.enabled.contains("sasl"),
+              negotiation.sasl != nil else { return }
         switch message.command {
         case "903":
             eventHandler?(.notice("SASL authentication succeeded."))
             endCapabilityNegotiation()
-        case "904", "905", "906", "907":
+        case "902", "904", "905", "906":
             eventHandler?(.notice(message.trailing ?? "SASL authentication failed."))
             endCapabilityNegotiation()
+        case "907":
+            eventHandler?(.notice(message.trailing ?? "SASL authentication was already complete."))
+            endCapabilityNegotiation()
+        case "908":
+            eventHandler?(.notice(message.trailing ?? "The server does not support the requested SASL mechanism."))
         default:
             break
         }

@@ -39,6 +39,16 @@ struct IRCWireMessageTests {
         #expect(message.tags["unknown"] ?? nil == "keepq")
     }
 
+    @Test("Treats empty tag values as missing and lets the final duplicate win")
+    func normalizesEmptyAndDuplicateTagValues() throws {
+        let message = try #require(IRCWireMessage(
+            line: "@empty=;duplicate=first;duplicate= PING :token"
+        ))
+
+        #expect(message.tags["empty"] == .some(nil))
+        #expect(message.tags["duplicate"] == .some(nil))
+    }
+
     @Test("Recognizes both wire forms of a SASL continuation")
     func recognizesSASLContinuations() throws {
         let middle = try #require(IRCWireMessage(line: "AUTHENTICATE +"))

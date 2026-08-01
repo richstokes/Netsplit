@@ -943,6 +943,10 @@ struct IRCModelsAndPolicyTests {
 
     @Test("Normalizes capability modifiers and advertised values")
     func parsesCapabilityNames() {
+        #expect(IRCCapability.advertisement(from: "sts=port=6697,duration=3600") == .init(
+            name: "sts",
+            value: "port=6697,duration=3600"
+        ))
         #expect(IRCCapability.name(from: "sasl=PLAIN,EXTERNAL") == "sasl")
         #expect(IRCCapability.saslMechanisms(from: "sasl=PLAIN,EXTERNAL") == ["PLAIN", "EXTERNAL"])
         #expect(IRCCapability.saslMechanisms(from: "sasl") == nil)
@@ -957,10 +961,583 @@ struct IRCModelsAndPolicyTests {
             "multi-prefix",
             "userhost-in-names",
             "chghost",
-            "echo-message"
+            "echo-message",
+            "batch",
+            "labeled-response",
+            "standard-replies"
         ])
-        #expect(!IRCCapability.preferred.contains("batch"))
-        #expect(!IRCCapability.preferred.contains("labeled-response"))
+        #expect(!IRCCapability.requestablePreferred(
+            advertised: ["labeled-response"],
+            enabled: []
+        ).contains("labeled-response"))
+        #expect(IRCCapability.requestablePreferred(
+            advertised: ["server-time"],
+            enabled: []
+        ).contains("server-time"))
+        #expect(IRCCapability.requestablePreferred(
+            advertised: ["batch", "labeled-response"],
+            enabled: []
+        ).contains("labeled-response"))
+        #expect(IRCCapability.enabledCapabilities(
+            afterRemoving: ["message-tags"],
+            from: ["message-tags", "server-time", "batch", "labeled-response"]
+        ) == ["server-time", "batch", "labeled-response"])
+        #expect(IRCCapability.enabledCapabilities(
+            afterRemoving: ["batch"],
+            from: ["message-tags", "server-time", "batch", "labeled-response"]
+        ) == ["message-tags", "server-time"])
+    }
+
+    @Test("Parses and presents IRCv3 standard replies")
+    func parsesStandardReplies() throws {
+        let failureWire = try #require(IRCWireMessage(
+            line: ":irc.example.org FAIL PRIVMSG CANNOTSENDTOCHAN #swift :Cannot send to channel"
+        ))
+        let warningWire = try #require(IRCWireMessage(
+            line: ":irc.example.org WARN MODE DEPRECATED #swift :Use the new mode syntax"
+        ))
+        let oneWordWire = try #require(IRCWireMessage(
+            line: ":irc.example.org NOTE * MAINTENANCE Soon"
+        ))
+        let failure = try #require(IRCStandardReply(wire: failureWire))
+        let warning = try #require(IRCStandardReply(wire: warningWire))
+        let oneWord = try #require(IRCStandardReply(wire: oneWordWire))
+
+        #expect(failure.kind == .failure)
+        #expect(failure.command == "PRIVMSG")
+        #expect(failure.code == "CANNOTSENDTOCHAN")
+        #expect(failure.context == ["#swift"])
+        #expect(failure.displayText == "PRIVMSG CANNOTSENDTOCHAN: Cannot send to channel")
+        #expect(warning.displayText == "Warning — MODE DEPRECATED: Use the new mode syntax")
+        #expect(oneWord.description == "Soon")
+        #expect(oneWord.context.isEmpty)
+        #expect(IRCNumericReply.isError("401"))
+        #expect(IRCNumericReply.isError("599"))
+        #expect(!IRCNumericReply.isError("399"))
+        #expect(!IRCNumericReply.isError("FAIL"))
+    }
+
+    @Test("Authoritative echoes preserve row identity and attach server metadata")
+    func reconcilesAuthoritativeEchoes() throws {
+        var optimistic = IRCMessage(sender: "tester", text: "hello \u{02}there\u{0F}")
+        optimistic.timestamp = Date(timeIntervalSince1970: 100)
+        let serverTimestamp = Date(timeIntervalSince1970: 200)
+
+        let reconciled = IRCMessageEchoReconciliationPolicy.authoritativeMessage(
+            from: optimistic,
+            echoedWireText: "hello there",
+            tags: [
+                "time": "1970-01-01T00:03:20.000Z",
+                "msgid": "server-message-1",
+                "account": "tester-account",
+                "+reply": "parent-message"
+            ],
+            timestamp: serverTimestamp,
+            presentation: .message
+        )
+
+        #expect(reconciled.id == optimistic.id)
+        #expect(reconciled.text == "hello there")
+        #expect(reconciled.timestamp == serverTimestamp)
+        #expect(reconciled.serverMessageID == "server-message-1")
+        #expect(reconciled.accountName == "tester-account")
+        #expect(reconciled.replyToMessageID == "parent-message")
+        #expect(reconciled.ircv3Tags.map(\.name) == ["+reply", "account", "msgid", "time"])
+
+        let action = IRCMessageEchoReconciliationPolicy.authoritativeMessage(
+            from: IRCMessage(sender: "* tester", text: "waves", nicknameColorKey: "tester"),
+            echoedWireText: "\u{01}ACTION waves enthusiastically\u{01}",
+            tags: ["msgid": "action-1"],
+            timestamp: nil,
+            presentation: .action
+        )
+        #expect(action.text == "waves enthusiastically")
+        #expect(action.serverMessageID == "action-1")
+
+        let notice = IRCMessageEchoReconciliationPolicy.authoritativeMessage(
+            from: IRCMessage(
+                sender: "System",
+                text: "Notice sent to Alice: original",
+                isSystem: true,
+                isNotice: true
+            ),
+            echoedWireText: "filtered",
+            tags: ["msgid": "notice-1"],
+            timestamp: nil,
+            presentation: .notice(target: "Alice")
+        )
+        #expect(notice.text == "Notice sent to Alice: filtered")
+        #expect(notice.serverMessageID == "notice-1")
+    }
+
+    @Test("Outgoing echo state handles either callback ordering and echo-confirmed writes")
+    func transitionsOutgoingEchoState() throws {
+        let optimistic = IRCMessage(sender: "tester", text: "original")
+
+        var writeFirst = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        let localAppend = writeFirst.completeWrite(succeeded: true)
+        #expect(localAppend.transcriptMutation == .append(optimistic))
+        #expect(!localAppend.isComplete)
+        let replacementResult = writeFirst.receiveEcho(
+            wireText: "filtered",
+            tags: ["msgid": "message-1"],
+            timestamp: Date(timeIntervalSince1970: 200)
+        )
+        let replacement = try #require(replacementResult)
+        guard case .replace(let replacedMessage) = replacement.transcriptMutation else {
+            Issue.record("Expected the authoritative echo to replace the optimistic row")
+            return
+        }
+        #expect(replacement.isComplete)
+        #expect(replacedMessage.id == optimistic.id)
+        #expect(replacedMessage.text == "filtered")
+        #expect(replacedMessage.serverMessageID == "message-1")
+
+        var echoFirst = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        let heldEchoResult = echoFirst.receiveEcho(
+            wireText: "filtered",
+            tags: ["msgid": "message-2"],
+            timestamp: nil
+        )
+        let heldEcho = try #require(heldEchoResult)
+        #expect(heldEcho.transcriptMutation == .none)
+        #expect(!heldEcho.isComplete)
+        let echoConfirmedFailure = echoFirst.completeWrite(succeeded: false)
+        guard case .append(let confirmedMessage) = echoConfirmedFailure.transcriptMutation else {
+            Issue.record("A server echo must win over a later local write failure")
+            return
+        }
+        #expect(echoConfirmedFailure.isComplete)
+        #expect(confirmedMessage.text == "filtered")
+        #expect(confirmedMessage.serverMessageID == "message-2")
+
+        var acknowledgedFirst = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        let acknowledgementResult = acknowledgedFirst.receiveAcknowledgement()
+        let acknowledgement = try #require(acknowledgementResult)
+        #expect(acknowledgement.transcriptMutation == .none)
+        #expect(!acknowledgement.isComplete)
+        let acknowledgementConfirmedFailure = acknowledgedFirst.completeWrite(succeeded: false)
+        #expect(acknowledgementConfirmedFailure.transcriptMutation == .append(optimistic))
+        #expect(acknowledgementConfirmedFailure.isComplete)
+
+        var rejectedAfterWrite = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        _ = rejectedAfterWrite.completeWrite(succeeded: true)
+        let optionalRemoveResult = rejectedAfterWrite.receiveRejection()
+        let removeResult = try #require(optionalRemoveResult)
+        #expect(removeResult.transcriptMutation == .remove(optimistic.id))
+        #expect(removeResult.isComplete)
+
+        var rejectedBeforeWrite = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        let optionalHeldRejection = rejectedBeforeWrite.receiveRejection()
+        let heldRejection = try #require(optionalHeldRejection)
+        #expect(heldRejection.transcriptMutation == .none)
+        #expect(!heldRejection.isComplete)
+        let rejectedWrite = rejectedBeforeWrite.completeWrite(succeeded: true)
+        #expect(rejectedWrite.transcriptMutation == .none)
+        #expect(rejectedWrite.isComplete)
+    }
+
+    @Test("Outgoing echo retention never races an outstanding write callback")
+    func retainsOutgoingEchoesAwaitingWriteCompletion() {
+        let sentAt = Date(timeIntervalSince1970: 100)
+        let expiredAt = sentAt.addingTimeInterval(
+            IRCOutgoingEchoRetentionPolicy.maximumAge + 1
+        )
+        let optimistic = IRCMessage(sender: "tester", text: "hello")
+
+        var locallyDisplayed = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        _ = locallyDisplayed.completeWrite(succeeded: true)
+        #expect(IRCOutgoingEchoRetentionPolicy.shouldExpire(
+            locallyDisplayed,
+            sentAt: sentAt,
+            now: expiredAt
+        ))
+
+        var echoBeforeWrite = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        _ = echoBeforeWrite.receiveEcho(
+            wireText: "filtered",
+            tags: ["msgid": "server-message"],
+            timestamp: nil
+        )
+        #expect(!IRCOutgoingEchoRetentionPolicy.shouldExpire(
+            echoBeforeWrite,
+            sentAt: sentAt,
+            now: expiredAt
+        ))
+
+        var acknowledgementBeforeWrite = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        _ = acknowledgementBeforeWrite.receiveAcknowledgement()
+        #expect(!IRCOutgoingEchoRetentionPolicy.shouldExpire(
+            acknowledgementBeforeWrite,
+            sentAt: sentAt,
+            now: expiredAt
+        ))
+
+        var rejectionBeforeWrite = IRCOutgoingEchoState(
+            message: optimistic,
+            presentation: .message
+        )
+        _ = rejectionBeforeWrite.receiveRejection()
+        #expect(!IRCOutgoingEchoRetentionPolicy.shouldExpire(
+            rejectionBeforeWrite,
+            sentAt: sentAt,
+            now: expiredAt
+        ))
+    }
+
+    @Test("Outgoing echo correlation uses labels and skips entries already echoed")
+    func correlatesLabeledAndIdenticalEchoes() {
+        let candidates = [
+            IRCOutgoingEchoCandidate(
+                target: "#Swift",
+                wireText: "same",
+                label: nil,
+                hasReceivedServerConfirmation: true
+            ),
+            IRCOutgoingEchoCandidate(
+                target: "#swift",
+                wireText: "same",
+                label: nil,
+                hasReceivedServerConfirmation: false
+            ),
+            IRCOutgoingEchoCandidate(
+                target: "#swift",
+                wireText: "original",
+                label: "request-3",
+                hasReceivedServerConfirmation: false
+            )
+        ]
+
+        #expect(IRCOutgoingEchoCorrelationPolicy.matchingIndex(
+            in: candidates,
+            target: "#SWIFT",
+            wireText: "same",
+            label: nil,
+            maximumEchoBytes: nil,
+            caseMapping: .rfc1459
+        ) == 1)
+        #expect(IRCOutgoingEchoCorrelationPolicy.matchingIndex(
+            in: candidates,
+            target: "#swift",
+            wireText: "server-modified",
+            label: "request-3",
+            maximumEchoBytes: nil,
+            caseMapping: .rfc1459
+        ) == 2)
+        #expect(IRCOutgoingEchoCorrelationPolicy.matchingIndex(
+            in: candidates,
+            target: "#swift",
+            wireText: "original",
+            label: nil,
+            maximumEchoBytes: nil,
+            caseMapping: .rfc1459
+        ) == nil)
+    }
+
+    @Test("Self-targeted duplicate correlation is exact, case-aware, and expires")
+    func correlatesSelfTargetedDuplicatesWithoutMessageIDs() {
+        let now = Date(timeIntervalSince1970: 100)
+        let recent = [
+            IRCRecentSelfTargetedConfirmation(
+                target: "Tester",
+                wireText: "same",
+                recordedAt: Date(timeIntervalSince1970: 90)
+            ),
+            IRCRecentSelfTargetedConfirmation(
+                target: "tester",
+                wireText: "expired",
+                recordedAt: Date(timeIntervalSince1970: 50)
+            )
+        ]
+
+        #expect(IRCSelfTargetedEchoDuplicatePolicy.matchingIndex(
+            in: recent,
+            target: "TESTER",
+            wireText: "same",
+            now: now,
+            maximumAge: 30,
+            caseMapping: .rfc1459
+        ) == 0)
+        #expect(IRCSelfTargetedEchoDuplicatePolicy.matchingIndex(
+            in: recent,
+            target: "tester",
+            wireText: "different",
+            now: now,
+            maximumAge: 30,
+            caseMapping: .rfc1459
+        ) == nil)
+
+        let pending = [
+            IRCOutgoingEchoCandidate(
+                target: "Tester",
+                wireText: "original",
+                label: "request-1",
+                hasReceivedServerConfirmation: false,
+                presentation: .message
+            ),
+            IRCOutgoingEchoCandidate(
+                target: "Tester",
+                wireText: "same",
+                label: "request-2",
+                hasReceivedServerConfirmation: true,
+                presentation: .message
+            ),
+            IRCOutgoingEchoCandidate(
+                target: "Tester",
+                wireText: "\u{01}ACTION waves\u{01}",
+                label: "request-3",
+                hasReceivedServerConfirmation: false,
+                presentation: .action
+            )
+        ]
+        #expect(IRCSelfTargetedEchoDuplicatePolicy.matchingPendingIndex(
+            in: pending,
+            target: "tester",
+            wireText: "filtered",
+            presentation: .message,
+            caseMapping: .rfc1459
+        ) == 0)
+        #expect(IRCSelfTargetedEchoDuplicatePolicy.matchingPendingIndex(
+            in: pending,
+            target: "tester",
+            wireText: "waves",
+            presentation: .action,
+            caseMapping: .rfc1459
+        ) == 2)
+        #expect(IRCSelfTargetedEchoDuplicatePolicy.matchingIndex(
+            in: recent,
+            target: "tester",
+            wireText: "expired",
+            now: now,
+            maximumAge: 30,
+            caseMapping: .rfc1459
+        ) == nil)
+    }
+
+    @Test("Incoming messages retain IRCv3 IDs, account names, and reply references")
+    @MainActor
+    func retainsIncomingMessageMetadata() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        state.handle(
+            try #require(IRCWireMessage(
+                line: "@time=2026-07-17T20:00:00.125Z;msgid=message-2;account=alice;+reply=message-1 :Alice!user@example.org PRIVMSG tester :hello"
+            )),
+            profile: profile
+        )
+
+        let conversation = try #require(state.directMessages.first {
+            $0.serverID == profile.id && $0.name == "Alice"
+        })
+        let message = try #require(state.messages(
+            for: .directMessage(conversation.id),
+            channelEventVisibility: .alwaysShow
+        ).last)
+        #expect(message.serverMessageID == "message-2")
+        #expect(message.accountName == "alice")
+        #expect(message.replyToMessageID == "message-1")
+        #expect(message.timestamp == IRCServerTimeParser.date(from: "2026-07-17T20:00:00.125Z"))
+    }
+
+    @Test("Self-sent bouncer notices remain visible with server metadata")
+    @MainActor
+    func retainsUnmatchedSelfNotices() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        state.handle(
+            try #require(IRCWireMessage(
+                line: "@msgid=notice-2 :\(state.nickname)!user@example.org NOTICE Alice :hello"
+            )),
+            profile: profile
+        )
+
+        let conversation = try #require(state.directMessages.first {
+            $0.serverID == profile.id && $0.name == "Alice"
+        })
+        let message = try #require(state.messages(
+            for: .directMessage(conversation.id),
+            channelEventVisibility: .alwaysShow
+        ).last)
+        #expect(message.isNotice)
+        #expect(message.text == "hello")
+        #expect(message.serverMessageID == "notice-2")
+    }
+
+    @Test("Self-targeted labeled notices suppress the duplicate unlabeled delivery")
+    @MainActor
+    func deduplicatesSelfTargetedLabeledNotices() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        let nickname = state.nickname
+
+        state.handle(
+            try #require(IRCWireMessage(
+                line: "@label=request-1;msgid=notice-self-1 :\(nickname)!user@example.org NOTICE \(nickname) :hello"
+            )),
+            profile: profile
+        )
+
+        let conversation = try #require(state.directMessages.first {
+            $0.serverID == profile.id && $0.name == nickname
+        })
+        let destination = SidebarItem.directMessage(conversation.id)
+        let countAfterLabeledDelivery = state.messages(
+            for: destination,
+            channelEventVisibility: .alwaysShow
+        ).count
+
+        state.handle(
+            try #require(IRCWireMessage(
+                line: "@msgid=notice-self-1 :\(nickname)!user@example.org NOTICE \(nickname) :hello"
+            )),
+            profile: profile
+        )
+
+        let messages = state.messages(
+            for: destination,
+            channelEventVisibility: .alwaysShow
+        )
+        #expect(messages.count == countAfterLabeledDelivery)
+        #expect(messages.filter { $0.serverMessageID == "notice-self-1" }.count == 1)
+
+        let reverseOrderState = IRCAppState()
+        let reverseOrderProfile = try #require(reverseOrderState.profiles.first)
+        let reverseOrderNickname = reverseOrderState.nickname
+        reverseOrderState.handle(
+            try #require(IRCWireMessage(
+                line: "@msgid=notice-self-2 :\(reverseOrderNickname)!user@example.org NOTICE \(reverseOrderNickname) :hello"
+            )),
+            profile: reverseOrderProfile
+        )
+        reverseOrderState.handle(
+            try #require(IRCWireMessage(
+                line: "@label=request-2;msgid=notice-self-2 :\(reverseOrderNickname)!user@example.org NOTICE \(reverseOrderNickname) :hello"
+            )),
+            profile: reverseOrderProfile
+        )
+        let reverseOrderConversation = try #require(reverseOrderState.directMessages.first {
+            $0.serverID == reverseOrderProfile.id && $0.name == reverseOrderNickname
+        })
+        let reverseOrderMessages = reverseOrderState.messages(
+            for: .directMessage(reverseOrderConversation.id),
+            channelEventVisibility: .alwaysShow
+        )
+        #expect(reverseOrderMessages.filter { $0.serverMessageID == "notice-self-2" }.count == 1)
+    }
+
+    @Test("Standard replies remain visible in the server transcript")
+    @MainActor
+    func displaysStandardReplies() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        state.handle(
+            try #require(IRCWireMessage(
+                line: "@label=request-1 :irc.example.org FAIL PRIVMSG CANNOTSENDTOCHAN #missing :Cannot send to channel"
+            )),
+            profile: profile
+        )
+
+        let reply = try #require(state.messages(
+            for: .server(profile.id),
+            channelEventVisibility: .alwaysShow
+        ).last)
+        #expect(reply.isSystem)
+        #expect(reply.text == "PRIVMSG CANNOTSENDTOCHAN: Cannot send to channel")
+        #expect(reply.tagValue(named: "label") == "request-1")
+    }
+
+    @Test("Labeled-response batches propagate their label to contained replies")
+    @MainActor
+    func inheritsLabelsFromBatches() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        state.handle(
+            try #require(IRCWireMessage(
+                line: "@label=request-2 :irc.example.org BATCH +batch-1 labeled-response"
+            )),
+            profile: profile
+        )
+        state.handle(
+            try #require(IRCWireMessage(
+                line: "@batch=batch-1 :irc.example.org NOTE * MAINTENANCE :Brief maintenance soon"
+            )),
+            profile: profile
+        )
+        state.handle(
+            try #require(IRCWireMessage(
+                line: ":irc.example.org BATCH -batch-1"
+            )),
+            profile: profile
+        )
+
+        let reply = try #require(state.messages(
+            for: .server(profile.id),
+            channelEventVisibility: .alwaysShow
+        ).last)
+        #expect(reply.tagValue(named: "label") == "request-2")
+        #expect(reply.tagValue(named: "batch") == "batch-1")
+    }
+
+    @Test("Nested batches preserve explicit labels and reject invalid boundaries")
+    @MainActor
+    func validatesNestedBatchBoundaries() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        let lines = [
+            "@label=outer-request :irc.example.org BATCH +outer labeled-response",
+            "@batch=outer;label=inner-request :irc.example.org BATCH +inner labeled-response",
+            // A duplicate start must not overwrite the original inner label.
+            "@batch=outer;label=wrong-request :irc.example.org BATCH +inner labeled-response",
+            // The inner batch can only end through the parent it started in.
+            "@batch=unknown :irc.example.org BATCH -inner",
+            // A parent cannot end while one of its nested batches is open.
+            ":irc.example.org BATCH -outer",
+            "@batch=inner :irc.example.org NOTE * MAINTENANCE :Nested response",
+            "@batch=outer :irc.example.org BATCH -inner",
+            "@batch=outer :irc.example.org NOTE * MAINTENANCE :Outer response",
+            ":irc.example.org BATCH -outer"
+        ]
+        for line in lines {
+            state.handle(
+                try #require(IRCWireMessage(line: line)),
+                profile: profile
+            )
+        }
+
+        let replies = state.messages(
+            for: .server(profile.id),
+            channelEventVisibility: .alwaysShow
+        ).suffix(2)
+        let innerReply = try #require(replies.first)
+        let outerReply = try #require(replies.last)
+        #expect(innerReply.tagValue(named: "label") == "inner-request")
+        #expect(innerReply.tagValue(named: "batch") == "inner")
+        #expect(outerReply.tagValue(named: "label") == "outer-request")
+        #expect(outerReply.tagValue(named: "batch") == "outer")
     }
 
     @Test("Parses IRCv3 server-time tags with or without fractional seconds")

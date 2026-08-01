@@ -589,6 +589,16 @@ enum IRCIdentityValidation {
     }
 }
 
+struct IRCMessageTag: Hashable {
+    var name: String
+    var value: String?
+
+    static func canonicalizing(_ tags: [String: String?]) -> [IRCMessageTag] {
+        tags.map { IRCMessageTag(name: $0.key, value: $0.value) }
+            .sorted { $0.name < $1.name }
+    }
+}
+
 struct IRCMessage: Identifiable, Hashable {
     let id = UUID()
     var sender: String
@@ -603,6 +613,15 @@ struct IRCMessage: Identifiable, Hashable {
     var channelEventKind: IRCChannelEventKind?
     var channelMemberCount: Int?
     var nicknameColorKey: String?
+    var ircv3Tags: [IRCMessageTag] = []
+
+    func tagValue(named name: String) -> String? {
+        ircv3Tags.first(where: { $0.name == name })?.value
+    }
+
+    var serverMessageID: String? { tagValue(named: "msgid") }
+    var accountName: String? { tagValue(named: "account") }
+    var replyToMessageID: String? { tagValue(named: "+reply") }
 
     var resolvedNicknameColorKey: String {
         nicknameColorKey ?? sender
@@ -611,6 +630,242 @@ struct IRCMessage: Identifiable, Hashable {
     var interactiveNickname: String? {
         guard !isSystem, !isNotice else { return nil }
         return nicknameColorKey ?? sender
+    }
+}
+
+enum IRCOutgoingEchoPresentation: Equatable {
+    case message
+    case action
+    case notice(target: String)
+}
+
+enum IRCMessageEchoReconciliationPolicy {
+    static func authoritativeMessage(
+        from optimisticMessage: IRCMessage,
+        echoedWireText: String,
+        tags: [String: String?],
+        timestamp: Date?,
+        presentation: IRCOutgoingEchoPresentation
+    ) -> IRCMessage {
+        var message = optimisticMessage
+        switch presentation {
+        case .action where
+            echoedWireText.hasPrefix("\u{01}ACTION ")
+                && echoedWireText.hasSuffix("\u{01}"):
+            message.text = String(echoedWireText.dropFirst(8).dropLast())
+        case .message:
+            message.text = echoedWireText
+        case .notice(let target):
+            message.text = "Notice sent to \(target): \(echoedWireText)"
+        case .action:
+            message.text = echoedWireText
+        }
+        if let timestamp {
+            message.timestamp = timestamp
+        }
+        message.ircv3Tags = IRCMessageTag.canonicalizing(tags)
+        return message
+    }
+}
+
+enum IRCOutgoingEchoTranscriptMutation: Equatable {
+    case none
+    case append(IRCMessage)
+    case replace(IRCMessage)
+    case remove(UUID)
+}
+
+struct IRCOutgoingEchoTransition: Equatable {
+    var transcriptMutation: IRCOutgoingEchoTranscriptMutation
+    var isComplete: Bool
+}
+
+struct IRCOutgoingEchoState: Equatable {
+    var message: IRCMessage
+    var presentation: IRCOutgoingEchoPresentation
+    private(set) var isLocallyDisplayed = false
+    private(set) var hasReceivedServerConfirmation = false
+    private(set) var hasReceivedServerRejection = false
+    private(set) var hasCompletedWrite = false
+
+    mutating func receiveEcho(
+        wireText: String,
+        tags: [String: String?],
+        timestamp: Date?
+    ) -> IRCOutgoingEchoTransition? {
+        guard !hasReceivedServerConfirmation else { return nil }
+        message = IRCMessageEchoReconciliationPolicy.authoritativeMessage(
+            from: message,
+            echoedWireText: wireText,
+            tags: tags,
+            timestamp: timestamp,
+            presentation: presentation
+        )
+        hasReceivedServerConfirmation = true
+        if isLocallyDisplayed {
+            return IRCOutgoingEchoTransition(
+                transcriptMutation: .replace(message),
+                isComplete: true
+            )
+        }
+        return IRCOutgoingEchoTransition(transcriptMutation: .none, isComplete: false)
+    }
+
+    mutating func receiveAcknowledgement() -> IRCOutgoingEchoTransition? {
+        guard !hasReceivedServerConfirmation else { return nil }
+        hasReceivedServerConfirmation = true
+        return IRCOutgoingEchoTransition(
+            transcriptMutation: .none,
+            isComplete: isLocallyDisplayed
+        )
+    }
+
+    mutating func receiveRejection() -> IRCOutgoingEchoTransition? {
+        guard !hasReceivedServerConfirmation else { return nil }
+        hasReceivedServerConfirmation = true
+        hasReceivedServerRejection = true
+        return IRCOutgoingEchoTransition(
+            transcriptMutation: isLocallyDisplayed ? .remove(message.id) : .none,
+            isComplete: isLocallyDisplayed
+        )
+    }
+
+    mutating func completeWrite(succeeded: Bool) -> IRCOutgoingEchoTransition {
+        guard !hasCompletedWrite else {
+            return IRCOutgoingEchoTransition(transcriptMutation: .none, isComplete: false)
+        }
+        hasCompletedWrite = true
+
+        if hasReceivedServerRejection {
+            return IRCOutgoingEchoTransition(
+                transcriptMutation: .none,
+                isComplete: true
+            )
+        }
+        if hasReceivedServerConfirmation {
+            return IRCOutgoingEchoTransition(
+                transcriptMutation: .append(message),
+                isComplete: true
+            )
+        }
+        guard succeeded else {
+            return IRCOutgoingEchoTransition(transcriptMutation: .none, isComplete: true)
+        }
+        isLocallyDisplayed = true
+        return IRCOutgoingEchoTransition(
+            transcriptMutation: .append(message),
+            isComplete: false
+        )
+    }
+}
+
+enum IRCOutgoingEchoRetentionPolicy {
+    static let maximumAge: TimeInterval = 30
+
+    static func shouldExpire(
+        _ state: IRCOutgoingEchoState,
+        sentAt: Date,
+        now: Date
+    ) -> Bool {
+        state.hasCompletedWrite
+            && now.timeIntervalSince(sentAt) > maximumAge
+    }
+}
+
+struct IRCOutgoingEchoCandidate: Equatable {
+    var target: String
+    var wireText: String
+    var label: String?
+    var hasReceivedServerConfirmation: Bool
+    var presentation: IRCOutgoingEchoPresentation = .message
+}
+
+struct IRCRecentSelfTargetedConfirmation: Equatable {
+    var target: String
+    var wireText: String
+    var recordedAt: Date
+}
+
+enum IRCSelfTargetedEchoDuplicatePolicy {
+    static func matchingPendingIndex(
+        in candidates: [IRCOutgoingEchoCandidate],
+        target: String,
+        wireText: String,
+        presentation: IRCOutgoingEchoPresentation,
+        caseMapping: IRCCaseMapping
+    ) -> Int? {
+        let normalizedTarget = caseMapping.normalize(target)
+        let isEligible: (IRCOutgoingEchoCandidate) -> Bool = {
+            $0.label != nil
+                && !$0.hasReceivedServerConfirmation
+                && caseMapping.normalize($0.target) == normalizedTarget
+                && presentationsMatch($0.presentation, presentation)
+        }
+        return candidates.firstIndex {
+            isEligible($0) && $0.wireText == wireText
+        } ?? candidates.firstIndex(where: isEligible)
+    }
+
+    private static func presentationsMatch(
+        _ lhs: IRCOutgoingEchoPresentation,
+        _ rhs: IRCOutgoingEchoPresentation
+    ) -> Bool {
+        return switch (lhs, rhs) {
+        case (.message, .message), (.action, .action), (.notice(_), .notice(_)): true
+        default: false
+        }
+    }
+
+    static func matchingIndex(
+        in recentConfirmations: [IRCRecentSelfTargetedConfirmation],
+        target: String,
+        wireText: String,
+        now: Date,
+        maximumAge: TimeInterval,
+        caseMapping: IRCCaseMapping
+    ) -> Int? {
+        let normalizedTarget = caseMapping.normalize(target)
+        return recentConfirmations.firstIndex {
+            let age = now.timeIntervalSince($0.recordedAt)
+            return age >= 0
+                && age <= maximumAge
+                && caseMapping.normalize($0.target) == normalizedTarget
+                && $0.wireText == wireText
+        }
+    }
+}
+
+enum IRCOutgoingEchoCorrelationPolicy {
+    static func matchingIndex(
+        in candidates: [IRCOutgoingEchoCandidate],
+        target: String,
+        wireText: String,
+        label: String?,
+        maximumEchoBytes: Int?,
+        caseMapping: IRCCaseMapping
+    ) -> Int? {
+        if let label {
+            return candidates.firstIndex {
+                !$0.hasReceivedServerConfirmation && $0.label == label
+            }
+        }
+
+        let normalizedTarget = caseMapping.normalize(target)
+        let eligible: (IRCOutgoingEchoCandidate) -> Bool = {
+            !$0.hasReceivedServerConfirmation
+                && $0.label == nil
+                && caseMapping.normalize($0.target) == normalizedTarget
+        }
+        return candidates.firstIndex {
+            eligible($0) && $0.wireText == wireText
+        } ?? candidates.firstIndex {
+            eligible($0)
+                && IRCOutgoingEchoPolicy.matches(
+                    sentText: $0.wireText,
+                    echoedText: wireText,
+                    maximumEchoBytes: maximumEchoBytes
+                )
+        }
     }
 }
 

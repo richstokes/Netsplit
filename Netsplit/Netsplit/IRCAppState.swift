@@ -184,6 +184,8 @@ final class IRCAppState: ObservableObject {
     private var pendingUserPings: [String: PendingUserPing] = [:]
     private var terminalServerErrors: [UUID: String] = [:]
     private var pendingOutgoingEchoes: [UUID: [PendingOutgoingEcho]] = [:]
+    private var recentSelfTargetedConfirmations: [UUID: [IRCRecentSelfTargetedConfirmation]] = [:]
+    private var incomingBatchesByServer: [UUID: [String: IRCIncomingBatch]] = [:]
     private var observedLocalSourcePrefixes: [UUID: String] = [:]
     private var pendingChannelListingsByServer: [UUID: [ChannelListing]] = [:]
     private var knownChannelNamesByServer: [UUID: Set<String>] = [:]
@@ -205,6 +207,7 @@ final class IRCAppState: ObservableObject {
     private let channelListRequestTimeout: TimeInterval = 30
     private let channelBanListRequestTimeout: TimeInterval = 15
     private let maskBanWhoRequestTimeout: TimeInterval = 10
+    private let maximumTrackedIncomingBatchesPerServer = 256
     private let favoriteJoinInterval: TimeInterval = 0.45
     private let autoConnectStagger: TimeInterval = 2
     private let onConnectCommandInterval: TimeInterval = 0.5
@@ -1733,20 +1736,31 @@ final class IRCAppState: ObservableObject {
         let target = title(for: item)
         let sender = nickname(for: profile)
         let sessionID = sessionIDs[profile.id]
+        let optimisticMessage = IRCMessage(sender: sender, text: messageText)
         let echoID = rememberOutgoingEcho(
             serverID: profile.id,
             target: target,
-            text: messageText
+            wireText: messageText,
+            message: optimisticMessage,
+            destination: item
         )
-        connections[profile.id]?.send(command: "PRIVMSG \(target) :\(messageText)") { [weak self] sent in
+        let labelPrefix = outgoingLabelPrefix(
+            for: profile.id,
+            label: outgoingEchoLabel(for: profile.id, id: echoID)
+        )
+        connections[profile.id]?.send(
+            command: "\(labelPrefix)PRIVMSG \(target) :\(messageText)"
+        ) { [weak self] sent in
             guard let self else { return }
-            guard sent,
-                  self.sessionIDs[profile.id] == sessionID,
-                  self.registeredServerIDs.contains(profile.id) else {
-                self.discardOutgoingEcho(serverID: profile.id, id: echoID)
-                return
-            }
-            self.append(IRCMessage(sender: sender, text: messageText), for: item, markUnread: false)
+            self.handleOutgoingWriteCompletion(
+                serverID: profile.id,
+                id: echoID,
+                succeeded: sent
+                    && self.sessionIDs[profile.id] == sessionID
+                    && self.registeredServerIDs.contains(profile.id),
+                fallbackMessage: optimisticMessage,
+                fallbackDestination: item
+            )
         }
         return true
     }
@@ -1847,20 +1861,32 @@ final class IRCAppState: ObservableObject {
                 maximumLineLength: features(for: profile.id).maximumLineLength,
                 sourcePrefix: localSourcePrefix(for: profile)
             ) {
+                let destination = SidebarItem.directMessage(conversation.id)
+                let optimisticMessage = IRCMessage(sender: sender, text: chunk)
                 let echoID = rememberOutgoingEcho(
                     serverID: profile.id,
                     target: fields[0],
-                    text: chunk
+                    wireText: chunk,
+                    message: optimisticMessage,
+                    destination: destination
                 )
-                connections[profile.id]?.send(command: "PRIVMSG \(fields[0]) :\(chunk)") { [weak self] sent in
+                let labelPrefix = outgoingLabelPrefix(
+                    for: profile.id,
+                    label: outgoingEchoLabel(for: profile.id, id: echoID)
+                )
+                connections[profile.id]?.send(
+                    command: "\(labelPrefix)PRIVMSG \(fields[0]) :\(chunk)"
+                ) { [weak self] sent in
                     guard let self else { return }
-                    guard sent,
-                          self.sessionIDs[profile.id] == sessionID,
-                          self.registeredServerIDs.contains(profile.id) else {
-                        self.discardOutgoingEcho(serverID: profile.id, id: echoID)
-                        return
-                    }
-                    self.append(IRCMessage(sender: sender, text: chunk), for: .directMessage(conversation.id), markUnread: false)
+                    self.handleOutgoingWriteCompletion(
+                        serverID: profile.id,
+                        id: echoID,
+                        succeeded: sent
+                            && self.sessionIDs[profile.id] == sessionID
+                            && self.registeredServerIDs.contains(profile.id),
+                        fallbackMessage: optimisticMessage,
+                        fallbackDestination: destination
+                    )
                 }
             }
             if command == "QUERY" { selection = .directMessage(conversation.id) }
@@ -1873,11 +1899,37 @@ final class IRCAppState: ObservableObject {
                 maximumLineLength: features(for: profile.id).maximumLineLength,
                 sourcePrefix: localSourcePrefix(for: profile)
             ) {
-                connections[profile.id]?.send(command: "NOTICE \(fields[0]) :\(chunk)") { [weak self] sent in
-                    guard let self, sent,
-                          self.sessionIDs[profile.id] == sessionID,
-                          self.registeredServerIDs.contains(profile.id) else { return }
-                    self.appendSystem("Notice sent to \(fields[0]): \(chunk)", for: item)
+                let optimisticMessage = IRCMessage(
+                    sender: "System",
+                    text: "Notice sent to \(fields[0]): \(chunk)",
+                    isSystem: true,
+                    isNotice: true
+                )
+                let echoID = rememberOutgoingEcho(
+                    serverID: profile.id,
+                    target: fields[0],
+                    wireText: chunk,
+                    message: optimisticMessage,
+                    destination: item,
+                    presentation: .notice(target: fields[0])
+                )
+                let labelPrefix = outgoingLabelPrefix(
+                    for: profile.id,
+                    label: outgoingEchoLabel(for: profile.id, id: echoID)
+                )
+                connections[profile.id]?.send(
+                    command: "\(labelPrefix)NOTICE \(fields[0]) :\(chunk)"
+                ) { [weak self] sent in
+                    guard let self else { return }
+                    self.handleOutgoingWriteCompletion(
+                        serverID: profile.id,
+                        id: echoID,
+                        succeeded: sent
+                            && self.sessionIDs[profile.id] == sessionID
+                            && self.registeredServerIDs.contains(profile.id),
+                        fallbackMessage: optimisticMessage,
+                        fallbackDestination: item
+                    )
                 }
             }
         case "ME":
@@ -1896,23 +1948,35 @@ final class IRCAppState: ObservableObject {
                 sourcePrefix: localSourcePrefix(for: profile)
             ) {
                 let action = "\u{01}ACTION \(chunk)\u{01}"
+                let optimisticMessage = IRCMessage(
+                    sender: "* \(sender)",
+                    text: chunk,
+                    nicknameColorKey: sender
+                )
                 let echoID = rememberOutgoingEcho(
                     serverID: profile.id,
                     target: target,
-                    text: action
+                    wireText: action,
+                    message: optimisticMessage,
+                    destination: item,
+                    presentation: .action
                 )
-                connections[profile.id]?.send(command: "PRIVMSG \(target) :\(action)") { [weak self] sent in
+                let labelPrefix = outgoingLabelPrefix(
+                    for: profile.id,
+                    label: outgoingEchoLabel(for: profile.id, id: echoID)
+                )
+                connections[profile.id]?.send(
+                    command: "\(labelPrefix)PRIVMSG \(target) :\(action)"
+                ) { [weak self] sent in
                     guard let self else { return }
-                    guard sent,
-                          self.sessionIDs[profile.id] == sessionID,
-                          self.registeredServerIDs.contains(profile.id) else {
-                        self.discardOutgoingEcho(serverID: profile.id, id: echoID)
-                        return
-                    }
-                    self.append(
-                        IRCMessage(sender: "* \(sender)", text: chunk, nicknameColorKey: sender),
-                        for: item,
-                        markUnread: false
+                    self.handleOutgoingWriteCompletion(
+                        serverID: profile.id,
+                        id: echoID,
+                        succeeded: sent
+                            && self.sessionIDs[profile.id] == sessionID
+                            && self.registeredServerIDs.contains(profile.id),
+                        fallbackMessage: optimisticMessage,
+                        fallbackDestination: item
                     )
                 }
             }
@@ -1937,23 +2001,35 @@ final class IRCAppState: ObservableObject {
                 sourcePrefix: localSourcePrefix(for: profile)
             ) {
                 let action = "\u{01}ACTION \(chunk)\u{01}"
+                let optimisticMessage = IRCMessage(
+                    sender: "* \(sender)",
+                    text: chunk,
+                    nicknameColorKey: sender
+                )
                 let echoID = rememberOutgoingEcho(
                     serverID: profile.id,
                     target: target,
-                    text: action
+                    wireText: action,
+                    message: optimisticMessage,
+                    destination: item,
+                    presentation: .action
                 )
-                connections[profile.id]?.send(command: "PRIVMSG \(target) :\(action)") { [weak self] sent in
+                let labelPrefix = outgoingLabelPrefix(
+                    for: profile.id,
+                    label: outgoingEchoLabel(for: profile.id, id: echoID)
+                )
+                connections[profile.id]?.send(
+                    command: "\(labelPrefix)PRIVMSG \(target) :\(action)"
+                ) { [weak self] sent in
                     guard let self else { return }
-                    guard sent,
-                          self.sessionIDs[profile.id] == sessionID,
-                          self.registeredServerIDs.contains(profile.id) else {
-                        self.discardOutgoingEcho(serverID: profile.id, id: echoID)
-                        return
-                    }
-                    self.append(
-                        IRCMessage(sender: "* \(sender)", text: chunk, nicknameColorKey: sender),
-                        for: item,
-                        markUnread: false
+                    self.handleOutgoingWriteCompletion(
+                        serverID: profile.id,
+                        id: echoID,
+                        succeeded: sent
+                            && self.sessionIDs[profile.id] == sessionID
+                            && self.registeredServerIDs.contains(profile.id),
+                        fallbackMessage: optimisticMessage,
+                        fallbackDestination: item
                     )
                 }
             }
@@ -2255,12 +2331,19 @@ final class IRCAppState: ObservableObject {
         }
     }
 
-    func handle(_ wire: IRCWireMessage, profile: ServerProfile) {
+    func handle(_ incomingWire: IRCWireMessage, profile: ServerProfile) {
+        var wire = incomingWire
+        if let batchID = wire.tags["batch"] ?? nil,
+           wire.tags["label"] == nil,
+           let label = incomingBatchesByServer[profile.id]?[batchID]?.label {
+            wire.tags["label"] = label
+        }
         let previousIncomingMessageTimestamp = incomingMessageTimestamp
         incomingMessageTimestamp = IRCServerTimeParser.date(from: wire.tags["time"] ?? nil)
         defer { incomingMessageTimestamp = previousIncomingMessageTimestamp }
         let sender = wire.prefix?.split(separator: "!").first.map(String.init) ?? profile.name
         rememberLocalSourcePrefix(wire.prefix, sender: sender, profile: profile)
+        if handleLabeledOutgoingError(wire, profile: profile) { return }
         switch wire.command {
         case "001":
             if let registeredNickname = wire.parameters.first, !registeredNickname.isEmpty {
@@ -2279,28 +2362,104 @@ final class IRCAppState: ObservableObject {
             runPostRegistrationSequence(for: profile)
         case "005":
             updateServerFeatures(from: wire, serverID: profile.id)
+        case "BATCH":
+            updateIncomingBatchState(
+                from: wire,
+                serverID: profile.id,
+                hasExplicitLabel: incomingWire.tags["label"] != nil
+            )
+        case "ACK":
+            if let label = wire.tags["label"] ?? nil {
+                _ = reconcileOutgoingAcknowledgement(
+                    serverID: profile.id,
+                    label: label
+                )
+            }
         case "NOTICE":
             guard let target = wire.parameters.first, let text = wire.trailing else { return }
+            let isOwnNotice = identifiersEqual(
+                sender,
+                nickname(for: profile),
+                serverID: profile.id
+            )
+            if isOwnNotice,
+               isDuplicateSelfTargetedDelivery(
+                serverID: profile.id,
+                target: target,
+                wireText: text,
+                presentation: .notice(target: target),
+                tags: wire.tags
+            ) {
+                return
+            }
+            if isOwnNotice,
+               reconcileOutgoingEcho(
+                serverID: profile.id,
+                target: target,
+                wireText: text,
+                tags: wire.tags,
+                timestamp: incomingMessageTimestamp,
+                maximumEchoBytes: relayedMessageByteLimit(
+                    target: target,
+                    sourcePrefix: wire.prefix,
+                    profile: profile,
+                    command: "NOTICE"
+                )
+               ) {
+                return
+            }
             guard !isIgnored(sender, on: profile) else { return }
-            guard !handleCTCP(text, from: sender, target: target, profile: profile, canReplyToRequest: false) else { return }
+            guard !handleCTCP(
+                text,
+                from: sender,
+                target: target,
+                profile: profile,
+                canReplyToRequest: false,
+                tags: wire.tags
+            ) else { return }
 
             // IRC notices are delivered as a distinct message type, but they
             // still belong beside the conversation they address. Server notices
             // and recognized network service broadcasts remain in the server log.
             if let channelTarget = features(for: profile.id).channelName(fromMessageTarget: target) {
-                guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                 let channel = channel(named: channelTarget, serverID: profile.id)
                 append(
-                    IRCMessage(sender: "\(sender) (notice)", text: text, isNotice: true, nicknameColorKey: sender),
+                    IRCMessage(
+                        sender: "\(sender) (notice)",
+                        text: text,
+                        isNotice: true,
+                        nicknameColorKey: sender,
+                        ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+                    ),
+                    for: .channel(channel.id),
+                    markUnread: !isOwnNotice,
+                    markMention: !isOwnNotice && messageMentionsLocalNickname(text, on: profile)
+                )
+            } else if !isOwnNotice,
+                      let channel = channelReferencedByNotice(text, serverID: profile.id) {
+                append(
+                    IRCMessage(
+                        sender: "\(sender) (notice)",
+                        text: text,
+                        isNotice: true,
+                        nicknameColorKey: sender,
+                        ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+                    ),
                     for: .channel(channel.id),
                     markMention: messageMentionsLocalNickname(text, on: profile)
                 )
-            } else if let channel = channelReferencedByNotice(text, serverID: profile.id) {
-                guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
+            } else if isOwnNotice {
+                let conversation = directMessage(named: target, serverID: profile.id)
                 append(
-                    IRCMessage(sender: "\(sender) (notice)", text: text, isNotice: true, nicknameColorKey: sender),
-                    for: .channel(channel.id),
-                    markMention: messageMentionsLocalNickname(text, on: profile)
+                    IRCMessage(
+                        sender: "\(sender) (notice)",
+                        text: text,
+                        isNotice: true,
+                        nicknameColorKey: sender,
+                        ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+                    ),
+                    for: .directMessage(conversation.id),
+                    markUnread: false
                 )
             } else {
                 switch IRCNoticeRoutingPolicy.fallbackDestination(
@@ -2316,18 +2475,33 @@ final class IRCAppState: ObservableObject {
                                 text: text,
                                 isSystem: true,
                                 isNotice: true,
-                                nicknameColorKey: sender
+                                nicknameColorKey: sender,
+                                ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
                             ),
                             for: .server(profile.id)
                         )
                     } else {
-                        appendSystem(text, for: .server(profile.id))
+                        append(
+                            IRCMessage(
+                                sender: "System",
+                                text: text,
+                                isSystem: true,
+                                isNotice: true,
+                                ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+                            ),
+                            for: .server(profile.id)
+                        )
                     }
                 case .directMessage:
-                    guard !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) else { return }
                     let conversation = directMessage(named: sender, serverID: profile.id)
                     append(
-                        IRCMessage(sender: "\(sender) (notice)", text: text, isNotice: true, nicknameColorKey: sender),
+                        IRCMessage(
+                            sender: "\(sender) (notice)",
+                            text: text,
+                            isNotice: true,
+                            nicknameColorKey: sender,
+                            ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+                        ),
                         for: .directMessage(conversation.id),
                         notifyDirectMessage: true
                     )
@@ -2341,10 +2515,22 @@ final class IRCAppState: ObservableObject {
                 serverID: profile.id
             )
             if isOwnMessage,
-               consumeOutgoingEcho(
+               isDuplicateSelfTargetedDelivery(
                 serverID: profile.id,
                 target: target,
-                text: text,
+                wireText: text,
+                presentation: incomingEchoPresentation(forPrivmsgText: text),
+                tags: wire.tags
+            ) {
+                return
+            }
+            if isOwnMessage,
+               reconcileOutgoingEcho(
+                serverID: profile.id,
+                target: target,
+                wireText: text,
+                tags: wire.tags,
+                timestamp: incomingMessageTimestamp,
                 maximumEchoBytes: relayedMessageByteLimit(
                     target: target,
                     sourcePrefix: wire.prefix,
@@ -2354,23 +2540,64 @@ final class IRCAppState: ObservableObject {
                 return
             }
             guard !isIgnored(sender, on: profile) else { return }
-            if handleCTCP(text, from: sender, target: target, profile: profile, canReplyToRequest: true) { return }
+            if handleCTCP(
+                text,
+                from: sender,
+                target: target,
+                profile: profile,
+                canReplyToRequest: true,
+                tags: wire.tags
+            ) { return }
             if let channelTarget = features(for: profile.id).channelName(fromMessageTarget: target) {
                 let channel = channel(named: channelTarget, serverID: profile.id)
                 append(
-                    IRCMessage(sender: sender, text: text),
+                    IRCMessage(
+                        sender: sender,
+                        text: text,
+                        ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+                    ),
                     for: .channel(channel.id),
                     markUnread: !isOwnMessage,
                     markMention: !isOwnMessage && messageMentionsLocalNickname(text, on: profile)
                 )
-            } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
-                let conversation = directMessage(named: sender, serverID: profile.id)
+            } else {
+                let peer = isOwnMessage ? target : sender
+                let conversation = directMessage(named: peer, serverID: profile.id)
                 append(
-                    IRCMessage(sender: sender, text: text),
+                    IRCMessage(
+                        sender: sender,
+                        text: text,
+                        ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+                    ),
                     for: .directMessage(conversation.id),
-                    notifyDirectMessage: true
+                    markUnread: !isOwnMessage,
+                    notifyDirectMessage: !isOwnMessage
                 )
             }
+        case "FAIL", "WARN", "NOTE":
+            guard let reply = IRCStandardReply(wire: wire) else { return }
+            let label = wire.tags["label"] ?? nil
+            let destination = labeledResponseDestination(for: wire, profile: profile)
+                ?? .server(profile.id)
+            if let label {
+                switch reply.kind {
+                case .failure:
+                    _ = reconcileOutgoingRejection(serverID: profile.id, label: label)
+                case .warning, .note:
+                    if !isInsideTrackedLabeledResponseBatch(wire, serverID: profile.id) {
+                        _ = reconcileOutgoingAcknowledgement(serverID: profile.id, label: label)
+                    }
+                }
+            }
+            append(
+                IRCMessage(
+                    sender: "System",
+                    text: reply.displayText,
+                    isSystem: true,
+                    ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+                ),
+                for: destination
+            )
         case "INVITE":
             guard let invite = IRCIncomingInvite(
                 wire: wire,
@@ -2629,6 +2856,120 @@ final class IRCAppState: ObservableObject {
             appendSystem("Server version request failed: \(wire.trailing ?? "The server rejected the request.")", for: destination)
         default: break
         }
+    }
+
+    private func labeledResponseDestination(
+        for wire: IRCWireMessage,
+        profile: ServerProfile
+    ) -> SidebarItem? {
+        if let batchID = wire.tags["batch"] ?? nil,
+           let destination = incomingBatchesByServer[profile.id]?[batchID]?.destination {
+            return destination
+        }
+        let label = wire.tags["label"] ?? nil
+        guard let label,
+              let pending = pendingOutgoingEchoes[profile.id]?.first(where: {
+                  $0.label == label
+              }) else { return nil }
+        return pending.destination
+    }
+
+    @discardableResult
+    private func handleLabeledOutgoingError(
+        _ wire: IRCWireMessage,
+        profile: ServerProfile
+    ) -> Bool {
+        guard IRCNumericReply.isError(wire.command),
+              let label = wire.tags["label"] ?? nil else { return false }
+        guard let destination = labeledResponseDestination(for: wire, profile: profile) else {
+            return false
+        }
+
+        _ = reconcileOutgoingRejection(serverID: profile.id, label: label)
+        append(
+            IRCMessage(
+                sender: "System",
+                text: "(wire.command): \(wire.trailing ?? "The server rejected the message.")",
+                isSystem: true,
+                ircv3Tags: IRCMessageTag.canonicalizing(wire.tags)
+            ),
+            for: destination
+        )
+        return true
+    }
+
+    private func isInsideTrackedLabeledResponseBatch(
+        _ wire: IRCWireMessage,
+        serverID: UUID
+    ) -> Bool {
+        guard let batchID = wire.tags["batch"] ?? nil else { return false }
+        return incomingBatchesByServer[serverID]?[batchID]?.label != nil
+    }
+
+    private func updateIncomingBatchState(
+        from wire: IRCWireMessage,
+        serverID: UUID,
+        hasExplicitLabel: Bool
+    ) {
+        guard let token = wire.parameters.first, token.count > 1 else { return }
+        let id = String(token.dropFirst())
+        switch token.first {
+        case "+":
+            guard incomingBatchesByServer[serverID]?[id] == nil else { return }
+            let existingCount = incomingBatchesByServer[serverID]?.count ?? 0
+            guard existingCount < maximumTrackedIncomingBatchesPerServer else {
+                return
+            }
+            let label = wire.tags["label"] ?? nil
+            let parentID = wire.tags["batch"] ?? nil
+            if let parentID,
+               incomingBatchesByServer[serverID]?[parentID] == nil {
+                return
+            }
+            let inheritedDestination = parentID.flatMap {
+                incomingBatchesByServer[serverID]?[$0]?.destination
+            }
+            let labeledDestination = label.flatMap {
+                pendingOutgoingDestination(serverID: serverID, label: $0)
+            }
+            let destination: SidebarItem?
+            if hasExplicitLabel {
+                destination = labeledDestination
+            } else {
+                destination = inheritedDestination ?? labeledDestination
+            }
+            incomingBatchesByServer[serverID, default: [:]][id] = IRCIncomingBatch(
+                label: label,
+                destination: destination,
+                completesLabeledResponse: hasExplicitLabel && label != nil,
+                parentID: parentID
+            )
+        case "-":
+            guard let completedBatch = incomingBatchesByServer[serverID]?[id],
+                  completedBatch.parentID == (wire.tags["batch"] ?? nil),
+                  incomingBatchesByServer[serverID]?.values.contains(where: {
+                      $0.parentID == id
+                  }) != true else {
+                return
+            }
+            incomingBatchesByServer[serverID]?.removeValue(forKey: id)
+            if incomingBatchesByServer[serverID]?.isEmpty == true {
+                incomingBatchesByServer.removeValue(forKey: serverID)
+            }
+            if completedBatch.completesLabeledResponse,
+               let label = completedBatch.label {
+                _ = reconcileOutgoingAcknowledgement(serverID: serverID, label: label)
+            }
+        default:
+            break
+        }
+    }
+
+    private func pendingOutgoingDestination(
+        serverID: UUID,
+        label: String
+    ) -> SidebarItem? {
+        pendingOutgoingEchoes[serverID]?.first(where: { $0.label == label })?.destination
     }
 
     @discardableResult
@@ -3054,31 +3395,41 @@ final class IRCAppState: ObservableObject {
     }
 
     @discardableResult
-    private func handleCTCP(_ text: String, from sender: String, target: String, profile: ServerProfile, canReplyToRequest: Bool) -> Bool {
+    private func handleCTCP(
+        _ text: String,
+        from sender: String,
+        target: String,
+        profile: ServerProfile,
+        canReplyToRequest: Bool,
+        tags: [String: String?] = [:]
+    ) -> Bool {
         guard text.first == "\u{01}", text.last == "\u{01}" else { return false }
         let payload = String(text.dropFirst().dropLast())
         let command = payload.split(separator: " ", maxSplits: 1).map(String.init)
         guard let name = command.first?.uppercased() else { return false }
 
-        if IRCCTCPEchoPolicy.isSelfEcho(
+        let isSelfEcho = IRCCTCPEchoPolicy.isSelfEcho(
             sender: sender,
             target: target,
             localNickname: nickname(for: profile),
             caseMapping: features(for: profile.id).caseMapping,
             canReplyToRequest: canReplyToRequest
-        ) {
+        )
+        if isSelfEcho, name != "ACTION" {
             // IRCv3 echo-message reflects our outgoing PRIVMSG back with our
             // own nickname. It is not a CTCP request from the target user.
-            if name == "ACTION" {
-                _ = consumeOutgoingEcho(serverID: profile.id, target: target, text: text)
-            }
             return true
         }
 
         switch name {
         case "ACTION":
             guard canReplyToRequest, command.count > 1 else { return false }
-            let message = IRCMessage(sender: "* \(sender)", text: command[1], nicknameColorKey: sender)
+            let message = IRCMessage(
+                sender: "* \(sender)",
+                text: command[1],
+                nicknameColorKey: sender,
+                ircv3Tags: IRCMessageTag.canonicalizing(tags)
+            )
             if let channelTarget = features(for: profile.id).channelName(fromMessageTarget: target) {
                 let channel = channel(named: channelTarget, serverID: profile.id)
                 let isOwnAction = identifiersEqual(sender, nickname(for: profile), serverID: profile.id)
@@ -3088,9 +3439,15 @@ final class IRCAppState: ObservableObject {
                     markUnread: !isOwnAction,
                     markMention: !isOwnAction && messageMentionsLocalNickname(command[1], on: profile)
                 )
-            } else if !identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
-                let conversation = directMessage(named: sender, serverID: profile.id)
-                append(message, for: .directMessage(conversation.id), notifyDirectMessage: true)
+            } else {
+                let peer = isSelfEcho ? target : sender
+                let conversation = directMessage(named: peer, serverID: profile.id)
+                append(
+                    message,
+                    for: .directMessage(conversation.id),
+                    markUnread: !isSelfEcho,
+                    notifyDirectMessage: !isSelfEcho
+                )
             }
         case "VERSION":
             // A bare VERSION is a CTCP request. Reply privately with concise
@@ -3355,7 +3712,9 @@ final class IRCAppState: ObservableObject {
         pendingClientVersionDestinations = pendingClientVersionDestinations.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingClientVersionRequestIDs = pendingClientVersionRequestIDs.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingUserPings = pendingUserPings.filter { !$0.key.hasPrefix(keyPrefix) }
-        pendingOutgoingEchoes.removeValue(forKey: serverID)
+        finalizePendingOutgoingEchoes(for: serverID)
+        recentSelfTargetedConfirmations.removeValue(forKey: serverID)
+        incomingBatchesByServer.removeValue(forKey: serverID)
     }
 
     private func resetChannelListingRequest(for serverID: UUID) {
@@ -4253,6 +4612,21 @@ final class IRCAppState: ObservableObject {
         "\(serverID.uuidString)|\(normalizedIdentifier(nickname, serverID: serverID))"
     }
 
+    private func outgoingEchoLabel(for serverID: UUID, id: UUID) -> String? {
+        guard connections[serverID]?.isCapabilityEnabled("labeled-response") == true else {
+            return nil
+        }
+        return id.uuidString.lowercased()
+    }
+
+    private func outgoingLabelPrefix(for serverID: UUID, label: String?) -> String {
+        guard let label,
+              connections[serverID]?.isCapabilityEnabled("labeled-response") == true else {
+            return ""
+        }
+        return "@label=\(label) "
+    }
+
     private func outgoingTextChunks(
         _ text: String,
         commandPrefix: String,
@@ -4303,56 +4677,397 @@ final class IRCAppState: ObservableObject {
     private func relayedMessageByteLimit(
         target: String,
         sourcePrefix: String?,
-        profile: ServerProfile
+        profile: ServerProfile,
+        command: String = "PRIVMSG"
     ) -> Int? {
         guard let sourcePrefix else { return nil }
         return IRCTextFraming.messageContentByteLimit(
-            commandPrefix: "PRIVMSG \(target) :",
+            commandPrefix: "\(command) \(target) :",
             maximumLineLength: features(for: profile.id).maximumLineLength,
             sourcePrefix: sourcePrefix
         )
     }
 
-    private func rememberOutgoingEcho(serverID: UUID, target: String, text: String) -> UUID {
+    private func rememberOutgoingEcho(
+        serverID: UUID,
+        target: String,
+        wireText: String,
+        message: IRCMessage,
+        destination: SidebarItem,
+        presentation: IRCOutgoingEchoPresentation = .message
+    ) -> UUID {
         pruneOutgoingEchoes(for: serverID)
-        let pending = PendingOutgoingEcho(target: target, text: text, sentAt: Date())
+        let id = UUID()
+        let pending = PendingOutgoingEcho(
+            id: id,
+            target: target,
+            wireText: wireText,
+            label: outgoingEchoLabel(for: serverID, id: id),
+            state: IRCOutgoingEchoState(
+                message: message,
+                presentation: presentation
+            ),
+            destination: destination,
+            sentAt: Date()
+        )
         pendingOutgoingEchoes[serverID, default: []].append(pending)
         return pending.id
     }
 
-    private func consumeOutgoingEcho(
+    private func handleOutgoingWriteCompletion(
+        serverID: UUID,
+        id: UUID,
+        succeeded: Bool,
+        fallbackMessage: IRCMessage,
+        fallbackDestination: SidebarItem
+    ) {
+        guard var pending = pendingOutgoingEchoes[serverID],
+              let index = pending.firstIndex(where: { $0.id == id }) else {
+            if succeeded {
+                append(fallbackMessage, for: fallbackDestination, markUnread: false)
+            }
+            return
+        }
+        let transition = pending[index].state.completeWrite(
+            succeeded: succeeded || pending[index].hasConsumedSelfTargetedDelivery
+        )
+        let resolvedPending = pending[index]
+        if transition.isComplete {
+            pending.remove(at: index)
+        } else {
+            pending[index] = resolvedPending
+        }
+        pendingOutgoingEchoes[serverID] = pending
+        applyOutgoingEchoTransition(transition, pending: resolvedPending)
+    }
+
+    private func reconcileOutgoingEcho(
         serverID: UUID,
         target: String,
-        text: String,
+        wireText: String,
+        tags: [String: String?],
+        timestamp: Date?,
         maximumEchoBytes: Int? = nil
     ) -> Bool {
         pruneOutgoingEchoes(for: serverID)
         guard var pending = pendingOutgoingEchoes[serverID] else { return false }
-        let matchingTarget: (PendingOutgoingEcho) -> Bool = {
-            self.identifiersEqual($0.target, target, serverID: serverID)
+        let candidates = pending.map {
+            IRCOutgoingEchoCandidate(
+                target: $0.target,
+                wireText: $0.wireText,
+                label: $0.label,
+                hasReceivedServerConfirmation: $0.state.hasReceivedServerConfirmation,
+                presentation: $0.state.presentation
+            )
         }
-        let index = pending.firstIndex(where: {
-            matchingTarget($0) && $0.text == text
-        }) ?? pending.firstIndex(where: {
-            matchingTarget($0)
-                && IRCOutgoingEchoPolicy.matches(
-                    sentText: $0.text,
-                    echoedText: text,
-                    maximumEchoBytes: maximumEchoBytes
-                )
-        })
+        let index = IRCOutgoingEchoCorrelationPolicy.matchingIndex(
+            in: candidates,
+            target: target,
+            wireText: wireText,
+            label: tags["label"] ?? nil,
+            maximumEchoBytes: maximumEchoBytes,
+            caseMapping: features(for: serverID).caseMapping
+        )
         guard let index else { return false }
-        pending.remove(at: index)
+        guard let transition = pending[index].state.receiveEcho(
+            wireText: wireText,
+            tags: tags,
+            timestamp: timestamp
+        ) else { return false }
+        let resolvedPending = pending[index]
+        let shouldExpectSecondSelfTargetedCopy = tags["label"] != nil
+            || connections[serverID]?.isCapabilityEnabled("echo-message") == true
+        if shouldExpectSecondSelfTargetedCopy,
+           !resolvedPending.hasConsumedSelfTargetedDelivery,
+           isLocalNickname(target, serverID: serverID) {
+            rememberSelfTargetedConfirmation(
+                serverID: serverID,
+                target: target,
+                wireText: wireText
+            )
+        }
+        if transition.isComplete {
+            pending.remove(at: index)
+        } else {
+            pending[index] = resolvedPending
+        }
         pendingOutgoingEchoes[serverID] = pending
+        applyOutgoingEchoTransition(transition, pending: resolvedPending)
         return true
     }
 
-    private func discardOutgoingEcho(serverID: UUID, id: UUID) {
-        pendingOutgoingEchoes[serverID]?.removeAll { $0.id == id }
+    private func reconcileOutgoingAcknowledgement(
+        serverID: UUID,
+        label: String
+    ) -> Bool {
+        pruneOutgoingEchoes(for: serverID)
+        guard var pending = pendingOutgoingEchoes[serverID],
+              let index = pending.firstIndex(where: {
+                  $0.label == label && !$0.state.hasReceivedServerConfirmation
+              }) else {
+            return false
+        }
+        if !pending[index].hasConsumedSelfTargetedDelivery,
+           isLocalNickname(pending[index].target, serverID: serverID) {
+            rememberSelfTargetedConfirmation(
+                serverID: serverID,
+                target: pending[index].target,
+                wireText: pending[index].wireText
+            )
+        }
+        guard let transition = pending[index].state.receiveAcknowledgement() else {
+            return false
+        }
+        let resolvedPending = pending[index]
+        if transition.isComplete {
+            pending.remove(at: index)
+        } else {
+            pending[index] = resolvedPending
+        }
+        pendingOutgoingEchoes[serverID] = pending
+        applyOutgoingEchoTransition(transition, pending: resolvedPending)
+        return true
+    }
+
+    private func reconcileOutgoingRejection(
+        serverID: UUID,
+        label: String
+    ) -> Bool {
+        pruneOutgoingEchoes(for: serverID)
+        guard var pending = pendingOutgoingEchoes[serverID],
+              let index = pending.firstIndex(where: {
+                  $0.label == label && !$0.state.hasReceivedServerConfirmation
+              }),
+              let transition = pending[index].state.receiveRejection() else {
+            return false
+        }
+        let resolvedPending = pending[index]
+        if transition.isComplete {
+            pending.remove(at: index)
+        } else {
+            pending[index] = resolvedPending
+        }
+        pendingOutgoingEchoes[serverID] = pending
+        applyOutgoingEchoTransition(transition, pending: resolvedPending)
+        return true
+    }
+
+    private func applyOutgoingEchoTransition(
+        _ transition: IRCOutgoingEchoTransition,
+        pending: PendingOutgoingEcho
+    ) {
+        switch transition.transcriptMutation {
+        case .none:
+            break
+        case .append(let message):
+            if !containsMessage(
+                serverMessageID: message.serverMessageID,
+                in: pending.destination
+            ) {
+                append(message, for: pending.destination, markUnread: false)
+            }
+        case .replace(let message):
+            if containsMessage(
+                serverMessageID: message.serverMessageID,
+                excludingID: message.id,
+                in: pending.destination
+            ) {
+                removeMessage(matchingID: message.id, from: pending.destination)
+            } else if !replaceMessage(
+                message,
+                matchingID: message.id,
+                for: pending.destination
+            ) {
+                append(message, for: pending.destination, markUnread: false)
+            }
+        case .remove(let id):
+            removeMessage(matchingID: id, from: pending.destination)
+        }
+    }
+
+    /// A server reply can beat the transport's asynchronous write callback.
+    /// Preserve that authoritative result when a disconnect tears down the
+    /// session; the later callback is session-gated and cannot append it again.
+    private func finalizePendingOutgoingEchoes(for serverID: UUID) {
+        guard let pending = pendingOutgoingEchoes.removeValue(forKey: serverID) else {
+            return
+        }
+        for var outgoing in pending {
+            let transition = outgoing.state.completeWrite(
+                succeeded: outgoing.hasConsumedSelfTargetedDelivery
+            )
+            applyOutgoingEchoTransition(transition, pending: outgoing)
+        }
+    }
+
+    @discardableResult
+    private func replaceMessage(
+        _ message: IRCMessage,
+        matchingID id: UUID,
+        for item: SidebarItem
+    ) -> Bool {
+        guard let conversationID = conversationID(for: item),
+              let index = conversations[conversationID]?.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+        conversations[conversationID]?[index] = message
+        messagesDidChange(for: conversationID)
+        return true
+    }
+
+    private func removeMessage(matchingID id: UUID, from item: SidebarItem) {
+        guard let conversationID = conversationID(for: item),
+              conversations[conversationID]?.contains(where: { $0.id == id }) == true else {
+            return
+        }
+        conversations[conversationID]?.removeAll { $0.id == id }
+        messagesDidChange(for: conversationID)
+    }
+
+    private func isDuplicateSelfTargetedDelivery(
+        serverID: UUID,
+        target: String,
+        wireText: String,
+        presentation: IRCOutgoingEchoPresentation,
+        tags: [String: String?]
+    ) -> Bool {
+        guard isLocalNickname(target, serverID: serverID) else { return false }
+        pruneOutgoingEchoes(for: serverID)
+        let label = tags["label"] ?? nil
+        if let label,
+           pendingOutgoingEchoes[serverID]?.contains(where: {
+               $0.label == label && !$0.state.hasReceivedServerConfirmation
+           }) == true {
+            return false
+        }
+
+        if label == nil {
+            let pendingCandidates = (pendingOutgoingEchoes[serverID] ?? []).map {
+                IRCOutgoingEchoCandidate(
+                    target: $0.target,
+                    wireText: $0.wireText,
+                    label: $0.label,
+                    hasReceivedServerConfirmation: $0.state.hasReceivedServerConfirmation,
+                    presentation: $0.state.presentation
+                )
+            }
+            if let index = IRCSelfTargetedEchoDuplicatePolicy.matchingPendingIndex(
+                in: pendingCandidates,
+                target: target,
+                wireText: wireText,
+                presentation: presentation,
+                caseMapping: features(for: serverID).caseMapping
+            ) {
+                pendingOutgoingEchoes[serverID]?[index].hasConsumedSelfTargetedDelivery = true
+                return true
+            }
+            pruneRecentSelfTargetedConfirmations(for: serverID)
+            if var recent = recentSelfTargetedConfirmations[serverID],
+               let index = IRCSelfTargetedEchoDuplicatePolicy.matchingIndex(
+                   in: recent,
+                   target: target,
+                   wireText: wireText,
+                   now: Date(),
+                   maximumAge: 30,
+                   caseMapping: features(for: serverID).caseMapping
+               ) {
+                recent.remove(at: index)
+                if recent.isEmpty {
+                    recentSelfTargetedConfirmations.removeValue(forKey: serverID)
+                } else {
+                    recentSelfTargetedConfirmations[serverID] = recent
+                }
+                return true
+            }
+        }
+
+        guard let messageID = tags["msgid"] ?? nil else { return false }
+        if pendingOutgoingEchoes[serverID]?.contains(where: {
+            $0.state.message.serverMessageID == messageID
+        }) == true {
+            return true
+        }
+        guard let conversation = directMessages.first(where: {
+            $0.serverID == serverID
+                && identifiersEqual($0.name, target, serverID: serverID)
+        }) else { return false }
+        return containsMessage(
+            serverMessageID: messageID,
+            in: .directMessage(conversation.id)
+        )
+    }
+
+    private func isLocalNickname(_ target: String, serverID: UUID) -> Bool {
+        guard let profile = profiles.first(where: { $0.id == serverID }) else { return false }
+        return identifiersEqual(target, nickname(for: profile), serverID: serverID)
+    }
+
+    private func incomingEchoPresentation(
+        forPrivmsgText text: String
+    ) -> IRCOutgoingEchoPresentation {
+        if text.hasPrefix("\u{01}ACTION "), text.hasSuffix("\u{01}") {
+            return .action
+        }
+        return .message
+    }
+
+    private func rememberSelfTargetedConfirmation(
+        serverID: UUID,
+        target: String,
+        wireText: String
+    ) {
+        pruneRecentSelfTargetedConfirmations(for: serverID)
+        recentSelfTargetedConfirmations[serverID, default: []].append(
+            IRCRecentSelfTargetedConfirmation(
+                target: target,
+                wireText: wireText,
+                recordedAt: Date()
+            )
+        )
+        if recentSelfTargetedConfirmations[serverID, default: []].count > 256 {
+            recentSelfTargetedConfirmations[serverID]?.removeFirst()
+        }
+    }
+
+    private func pruneRecentSelfTargetedConfirmations(for serverID: UUID) {
+        let now = Date()
+        recentSelfTargetedConfirmations[serverID]?.removeAll {
+            now.timeIntervalSince($0.recordedAt) > 30
+        }
+        if recentSelfTargetedConfirmations[serverID]?.isEmpty == true {
+            recentSelfTargetedConfirmations.removeValue(forKey: serverID)
+        }
+    }
+
+    private func containsMessage(
+        serverMessageID: String?,
+        excludingID: UUID? = nil,
+        in item: SidebarItem
+    ) -> Bool {
+        guard let serverMessageID,
+              let conversationID = conversationID(for: item) else { return false }
+        return conversations[conversationID]?.contains {
+            $0.id != excludingID && $0.serverMessageID == serverMessageID
+        } == true
     }
 
     private func pruneOutgoingEchoes(for serverID: UUID) {
-        pendingOutgoingEchoes[serverID]?.removeAll { Date().timeIntervalSince($0.sentAt) > 30 }
+        let now = Date()
+        // Never expire an entry that is still awaiting its asynchronous write
+        // callback. A server echo/ACK may already be held in that state, and
+        // removing it would either lose the confirmed row or let the eventual
+        // callback append a duplicate fallback.
+        pendingOutgoingEchoes[serverID]?.removeAll {
+            IRCOutgoingEchoRetentionPolicy.shouldExpire(
+                $0.state,
+                sentAt: $0.sentAt,
+                now: now
+            )
+        }
+        if pendingOutgoingEchoes[serverID]?.isEmpty == true {
+            pendingOutgoingEchoes.removeValue(forKey: serverID)
+        }
+        pruneRecentSelfTargetedConfirmations(for: serverID)
     }
 
     private func requestChannelListing(for profile: ServerProfile, arguments: String = "", forceRefresh: Bool = false) {
@@ -4515,10 +5230,21 @@ final class IRCAppState: ObservableObject {
 }
 
 private struct PendingOutgoingEcho {
-    var id = UUID()
+    var id: UUID
     var target: String
-    var text: String
+    var wireText: String
+    var label: String?
+    var state: IRCOutgoingEchoState
+    var destination: SidebarItem
     var sentAt: Date
+    var hasConsumedSelfTargetedDelivery = false
+}
+
+private struct IRCIncomingBatch {
+    var label: String?
+    var destination: SidebarItem?
+    var completesLabeledResponse: Bool
+    var parentID: String?
 }
 
 private struct PendingUserPing {

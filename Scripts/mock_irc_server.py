@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import ipaddress
 import signal
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Final
@@ -34,9 +35,13 @@ CAPABILITIES: Final = (
     "userhost-in-names",
     "chghost",
     "echo-message",
+    "batch",
+    "labeled-response",
+    "standard-replies",
 )
 BASE_TIME: Final = datetime(2026, 7, 23, 16, 0, tzinfo=timezone.utc)
 MAX_IRC_LINE_BYTES: Final = 510
+MAX_IRCV3_TAG_SECTION_BYTES: Final = 4096
 
 
 @dataclass(frozen=True)
@@ -701,22 +706,29 @@ MEMBER_BY_NICK["niko"] = Member("Niko", username="niko", hostname="localization.
 MEMBER_BY_NICK["rowan"] = Member("Rowan", username="rowan", hostname="people.demo")
 
 
-def parse_irc_line(line: str) -> tuple[str, list[str], str | None]:
-    """Parse the command, middle parameters, and optional trailing parameter."""
+def parse_irc_line(
+    line: str,
+) -> tuple[dict[str, str | None], str, list[str], str | None]:
+    """Parse tags, command, middle parameters, and optional trailing parameter."""
     remainder = line.strip("\r\n")
+    tags: dict[str, str | None] = {}
     if remainder.startswith("@"):
-        _, separator, remainder = remainder.partition(" ")
+        raw_tags, separator, remainder = remainder.partition(" ")
         if not separator:
-            return "", [], None
+            return tags, "", [], None
+        for raw_tag in raw_tags[1:].split(";"):
+            name, value_separator, value = raw_tag.partition("=")
+            if name:
+                tags[name] = value if value_separator else None
     if remainder.startswith(":"):
         _, separator, remainder = remainder.partition(" ")
         if not separator:
-            return "", [], None
+            return tags, "", [], None
     middle, separator, trailing = remainder.partition(" :")
     fields = middle.split()
     if not fields:
-        return "", [], None
-    return fields[0].upper(), fields[1:], trailing if separator else None
+        return tags, "", [], None
+    return tags, fields[0].upper(), fields[1:], trailing if separator else None
 
 
 def server_time(value: datetime) -> str:
@@ -729,6 +741,19 @@ def is_loopback_host(host: str) -> bool:
     with contextlib.suppress(ValueError):
         return ipaddress.ip_address(host).is_loopback
     return False
+
+
+def wire_line_is_within_limits(line: str) -> bool:
+    if line.startswith("@"):
+        tag_section, separator, message = line.partition(" ")
+        if not separator:
+            return False
+        return (
+            len((tag_section + separator).encode("utf-8"))
+            <= MAX_IRCV3_TAG_SECTION_BYTES
+            and len(message.encode("utf-8")) <= MAX_IRC_LINE_BYTES
+        )
+    return len(line.encode("utf-8")) <= MAX_IRC_LINE_BYTES
 
 
 class DemoSession:
@@ -749,6 +774,7 @@ class DemoSession:
         self.real_name = "Netsplit Demo User"
         self.cap_negotiating = False
         self.cap_ended = False
+        self.enabled_capabilities: set[str] = set()
         self.registered = False
         self.joined_channels: set[str] = set()
         self.demo_task: asyncio.Task[None] | None = None
@@ -776,12 +802,12 @@ class DemoSession:
         self.log(f"connected: {self.peer_label}")
         try:
             while data := await self.reader.readline():
-                if len(data) > MAX_IRC_LINE_BYTES + 2:
-                    self.log("closing connection after oversized IRC line")
-                    break
                 line = data.decode("utf-8", errors="replace").rstrip("\r\n")
                 if not line:
                     continue
+                if not wire_line_is_within_limits(line):
+                    self.log("closing connection after oversized IRC line")
+                    break
                 self.log(f"<- {line}")
                 if not await self.handle_line(line):
                     break
@@ -806,7 +832,7 @@ class DemoSession:
                 await asyncio.wait_for(self.writer.wait_closed(), timeout=1)
 
     async def handle_line(self, line: str) -> bool:
-        command, parameters, trailing = parse_irc_line(line)
+        tags, command, parameters, trailing = parse_irc_line(line)
 
         if command == "CAP":
             await self.handle_cap(parameters, trailing)
@@ -849,13 +875,14 @@ class DemoSession:
                     self.joined_channels.discard(channel_name.casefold())
         elif command == "PRIVMSG":
             if parameters and trailing is not None:
-                target = parameters[0]
-                await self.send_tagged(
-                    datetime.now(timezone.utc),
-                    f":{self.local_mask} PRIVMSG {target} :{trailing}",
+                await self.handle_outgoing_message(
+                    "PRIVMSG", parameters[0], trailing, tags.get("label")
                 )
         elif command == "NOTICE":
-            pass
+            if parameters and trailing is not None:
+                await self.handle_outgoing_message(
+                    "NOTICE", parameters[0], trailing, tags.get("label")
+                )
         elif command == "TOPIC":
             await self.handle_topic(parameters, trailing)
         elif command == "MODE":
@@ -918,7 +945,23 @@ class DemoSession:
                 for token in requested.split()
             }
             available = set(CAPABILITIES)
-            if requested_names <= available:
+            next_enabled = set(self.enabled_capabilities)
+            for token in requested.split():
+                name = token.lstrip("-").split("=", maxsplit=1)[0]
+                if token.startswith("-"):
+                    next_enabled.discard(name)
+                else:
+                    next_enabled.add(name)
+            dependencies_satisfied = not (
+                "labeled-response" in next_enabled and "batch" not in next_enabled
+            )
+            if requested_names <= available and dependencies_satisfied:
+                for token in requested.split():
+                    name = token.lstrip("-").split("=", maxsplit=1)[0]
+                    if token.startswith("-"):
+                        self.enabled_capabilities.discard(name)
+                    else:
+                        self.enabled_capabilities.add(name)
                 await self.send(f":{SERVER_NAME} CAP * ACK :{requested}")
             else:
                 await self.send(f":{SERVER_NAME} CAP * NAK :{requested}")
@@ -961,6 +1004,41 @@ class DemoSession:
         )
         await self.send_motd()
         self.demo_task = asyncio.create_task(self.play_demo())
+
+    async def handle_outgoing_message(
+        self,
+        command: str,
+        target: str,
+        trailing: str,
+        label: str | None,
+    ) -> None:
+        timestamp = datetime.now(timezone.utc)
+        line = f":{self.local_mask} {command} {target} :{trailing}"
+        is_self_target = target.casefold() == self.local_nick.casefold()
+        has_echo = "echo-message" in self.enabled_capabilities
+        negotiated_label = (
+            label if "labeled-response" in self.enabled_capabilities else None
+        )
+
+        if has_echo:
+            message_id = uuid.uuid4().hex
+            await self.send_tagged(
+                timestamp,
+                line,
+                label=negotiated_label,
+                message_id=message_id,
+            )
+            if is_self_target:
+                await self.send_tagged(
+                    timestamp,
+                    line,
+                    message_id=message_id,
+                )
+        else:
+            if is_self_target:
+                await self.send_tagged(timestamp, line)
+            if negotiated_label:
+                await self.send(f"@label={negotiated_label} :{SERVER_NAME} ACK")
 
     async def play_demo(self) -> None:
         # Netsplit rejoins retained and favorite channels shortly after
@@ -1162,16 +1240,33 @@ class DemoSession:
         suffix = f" :{trailing}" if trailing is not None else ""
         await self.send(f":{SERVER_NAME} {code} {middle}{suffix}")
 
-    async def send_tagged(self, timestamp: datetime, line: str) -> None:
-        await self.send(f"@time={server_time(timestamp)} {line}")
+    async def send_tagged(
+        self,
+        timestamp: datetime,
+        line: str,
+        *,
+        label: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
+        tags: list[str] = []
+        if "server-time" in self.enabled_capabilities:
+            tags.append(f"time={server_time(timestamp)}")
+        if (
+            "message-tags" in self.enabled_capabilities
+            and (" PRIVMSG " in line or " NOTICE " in line)
+        ):
+            tags.append(f"msgid={message_id or uuid.uuid4().hex}")
+        if label:
+            tags.append(f"label={label}")
+        await self.send(f"@{';'.join(tags)} {line}" if tags else line)
 
     async def send(self, line: str) -> None:
         clean_line = line.replace("\r", "").replace("\n", "")
-        encoded = clean_line.encode("utf-8")
-        if len(encoded) > MAX_IRC_LINE_BYTES:
+        if not wire_line_is_within_limits(clean_line):
             raise ValueError(
-                f"IRC line exceeds {MAX_IRC_LINE_BYTES} bytes: {clean_line}"
+                f"IRC line exceeds its message or tag byte limit: {clean_line}"
             )
+        encoded = clean_line.encode("utf-8")
         if self.writer.is_closing():
             return
         async with self.write_lock:
@@ -1291,7 +1386,7 @@ async def run_server(arguments: argparse.Namespace) -> int:
             accept,
             host=arguments.host,
             port=arguments.port,
-            limit=MAX_IRC_LINE_BYTES + 2,
+            limit=MAX_IRCV3_TAG_SECTION_BYTES + MAX_IRC_LINE_BYTES + 2,
         )
     except OSError as error:
         print(

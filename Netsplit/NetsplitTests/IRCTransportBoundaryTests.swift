@@ -247,8 +247,10 @@ struct IRCTransportBoundaryTests {
         oldRegistration.capabilityNegotiation = .ended(
             IRCAdvertisedCapabilities(
                 names: ["message-tags", "sasl"],
+                values: ["sasl": "PLAIN"],
                 saslMechanisms: ["PLAIN"]
             ),
+            enabled: ["message-tags", "sasl"],
             sasl: .responseSent(oldCredentials)
         )
         var phase = IRCConnectionPhase.ready(
@@ -281,8 +283,70 @@ struct IRCTransportBoundaryTests {
         }
         #expect(session.registration.serverPassword == nil)
         #expect(session.registration.capabilityNegotiation.advertised.names.isEmpty)
+        #expect(session.registration.capabilityNegotiation.advertised.values.isEmpty)
         #expect(session.registration.capabilityNegotiation.advertised.saslMechanisms == nil)
+        #expect(session.registration.capabilityNegotiation.enabled == ["cap-notify"])
         #expect(session.registration.capabilityNegotiation.sasl == .pending(newCredentials))
+    }
+
+    @Test("Capability state tracks advertised values separately from ACKed capabilities")
+    func capabilityStateTracksAdvertisementsAndAcknowledgements() {
+        var advertised = IRCAdvertisedCapabilities()
+        advertised.apply([
+            "message-tags",
+            "sasl=PLAIN,EXTERNAL",
+            "example.org/feature=one"
+        ])
+        var state = IRCCapabilityNegotiationState.active(
+            advertised,
+            enabled: ["cap-notify"],
+            sasl: nil
+        )
+
+        #expect(state.advertised.names == [
+            "message-tags", "sasl", "example.org/feature"
+        ])
+        #expect(state.advertised.values["sasl"] == "PLAIN,EXTERNAL")
+        #expect(state.advertised.values["example.org/feature"] == "one")
+        #expect(state.advertised.saslMechanisms == ["PLAIN", "EXTERNAL"])
+        #expect(state.enabled == ["cap-notify"])
+
+        state = state.acknowledging(["message-tags", "sasl"])
+        #expect(state.enabled == ["cap-notify", "message-tags", "sasl"])
+
+        state = state.acknowledging(["-message-tags"])
+        #expect(state.enabled == ["cap-notify", "sasl"])
+
+        let invalidPartialAcknowledgement = state.acknowledging(["labeled-response"])
+        #expect(!invalidPartialAcknowledgement.enabled.contains("labeled-response"))
+    }
+
+    @Test("CAP DEL removes advertised values and enabled state")
+    func capabilityDeletionCancelsCapabilities() {
+        var advertised = IRCAdvertisedCapabilities()
+        advertised.apply(["message-tags", "sasl=PLAIN", "server-time", "batch", "labeled-response"])
+        let state = IRCCapabilityNegotiationState.ended(
+            advertised,
+            enabled: ["cap-notify", "message-tags", "sasl", "server-time", "batch", "labeled-response"],
+            sasl: .responseSent(IRCSASLCredentials(username: "tester", password: "secret"))
+        ).removing(["cap-notify", "message-tags", "sasl"])
+
+        #expect(state.advertised.names == ["server-time", "batch", "labeled-response"])
+        #expect(state.advertised.values.isEmpty)
+        #expect(state.advertised.saslMechanisms == nil)
+        #expect(state.enabled == ["cap-notify", "server-time", "batch", "labeled-response"])
+        #expect(state.sasl == .pending(IRCSASLCredentials(username: "tester", password: "secret")))
+        #expect(state.markingSASLResponseSent() == nil)
+
+        let reenabledSASL = state.acknowledging(["sasl"])
+        #expect(reenabledSASL.markingSASLResponseSent()?.sasl == .responseSent(
+            IRCSASLCredentials(username: "tester", password: "secret")
+        ))
+
+        let removedBatch = state.removing(["batch"])
+        #expect(removedBatch.advertised.names.contains("labeled-response"))
+        #expect(!removedBatch.enabled.contains("batch"))
+        #expect(!removedBatch.enabled.contains("labeled-response"))
     }
 
     @Test("Failure during graceful quit stays in one explicit quitting phase")
