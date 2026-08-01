@@ -883,18 +883,26 @@ private struct ServerProfileCard: View {
         }
         .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
         .contextMenu {
-            Button("Edit Profile…") { editingProfile = profile }
+            Button("Edit Profile…", systemImage: "pencil") {
+                editingProfile = profile
+            }
             if !state.ignoredNicknames(for: profile).isEmpty {
                 Button("Show Ignores…", systemImage: "person.slash") {
                     ignoresProfile = profile
                 }
             }
             if profile.isBuiltIn && profile.isPresetModified == true {
-                Button("Restore Default Profile") { state.restorePreset(profile) }
+                Button("Restore Default Profile", systemImage: "arrow.counterclockwise") {
+                    state.restorePreset(profile)
+                }
             }
             if !profile.isBuiltIn {
                 Divider()
-                Button("Delete", role: .destructive) { state.delete(profile) }
+                Button(role: .destructive) {
+                    state.delete(profile)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
             }
         }
     }
