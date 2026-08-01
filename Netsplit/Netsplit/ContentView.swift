@@ -41,6 +41,7 @@ struct ContentView: View {
     @ObservedObject var state: IRCAppState
     @State private var showAddServer = false
     @State private var editingProfile: ServerProfile?
+    @State private var ignoresProfile: ServerProfile?
     @State private var banListChannel: Conversation?
     @StateObject private var previewExpansion = IRCMessagePreviewExpansionStore()
     @FocusState private var workspaceFocus: IRCWorkspaceFocus?
@@ -61,6 +62,7 @@ struct ContentView: View {
                 state: state,
                 showAddServer: $showAddServer,
                 editingProfile: $editingProfile,
+                ignoresProfile: $ignoresProfile,
                 workspaceFocus: $workspaceFocus
             )
                 .navigationSplitViewColumnWidth(
@@ -71,7 +73,12 @@ struct ContentView: View {
         } detail: {
             Group {
                 if state.selection == .connectionCenter || state.selection == nil {
-                    ConnectionCenterView(state: state, showAddServer: $showAddServer, editingProfile: $editingProfile)
+                    ConnectionCenterView(
+                        state: state,
+                        showAddServer: $showAddServer,
+                        editingProfile: $editingProfile,
+                        ignoresProfile: $ignoresProfile
+                    )
                 } else if let selection = state.selection {
                     ConversationView(
                         state: state,
@@ -135,6 +142,9 @@ struct ContentView: View {
         .sheet(item: $editingProfile) { profile in
             ServerProfileEditor(state: state, profileToEdit: profile)
         }
+        .sheet(item: $ignoresProfile) { profile in
+            IgnoredUsersView(state: state, profile: profile)
+        }
         .sheet(item: $banListChannel) { channel in
             ChannelBanListView(state: state, channel: channel)
         }
@@ -174,6 +184,7 @@ private struct SidebarView: View {
     @ObservedObject var state: IRCAppState
     @Binding var showAddServer: Bool
     @Binding var editingProfile: ServerProfile?
+    @Binding var ignoresProfile: ServerProfile?
     @FocusState.Binding var workspaceFocus: IRCWorkspaceFocus?
     @State private var listSelection: SidebarItem?
     @State private var collapsedProfileIDs: Set<UUID> = []
@@ -354,6 +365,12 @@ private struct SidebarView: View {
         }
         .disabled(!state.hasUnreadActivity(for: profile))
 
+        if !state.ignoredNicknames(for: profile).isEmpty {
+            Button("Show Ignores…", systemImage: "person.slash") {
+                ignoresProfile = profile
+            }
+        }
+
         Divider()
 
         if !state.isOneOffServer(profile) {
@@ -397,6 +414,107 @@ private struct SidebarView: View {
         var values = [message.hasUnread ? "Unread messages" : "No unread messages"]
         if state.isMuted(message) { values.append("Muted") }
         return values.joined(separator: ", ")
+    }
+}
+
+private struct IgnoredUsersView: View {
+    @ObservedObject var state: IRCAppState
+    let profile: ServerProfile
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.ircTextMetrics) private var textMetrics
+    @State private var confirmsRemovingAll = false
+
+    private var ignoredNicknames: [String] {
+        state.ignoredNicknames(for: profile)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: textMetrics.spacing(4)) {
+                    Text("Ignored Users")
+                        .font(.system(size: textMetrics.size(22), weight: .semibold))
+                        .accessibilityAddTraits(.isHeader)
+                    Text(profile.name)
+                        .font(.system(size: textMetrics.size(14)))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(ignoredNicknames.count)")
+                    .font(.system(size: textMetrics.size(12), weight: .medium, design: .monospaced))
+                    .padding(.horizontal, textMetrics.spacing(8))
+                    .padding(.vertical, textMetrics.spacing(4))
+                    .ircBadgeStyle()
+                    .accessibilityLabel("\(ignoredNicknames.count) ignored users")
+            }
+            .padding(textMetrics.spacing(20))
+
+            Divider()
+
+            Group {
+                if ignoredNicknames.isEmpty {
+                    ContentUnavailableView(
+                        "No Ignored Users",
+                        systemImage: "person.crop.circle.badge.checkmark",
+                        description: Text("Messages and notices from everyone on \(profile.name) are visible.")
+                    )
+                } else {
+                    List(ignoredNicknames, id: \.self) { nickname in
+                        HStack(spacing: textMetrics.spacing(12)) {
+                            Image(systemName: "person.crop.circle.badge.xmark")
+                                .font(.system(size: textMetrics.size(17)))
+                                .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
+                            Text(nickname)
+                                .font(.system(size: textMetrics.size(14)))
+                                .textSelection(.enabled)
+                            Spacer(minLength: textMetrics.spacing(16))
+                            Button("Stop Ignoring \(nickname)", systemImage: "trash") {
+                                state.unignore(nickname, from: .server(profile.id))
+                            }
+                            .labelStyle(.iconOnly)
+                            .buttonStyle(.borderless)
+                            .help("Stop ignoring \(nickname)")
+                        }
+                        .padding(.vertical, textMetrics.spacing(4))
+                        .contextMenu {
+                            Button("Stop Ignoring \(nickname)", systemImage: "person") {
+                                state.unignore(nickname, from: .server(profile.id))
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+
+            HStack {
+                if !ignoredNicknames.isEmpty {
+                    Button("Remove All…", role: .destructive) {
+                        confirmsRemovingAll = true
+                    }
+                }
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(textMetrics.spacing(16))
+        }
+        .frame(minWidth: textMetrics.spacing(460), minHeight: textMetrics.spacing(330))
+        .confirmationDialog(
+            "Stop ignoring everyone on \(profile.name)?",
+            isPresented: $confirmsRemovingAll
+        ) {
+            Button("Stop Ignoring All", role: .destructive) {
+                state.removeAllIgnores(for: profile)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Messages and notices from these users will become visible again.")
+        }
     }
 }
 
@@ -591,6 +709,7 @@ private struct ConnectionCenterView: View {
     @ObservedObject var state: IRCAppState
     @Binding var showAddServer: Bool
     @Binding var editingProfile: ServerProfile?
+    @Binding var ignoresProfile: ServerProfile?
 
     @Environment(\.ircTextMetrics) private var textMetrics
 
@@ -634,7 +753,12 @@ private struct ConnectionCenterView: View {
                         .font(.system(size: textMetrics.size(20), weight: .semibold))
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
                         ForEach(state.storedProfiles) { profile in
-                            ServerProfileCard(profile: profile, state: state, editingProfile: $editingProfile)
+                            ServerProfileCard(
+                                profile: profile,
+                                state: state,
+                                editingProfile: $editingProfile,
+                                ignoresProfile: $ignoresProfile
+                            )
                         }
                     }
                 }
@@ -650,6 +774,7 @@ private struct ServerProfileCard: View {
     let profile: ServerProfile
     @ObservedObject var state: IRCAppState
     @Binding var editingProfile: ServerProfile?
+    @Binding var ignoresProfile: ServerProfile?
     @Environment(\.ircTextMetrics) private var textMetrics
     @Environment(\.ircThemePalette) private var themePalette
 
@@ -759,6 +884,11 @@ private struct ServerProfileCard: View {
         .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
         .contextMenu {
             Button("Edit Profile…") { editingProfile = profile }
+            if !state.ignoredNicknames(for: profile).isEmpty {
+                Button("Show Ignores…", systemImage: "person.slash") {
+                    ignoresProfile = profile
+                }
+            }
             if profile.isBuiltIn && profile.isPresetModified == true {
                 Button("Restore Default Profile") { state.restorePreset(profile) }
             }

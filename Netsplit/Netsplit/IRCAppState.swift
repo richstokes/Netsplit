@@ -624,12 +624,25 @@ final class IRCAppState: ObservableObject {
         ignoreSnapshot(for: item)?.contains(nickname) ?? false
     }
 
+    func ignoredNicknames(for profile: ServerProfile) -> [String] {
+        (profiles.first(where: { $0.id == profile.id })?.ignoredNicknames ?? [])
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
     func ignore(_ nickname: String, from item: SidebarItem) {
         setIgnore(nickname, ignored: true, from: item)
     }
 
     func unignore(_ nickname: String, from item: SidebarItem) {
         setIgnore(nickname, ignored: false, from: item)
+    }
+
+    func removeAllIgnores(for profile: ServerProfile) {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == profile.id }),
+              profiles[profileIndex].ignoredNicknames?.isEmpty == false else { return }
+        profiles[profileIndex].ignoredNicknames = nil
+        saveProfiles()
+        appendSystem("Cleared all ignores on \(profiles[profileIndex].name).", for: .server(profile.id))
     }
 
     private func setIgnore(_ targetNickname: String, ignored: Bool, from item: SidebarItem) {
