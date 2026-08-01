@@ -137,6 +137,10 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
         } else {
             collapsedMessageIDsBySelection[selection, default: []].insert(messageID)
         }
+        invalidateLayout(for: messageID, in: selection)
+    }
+
+    func invalidateLayout(for messageID: UUID, in selection: SidebarItem) {
         nextLayoutRevision &+= 1
         latestLayoutChange = IRCMessagePreviewLayoutChange(
             selection: selection,
@@ -189,9 +193,15 @@ struct MessagePreviewStack: View {
                         ForEach(previews) { preview in
                             switch preview {
                             case .link(let url):
-                                IRCLinkPreviewCard(url: url)
+                                IRCLinkPreviewCard(
+                                    url: url,
+                                    onLoad: invalidateRowLayout
+                                )
                             case .image(let url):
-                                IRCImagePreview(url: url)
+                                IRCImagePreview(
+                                    url: url,
+                                    onLoad: invalidateRowLayout
+                                )
                             }
                         }
                     }
@@ -203,6 +213,10 @@ struct MessagePreviewStack: View {
 
     private var previewLabel: String {
         previews.count == 1 ? "Preview" : "\(previews.count) previews"
+    }
+
+    private func invalidateRowLayout() {
+        expansion.invalidateLayout(for: messageID, in: selection)
     }
 }
 
@@ -520,6 +534,7 @@ private struct IRCLinkPreviewCard: View {
     private static let maximumWidth: CGFloat = 440
 
     let url: URL
+    let onLoad: () -> Void
     @State private var metadata: IRCLinkPreviewMetadata?
     @State private var failureReason: IRCPreviewFailureReason?
     @State private var retryCount = 0
@@ -547,10 +562,14 @@ private struct IRCLinkPreviewCard: View {
         }
         .task(id: loadID) {
             failureReason = nil
+            let wasCached = IRCLinkPreviewCache.shared.cachedMetadata(for: url) != nil
             do {
                 let loadedMetadata = try await IRCLinkPreviewCache.shared.metadata(for: url)
                 guard !Task.isCancelled else { return }
                 metadata = loadedMetadata
+                if !wasCached {
+                    onLoad()
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 failureReason = IRCPreviewFailureReason(error: error)
@@ -692,6 +711,7 @@ private final class IRCImagePreviewCache {
 
 private struct IRCImagePreview: View {
     let url: URL
+    let onLoad: () -> Void
     @State private var resource: IRCLoadedImage?
     @State private var failureReason: IRCPreviewFailureReason?
     @State private var retryCount = 0
@@ -719,10 +739,14 @@ private struct IRCImagePreview: View {
         }
         .task(id: loadID) {
             failureReason = nil
+            let wasCached = IRCImagePreviewCache.shared.cachedResource(for: url) != nil
             do {
                 let loadedResource = try await IRCImagePreviewCache.shared.resource(for: url)
                 guard !Task.isCancelled else { return }
                 resource = loadedResource
+                if !wasCached {
+                    onLoad()
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 failureReason = IRCPreviewFailureReason(error: error)
@@ -1085,11 +1109,11 @@ struct IRCBoundedImageLayout: Layout {
         subviews: Subviews,
         cache: inout ()
     ) -> CGSize {
-        let availableSize = CGSize(
-            width: min(max(proposal.width ?? maximumSize.width, 0), maximumSize.width),
-            height: min(max(proposal.height ?? maximumSize.height, 0), maximumSize.height)
+        Self.fittedSize(
+            aspectRatio: aspectRatio,
+            proposal: proposal,
+            maximumSize: maximumSize
         )
-        return Self.fittedSize(aspectRatio: aspectRatio, within: availableSize)
     }
 
     func placeSubviews(
@@ -1125,5 +1149,22 @@ struct IRCBoundedImageLayout: Layout {
             width: availableSize.height * aspectRatio,
             height: availableSize.height
         )
+    }
+
+    static func fittedSize(
+        aspectRatio: CGFloat,
+        proposal: ProposedViewSize,
+        maximumSize: CGSize = CGSize(width: 520, height: 280)
+    ) -> CGSize {
+        // An automatic-height table can propose the row's current height while
+        // remeasuring an asynchronously loaded image. That height belongs to
+        // the loading placeholder; accepting it creates a feedback loop that
+        // leaves the image thumbnail-sized until the row is reconstructed.
+        // Width is a real parent constraint, but preview height is intrinsic.
+        let availableSize = CGSize(
+            width: min(max(proposal.width ?? maximumSize.width, 0), maximumSize.width),
+            height: maximumSize.height
+        )
+        return fittedSize(aspectRatio: aspectRatio, within: availableSize)
     }
 }

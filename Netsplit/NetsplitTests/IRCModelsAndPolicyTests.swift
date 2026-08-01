@@ -1684,6 +1684,25 @@ struct IRCModelsAndPolicyTests {
         #expect(!expansion.isExpanded(for: secondMessageID, in: secondChannel))
     }
 
+    @Test("A loaded preview explicitly invalidates its transcript row")
+    func invalidatesRowAfterPreviewLoad() throws {
+        let messageID = UUID()
+        let selection = SidebarItem.channel(UUID())
+        let expansion = IRCMessagePreviewExpansionStore()
+
+        expansion.invalidateLayout(for: messageID, in: selection)
+        let firstChange = try #require(expansion.latestLayoutChange)
+
+        #expect(firstChange.selection == selection)
+        #expect(firstChange.messageID == messageID)
+        #expect(expansion.isExpanded(for: messageID, in: selection))
+
+        expansion.invalidateLayout(for: messageID, in: selection)
+        let secondChange = try #require(expansion.latestLayoutChange)
+
+        #expect(secondChange.revision > firstChange.revision)
+    }
+
     @Test("Preview disclosure updates an existing hosted row")
     @MainActor
     func updatesHostedRowWhenPreviewExpansionChanges() async throws {
@@ -1715,6 +1734,102 @@ struct IRCModelsAndPolicyTests {
             renderedExpansion == false
         }
         #expect(renderedExpansion == false)
+    }
+
+    @Test("A completed preview replaces its placeholder row at full height")
+    @MainActor
+    func rebuildsRowAfterPreviewLoad() async throws {
+        let message = IRCMessage(sender: "tester", text: "Image preview")
+        let selection = SidebarItem.channel(UUID())
+        let expansion = IRCMessagePreviewExpansionStore()
+        var isLoaded = false
+        var didPositionInitially = false
+
+        func rootView() -> AnyView {
+            let rowLayoutInvalidation = expansion.latestLayoutChange.map {
+                IRCTranscriptRowLayoutInvalidation(
+                    messageID: $0.messageID,
+                    revision: $0.revision
+                )
+            }
+            let preview: AnyView = if isLoaded {
+                AnyView(
+                    IRCBoundedImageLayout(aspectRatio: 4.0 / 3.0) {
+                        Color.orange
+                    }
+                )
+            } else {
+                AnyView(Color.clear.frame(width: 373, height: 96))
+            }
+            return AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: selection,
+                    messages: [message],
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "async-preview-height-test",
+                    rowLayoutInvalidation: rowLayoutInvalidation,
+                    makeRow: { _ in
+                        AnyView(
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Preview")
+                                preview
+                            }
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 600, height: 500)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil {
+            didPositionInitially
+                && Self.view(
+                    withIdentifier: "IRCTranscriptTable",
+                    in: hostingController.view
+                ) != nil
+        }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let placeholderHeight = tableView.rect(ofRow: 1).height
+
+        isLoaded = true
+        expansion.invalidateLayout(for: message.id, in: selection)
+        hostingController.rootView = rootView()
+
+        try await Self.waitUntil(timeout: .seconds(3)) {
+            tableView.rect(ofRow: 1).height > placeholderHeight + 150
+        }
+        #expect(tableView.rect(ofRow: 1).height > placeholderHeight + 150)
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
     }
 
     @Test("Re-expanding a retained preview updates its native transcript row height")
@@ -2165,6 +2280,20 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCBoundedImageLayout.fittedSize(
             aspectRatio: 2,
             within: CGSize(width: 300, height: 280)
+        ) == CGSize(width: 300, height: 150))
+    }
+
+    @Test("Image preview sizing ignores stale automatic-row height proposals")
+    func ignoresStaleImagePreviewRowHeight() {
+        // Async image loading starts in a 96-point placeholder row. Its stale
+        // height proposal must not become the loaded preview's intrinsic cap.
+        #expect(IRCBoundedImageLayout.fittedSize(
+            aspectRatio: 2,
+            proposal: ProposedViewSize(width: 520, height: 96)
+        ) == CGSize(width: 520, height: 260))
+        #expect(IRCBoundedImageLayout.fittedSize(
+            aspectRatio: 2,
+            proposal: ProposedViewSize(width: 300, height: 96)
         ) == CGSize(width: 300, height: 150))
     }
 
