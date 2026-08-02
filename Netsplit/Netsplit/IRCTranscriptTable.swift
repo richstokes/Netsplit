@@ -137,6 +137,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private static let messageCellIdentifier = NSUserInterfaceItemIdentifier(
             "IRCTranscriptMessageCell"
         )
+        private static let detachedContentReleaseDelay: TimeInterval = 2
 
         private var parent: IRCTranscriptTable
         private var contentIdentity: SidebarItem?
@@ -299,7 +300,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
 
             if !contentChanged, rowLayoutChanged, let rowLayoutInvalidation {
-                reloadForRowLayoutChange(
+                invalidateRowLayout(
                     rowLayoutInvalidation,
                     in: tableView
                 )
@@ -386,12 +387,74 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     self?.scheduleHeightInvalidation(for: messageID)
                 }
             }
-            cell.hostingView.representedMessageID = message.id
-            cell.hostingView.rootView = sizedRow(
-                message,
-                width: currentContentWidth(in: tableView)
+            let cancelledPendingRelease = cell.hostingView.setHostedContent(
+                sizedRow(message, width: currentContentWidth(in: tableView)),
+                for: message.id
             )
+#if DEBUG
+            if cancelledPendingRelease {
+                reportHostedContentLifecycle(
+                    "release-cancelled-reconfigured",
+                    messageID: message.id,
+                    row: row
+                )
+            }
+#endif
             return cell
+        }
+
+        func tableView(
+            _ tableView: NSTableView,
+            didAdd rowView: NSTableRowView,
+            forRow row: Int
+        ) {
+            for case let cell as TranscriptMessageCellView in rowView.subviews {
+                let messageID = cell.hostingView.representedMessageID
+                guard cell.hostingView.cancelPendingHostedContentRelease() else { continue }
+#if DEBUG
+                reportHostedContentLifecycle(
+                    "release-cancelled-reattached",
+                    messageID: messageID,
+                    row: row
+                )
+#endif
+            }
+        }
+
+        func tableView(
+            _ tableView: NSTableView,
+            didRemove rowView: NSTableRowView,
+            forRow row: Int
+        ) {
+            // NSTableView can remove and re-add a row while automatic heights
+            // settle. Keep its SwiftUI state alive through that transient
+            // churn, then release the graph only if the row stays detached.
+            for case let cell as TranscriptMessageCellView in rowView.subviews {
+                let messageID = cell.hostingView.representedMessageID
+                cell.hostingView.scheduleHostedContentRelease(
+                    after: Self.detachedContentReleaseDelay,
+                    shouldRelease: { [weak tableView, weak cell] in
+                        guard let tableView, let cell else { return true }
+                        return tableView.row(for: cell) == -1
+                    },
+                    completion: { [weak self] released in
+#if DEBUG
+                        self?.reportHostedContentLifecycle(
+                            released ? "released" : "release-skipped-attached",
+                            messageID: messageID,
+                            row: row
+                        )
+#endif
+                    }
+                )
+#if DEBUG
+                reportHostedContentLifecycle(
+                    "release-scheduled",
+                    messageID: messageID,
+                    row: row
+                )
+#endif
+            }
         }
 
         func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
@@ -454,10 +517,11 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 || !pendingHeightMessageIDs.isEmpty
         }
 
-        // Keep updates to full reloadData(), insertRows, and
-        // noteHeightOfRows. Row-scoped reloadData(forRowIndexes:columnIndexes:)
-        // lays out hosted subviews incorrectly with automatic row heights.
-        private func reloadForRowLayoutChange(
+        // AppKit retains the old automatic-height proposal for both in-place
+        // and row-scoped hosted-view invalidation. Preview load notifications
+        // are debounced before reaching this fallback so a burst pays for one
+        // known-correct full measurement rather than one per resource.
+        private func invalidateRowLayout(
             _ invalidation: IRCTranscriptRowLayoutInvalidation,
             in tableView: NSTableView
         ) {
@@ -475,6 +539,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
             if readingAnchor == nil, followingTail {
                 positionAtTail()
             }
+#if DEBUG
+            parent.onGeometryChange?(
+                "row-layout-reloaded message=\(String(invalidation.messageID.uuidString.prefix(8)))",
+                geometry()
+            )
+#endif
         }
 
         private func applyMessageUpdate(
@@ -537,6 +607,14 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 }
                 self.positionAtTail(animated: shouldAnimate) { [weak self] didAnimate in
                     guard let self, self.tailPositionGeneration == generation else { return }
+                    // An asynchronous preview can change the final row's
+                    // height while the append animation is in flight. Its
+                    // target was calculated from the earlier document
+                    // height, so reconcile once more before publishing the
+                    // completed tail position. Keep isAwaitingTailPosition
+                    // set during this correction so its bounds notifications
+                    // cannot be mistaken for a user scroll.
+                    self.positionAtTail()
                     self.isAwaitingTailPosition = false
                     self.pendingTailStartOrigin = nil
                     let geometry = self.geometry()
@@ -665,6 +743,21 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
 #if DEBUG
+        private func reportHostedContentLifecycle(
+            _ event: String,
+            messageID: UUID?,
+            row: Int
+        ) {
+            guard parent.onGeometryChange != nil else { return }
+            let messageDescription = messageID.map {
+                String($0.uuidString.prefix(8))
+            } ?? "nil"
+            parent.onGeometryChange?(
+                "hosted-content-\(event) row=\(row) message=\(messageDescription)",
+                geometry()
+            )
+        }
+
         private func scheduleDebugGeometryReport(event: String) {
             guard parent.onGeometryChange != nil else { return }
             pendingDebugGeometryWorkItem?.cancel()
@@ -736,8 +829,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                           row: row,
                           makeIfNecessary: false
                       ) as? TranscriptMessageCellView else { continue }
-                cell.hostingView.representedMessageID = message.id
-                cell.hostingView.rootView = sizedRow(message, width: width)
+                cell.hostingView.setHostedContent(
+                    sizedRow(message, width: width),
+                    for: message.id
+                )
             }
         }
 
@@ -1042,8 +1137,72 @@ final class TranscriptScrollView: NSScrollView {
 }
 
 final class IntrinsicInvalidatingHostingView: NSHostingView<AnyView> {
-    var representedMessageID: UUID?
+    private(set) var representedMessageID: UUID?
+    private(set) var hasHostedContent = false
+    private(set) var hasPendingHostedContentRelease = false
     var onIntrinsicSizeInvalidated: ((UUID) -> Void)?
+    private var pendingHostedContentRelease: DispatchWorkItem?
+    private var hostedContentReleaseGeneration: UInt = 0
+
+    @discardableResult
+    func setHostedContent(_ content: AnyView, for messageID: UUID) -> Bool {
+        let cancelledPendingRelease = cancelPendingHostedContentRelease()
+        representedMessageID = messageID
+        hasHostedContent = true
+        rootView = content
+        return cancelledPendingRelease
+    }
+
+    func scheduleHostedContentRelease(
+        after delay: TimeInterval,
+        shouldRelease: @escaping () -> Bool,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        cancelPendingHostedContentRelease()
+        guard hasHostedContent else { return }
+
+        hostedContentReleaseGeneration &+= 1
+        let generation = hostedContentReleaseGeneration
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.hostedContentReleaseGeneration == generation else { return }
+            self.pendingHostedContentRelease = nil
+            self.hasPendingHostedContentRelease = false
+            guard shouldRelease() else {
+                completion?(false)
+                return
+            }
+            self.releaseHostedContent()
+            completion?(true)
+        }
+        pendingHostedContentRelease = workItem
+        hasPendingHostedContentRelease = true
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + delay,
+            execute: workItem
+        )
+    }
+
+    @discardableResult
+    func cancelPendingHostedContentRelease() -> Bool {
+        guard let pendingHostedContentRelease else { return false }
+        hostedContentReleaseGeneration &+= 1
+        pendingHostedContentRelease.cancel()
+        self.pendingHostedContentRelease = nil
+        hasPendingHostedContentRelease = false
+        return true
+    }
+
+    func releaseHostedContent() {
+        cancelPendingHostedContentRelease()
+        representedMessageID = nil
+        guard hasHostedContent else { return }
+        let preservedHeight = fittingSize.height
+        hasHostedContent = false
+        rootView = AnyView(
+            Color.clear.frame(height: max(0, preservedHeight))
+        )
+    }
 
     override func invalidateIntrinsicContentSize() {
         super.invalidateIntrinsicContentSize()
@@ -1076,7 +1235,11 @@ private final class TranscriptMessageCellView: NSTableCellView {
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        hostingView.representedMessageID = nil
+        releaseHostedContent()
+    }
+
+    func releaseHostedContent() {
+        hostingView.releaseHostedContent()
     }
 
     @available(*, unavailable)

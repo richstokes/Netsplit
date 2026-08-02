@@ -105,8 +105,18 @@ struct IRCMessagePreviewLayoutChange: Equatable {
 }
 
 final class IRCMessagePreviewExpansionStore: ObservableObject {
+    private struct PendingPreviewLayoutInvalidation {
+        let messageID: UUID
+        let workItem: DispatchWorkItem
+    }
+
+    private static let previewLoadLayoutDelay: TimeInterval = 0.35
+
     @Published private(set) var latestLayoutChange: IRCMessagePreviewLayoutChange?
     private var collapsedMessageIDsBySelection: [SidebarItem: Set<UUID>] = [:]
+    private var pendingPreviewLayoutInvalidations: [
+        SidebarItem: PendingPreviewLayoutInvalidation
+    ] = [:]
     private var nextLayoutRevision: UInt64 = 0
 
     func isExpanded(for messageID: UUID, in selection: SidebarItem) -> Bool {
@@ -141,6 +151,7 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
     }
 
     func invalidateLayout(for messageID: UUID, in selection: SidebarItem) {
+        cancelPendingPreviewLayoutInvalidation(in: selection)
         nextLayoutRevision &+= 1
         latestLayoutChange = IRCMessagePreviewLayoutChange(
             selection: selection,
@@ -149,11 +160,46 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
         )
     }
 
+    /// Preview resources in a newly realized transcript commonly complete in
+    /// a short burst. AppKit needs a full native-table measurement to accept
+    /// their new automatic heights, so collapse that burst into one refresh.
+    /// Disclosure changes continue to use invalidateLayout directly and stay
+    /// immediate.
+    func schedulePreviewLayoutInvalidation(
+        for messageID: UUID,
+        in selection: SidebarItem
+    ) {
+        cancelPendingPreviewLayoutInvalidation(in: selection)
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.pendingPreviewLayoutInvalidations[selection]?.messageID == messageID
+            else { return }
+            self.pendingPreviewLayoutInvalidations.removeValue(forKey: selection)
+            self.invalidateLayout(for: messageID, in: selection)
+        }
+        pendingPreviewLayoutInvalidations[selection] = PendingPreviewLayoutInvalidation(
+            messageID: messageID,
+            workItem: workItem
+        )
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.previewLoadLayoutDelay,
+            execute: workItem
+        )
+    }
+
     func retainMessages(withIDs messageIDs: Set<UUID>, in selection: SidebarItem) {
         collapsedMessageIDsBySelection[selection]?.formIntersection(messageIDs)
         if collapsedMessageIDsBySelection[selection]?.isEmpty == true {
             collapsedMessageIDsBySelection.removeValue(forKey: selection)
         }
+        if let pending = pendingPreviewLayoutInvalidations[selection],
+           !messageIDs.contains(pending.messageID) {
+            cancelPendingPreviewLayoutInvalidation(in: selection)
+        }
+    }
+
+    private func cancelPendingPreviewLayoutInvalidation(in selection: SidebarItem) {
+        pendingPreviewLayoutInvalidations.removeValue(forKey: selection)?.workItem.cancel()
     }
 }
 
@@ -216,7 +262,10 @@ struct MessagePreviewStack: View {
     }
 
     private func invalidateRowLayout() {
-        expansion.invalidateLayout(for: messageID, in: selection)
+        expansion.schedulePreviewLayoutInvalidation(
+            for: messageID,
+            in: selection
+        )
     }
 }
 

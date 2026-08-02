@@ -1703,6 +1703,30 @@ struct IRCModelsAndPolicyTests {
         #expect(secondChange.revision > firstChange.revision)
     }
 
+    @Test("A burst of loaded previews produces one transcript layout refresh")
+    @MainActor
+    func coalescesPreviewLoadLayoutInvalidations() async throws {
+        let selection = SidebarItem.channel(UUID())
+        let messageIDs = (0..<20).map { _ in UUID() }
+        let expansion = IRCMessagePreviewExpansionStore()
+
+        for messageID in messageIDs {
+            expansion.schedulePreviewLayoutInvalidation(
+                for: messageID,
+                in: selection
+            )
+        }
+
+        #expect(expansion.latestLayoutChange == nil)
+        try await Self.waitUntil(timeout: .seconds(1)) {
+            expansion.latestLayoutChange != nil
+        }
+        let change = try #require(expansion.latestLayoutChange)
+        #expect(change.selection == selection)
+        #expect(change.messageID == messageIDs.last)
+        #expect(change.revision == 1)
+    }
+
     @Test("Preview disclosure updates an existing hosted row")
     @MainActor
     func updatesHostedRowWhenPreviewExpansionChanges() async throws {
@@ -3409,6 +3433,196 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
+    @Test("Reattached native transcript rows cancel deferred hosted-content release")
+    @MainActor
+    func cancelsDeferredReleaseForReattachedNativeTranscriptContent() async throws {
+        let messages = (0..<100).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var didPositionInitially = false
+        let hostingController = NSHostingController(
+            rootView: AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "release-hosted-content-test",
+                    makeRow: { message in
+                        AnyView(Text(message.text))
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 240)
+            )
+        )
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        try await Self.waitUntil { didPositionInitially }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        let row = try #require(
+            visibleRows.location == NSNotFound
+                ? nil
+                : visibleRows.location
+        )
+        let rowView = try #require(
+            tableView.rowView(atRow: row, makeIfNecessary: false)
+        )
+        let hostedRow = try #require(
+            Self.views(
+                withIdentifier: "IRCTranscriptHostedRow",
+                in: rowView
+            ).compactMap { $0 as? IntrinsicInvalidatingHostingView }.first
+        )
+        let coordinator = try #require(
+            tableView.delegate as? IRCTranscriptTable.Coordinator
+        )
+
+        #expect(hostedRow.hasHostedContent)
+        #expect(hostedRow.representedMessageID != nil)
+
+        coordinator.tableView(tableView, didRemove: rowView, forRow: row)
+
+        #expect(hostedRow.hasHostedContent)
+        #expect(hostedRow.representedMessageID != nil)
+        #expect(hostedRow.hasPendingHostedContentRelease)
+
+        coordinator.tableView(tableView, didAdd: rowView, forRow: row)
+
+        #expect(hostedRow.hasHostedContent)
+        #expect(hostedRow.representedMessageID != nil)
+        #expect(!hostedRow.hasPendingHostedContentRelease)
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    @Test("Detached hosted content releases to a height-preserving placeholder")
+    @MainActor
+    func releasesDetachedHostedContentWithoutCollapsingHeight() async throws {
+        let hostingView = IntrinsicInvalidatingHostingView(
+            rootView: AnyView(EmptyView())
+        )
+        hostingView.sizingOptions = [.intrinsicContentSize]
+        hostingView.setHostedContent(
+            AnyView(Color.clear.frame(width: 320, height: 96)),
+            for: UUID()
+        )
+        hostingView.layoutSubtreeIfNeeded()
+        let hostedHeight = hostingView.fittingSize.height
+
+        hostingView.scheduleHostedContentRelease(
+            after: 0.05,
+            shouldRelease: { true }
+        )
+        #expect(hostingView.cancelPendingHostedContentRelease())
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(hostingView.hasHostedContent)
+
+        hostingView.scheduleHostedContentRelease(
+            after: 0.05,
+            shouldRelease: { true }
+        )
+
+        try await Self.waitUntil {
+            !hostingView.hasHostedContent
+        }
+        hostingView.layoutSubtreeIfNeeded()
+
+        #expect(hostedHeight > 0)
+        #expect(!hostingView.hasHostedContent)
+        #expect(hostingView.representedMessageID == nil)
+        #expect(!hostingView.hasPendingHostedContentRelease)
+        #expect(abs(hostingView.fittingSize.height - hostedHeight) < 0.5)
+    }
+
+    @Test("Transient native row removal does not restart an asynchronous preview")
+    @MainActor
+    func keepsPreviewStableThroughTransientNativeRowRemoval() async throws {
+        let message = IRCMessage(sender: "tester", text: "Preview")
+        let probe = TranscriptPreviewLifecycleProbe()
+        var didPositionInitially = false
+        let hostingController = NSHostingController(
+            rootView: AnyView(
+                IRCTranscriptTable(
+                    messages: [message],
+                    estimatedRowHeight: 72,
+                    rowSpacing: 0,
+                    renderConfiguration: "preview-lifecycle-test",
+                    makeRow: { _ in
+                        AnyView(TranscriptPreviewLifecycleTestRow(probe: probe))
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 240)
+            )
+        )
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        try await Self.waitUntil {
+            didPositionInitially && probe.completions == 1
+        }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let row = 1
+        let rowView = try #require(
+            tableView.rowView(atRow: row, makeIfNecessary: false)
+        )
+        let hostedRow = try #require(
+            Self.views(
+                withIdentifier: "IRCTranscriptHostedRow",
+                in: rowView
+            ).compactMap { $0 as? IntrinsicInvalidatingHostingView }.first
+        )
+        let coordinator = try #require(
+            tableView.delegate as? IRCTranscriptTable.Coordinator
+        )
+        let settledHeight = tableView.rect(ofRow: row).height
+        let settledTaskStarts = probe.taskStarts
+        let settledCompletions = probe.completions
+
+        for _ in 0..<4 {
+            coordinator.tableView(tableView, didRemove: rowView, forRow: row)
+            #expect(hostedRow.hasHostedContent)
+            #expect(hostedRow.hasPendingHostedContentRelease)
+            try await Task.sleep(for: .milliseconds(20))
+            coordinator.tableView(tableView, didAdd: rowView, forRow: row)
+            #expect(hostedRow.hasHostedContent)
+            #expect(!hostedRow.hasPendingHostedContentRelease)
+        }
+
+        try await Task.sleep(for: .milliseconds(150))
+        tableView.layoutSubtreeIfNeeded()
+
+        #expect(settledTaskStarts > 0)
+        #expect(settledCompletions > 0)
+        #expect(probe.taskStarts == settledTaskStarts)
+        #expect(probe.completions == settledCompletions)
+        #expect(abs(tableView.rect(ofRow: row).height - settledHeight) < 0.5)
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Short native transcripts grow upward from the bottom")
     @MainActor
     func bottomAlignsShortNativeTranscript() async throws {
@@ -3623,6 +3837,116 @@ struct IRCModelsAndPolicyTests {
             contentIsFlipped: tailUpdate.geometry.contentIsFlipped,
             tolerance: 1
         ))
+    }
+
+    @Test("Latest asynchronous preview growth finishes at the transcript tail")
+    @MainActor
+    func revealsLatestPreviewAfterAppendAnimation() async throws {
+        var messages = (0..<40).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        let previewMessage = IRCMessage(sender: "tester", text: "Preview")
+        var previewIsLoaded = false
+        var previewLayoutRevision: UInt64 = 0
+        var didPositionInitially = false
+        var tailUpdates: [(animated: Bool, geometry: IRCTranscriptTableGeometry)] = []
+
+        func rootView() -> AnyView {
+            let invalidation = previewLayoutRevision == 0 ? nil :
+                IRCTranscriptRowLayoutInvalidation(
+                    messageID: previewMessage.id,
+                    revision: previewLayoutRevision
+                )
+            return AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 30,
+                    rowSpacing: 0,
+                    renderConfiguration: "latest-preview-tail-test",
+                    rowLayoutInvalidation: invalidation,
+                    makeRow: { message in
+                        AnyView(
+                            VStack(spacing: 0) {
+                                Color.clear.frame(height: 30)
+                                if message.id == previewMessage.id {
+                                    Color.clear.frame(
+                                        height: previewIsLoaded ? 180 : 30
+                                    )
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { animated, geometry in
+                        tailUpdates.append((animated, geometry))
+                    },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 700)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { didPositionInitially }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        tailUpdates.removeAll()
+
+        messages.append(previewMessage)
+        hostingController.rootView = rootView()
+
+        // Load after the coalesced append has begun its 120 ms animation,
+        // matching a fast cached preview completing during that movement.
+        try await Task.sleep(for: .milliseconds(100))
+        previewIsLoaded = true
+        previewLayoutRevision = 1
+        hostingController.rootView = rootView()
+
+        try await Self.waitUntil(timeout: .seconds(3)) {
+            !tailUpdates.isEmpty
+                && tableView.rect(ofRow: messages.count).height > 180
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        let tailUpdate = try #require(tailUpdates.last)
+        let currentBottomDistance = tableView.bounds.maxY
+            - scrollView.contentView.bounds.maxY
+
+        #expect(tailUpdate.animated)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: tailUpdate.geometry.visibleBounds,
+            contentBounds: tailUpdate.geometry.contentBounds,
+            contentIsFlipped: tailUpdate.geometry.contentIsFlipped,
+            tolerance: 1
+        ))
+        #expect(abs(currentBottomDistance) <= 1)
     }
 
     @Test("Retention trimming preserves the visible native transcript message and offset")
@@ -4215,6 +4539,33 @@ private struct TranscriptTestStatefulRow: View {
             onRender: onRender
         )
         .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
+    }
+}
+
+@MainActor
+private final class TranscriptPreviewLifecycleProbe {
+    var taskStarts = 0
+    var completions = 0
+}
+
+private struct TranscriptPreviewLifecycleTestRow: View {
+    let probe: TranscriptPreviewLifecycleProbe
+    @State private var isLoaded = false
+
+    var body: some View {
+        Color.clear
+            .frame(
+                maxWidth: .infinity,
+                minHeight: isLoaded ? 96 : 72,
+                maxHeight: isLoaded ? 96 : 72
+            )
+            .task {
+                probe.taskStarts += 1
+                try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled else { return }
+                isLoaded = true
+                probe.completions += 1
+            }
     }
 }
 
