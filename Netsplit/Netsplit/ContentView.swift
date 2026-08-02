@@ -752,7 +752,7 @@ private struct ConnectionCenterView: View {
                     Text("Server Profiles")
                         .font(.system(size: textMetrics.size(20), weight: .semibold))
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
-                        ForEach(state.storedProfiles) { profile in
+                        ForEach(IRCServerOrdering.alphabetically(state.storedProfiles)) { profile in
                             ServerProfileCard(
                                 profile: profile,
                                 state: state,
@@ -808,9 +808,11 @@ private struct ServerProfileCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(profile.name)
                         .font(.system(size: textMetrics.size(17), weight: .semibold))
+                        .lineLimit(1)
                     Text(profile.hostname)
                         .font(.system(size: textMetrics.size(12)))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
                 Spacer()
                 Label(statusText, systemImage: "circle.fill")
@@ -824,6 +826,7 @@ private struct ServerProfileCard: View {
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(statusTint.opacity(0.1), in: Capsule())
+                    .lineLimit(1)
             }
 
             VStack(alignment: .leading, spacing: textMetrics.spacing(7)) {
@@ -831,15 +834,24 @@ private struct ServerProfileCard: View {
                     Label(profile.useTLS ? "TLS encrypted" : "Plain-text IRC", systemImage: profile.useTLS ? "lock.fill" : "exclamationmark.triangle")
                     Text(verbatim: "· Port \(profile.port)")
                 }
+                .lineLimit(1)
                 if let nickname = profile.nicknameOverride, !nickname.isEmpty {
                     Label("Nickname: \(nickname)", systemImage: "person.crop.circle")
+                        .lineLimit(1)
+                } else {
+                    ServerProfileDetailPlaceholder()
                 }
                 if let realName = profile.realNameOverride, !realName.isEmpty {
                     Label("Real name: \(realName)", systemImage: "person.text.rectangle")
+                        .lineLimit(1)
+                } else {
+                    ServerProfileDetailPlaceholder()
                 }
                 if profile.useSSHTunnel == true, let sshHostname = profile.sshHostname {
                     Label("SSH via \(sshHostname):\(profile.sshPort ?? 22)", systemImage: "point.3.connected.trianglepath.dotted")
                         .lineLimit(1)
+                } else {
+                    ServerProfileDetailPlaceholder()
                 }
             }
             .font(.system(size: textMetrics.size(12)))
@@ -905,6 +917,14 @@ private struct ServerProfileCard: View {
                 }
             }
         }
+    }
+}
+
+private struct ServerProfileDetailPlaceholder: View {
+    var body: some View {
+        Label("Profile detail", systemImage: "circle")
+            .hidden()
+            .accessibilityHidden(true)
     }
 }
 
