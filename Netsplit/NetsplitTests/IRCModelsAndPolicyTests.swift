@@ -3839,6 +3839,123 @@ struct IRCModelsAndPolicyTests {
         ))
     }
 
+    @Test("Appended native transcript rows expand to show every wrapped line")
+    @MainActor
+    func expandsAppendedWrappingTranscriptRow() async throws {
+        var messages = (0..<40).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var transcriptWidth: CGFloat = 720
+        var didPositionInitially = false
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "wrapping-append-test",
+                    makeRow: { message in
+                        AnyView(
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text("2:57 PM")
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .frame(width: 64, alignment: .trailing)
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    Text(message.sender)
+                                        .lineLimit(1)
+                                        .frame(width: 116, alignment: .leading)
+                                    Text(AttributedString(message.text))
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .font(.system(size: 15, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 24)
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: transcriptWidth, height: 700)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: transcriptWidth, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { didPositionInitially }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+
+        messages.append(IRCMessage(
+            sender: "tester",
+            text: String(repeating: "Every wrapped line must remain visible. ", count: 20)
+        ))
+        hostingController.rootView = rootView()
+        let appendedRow = messages.count
+
+        try await Self.waitUntil(timeout: .seconds(2)) {
+            tableView.numberOfRows == messages.count + 2
+                && tableView.rect(ofRow: appendedRow).height > 40
+        }
+        let wideRowHeight = tableView.rect(ofRow: appendedRow).height
+
+        transcriptWidth = 320
+        hostingController.rootView = rootView()
+        window.setContentSize(NSSize(width: transcriptWidth, height: 700))
+        hostingController.view.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: transcriptWidth,
+            height: 700
+        )
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        try await Self.waitUntil(timeout: .seconds(2)) {
+            scrollView.contentView.bounds.width < 400
+                && tableView.rect(ofRow: appendedRow).height > wideRowHeight + 40
+        }
+
+        #expect(wideRowHeight > 40)
+        #expect(scrollView.contentView.bounds.width < 400)
+        #expect(tableView.rect(ofRow: appendedRow).height > wideRowHeight + 40)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: scrollView.contentView.bounds,
+            contentBounds: tableView.bounds,
+            contentIsFlipped: tableView.isFlipped,
+            tolerance: 1
+        ))
+    }
+
     @Test("Latest asynchronous preview growth finishes at the transcript tail")
     @MainActor
     func revealsLatestPreviewAfterAppendAnimation() async throws {

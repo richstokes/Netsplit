@@ -781,10 +781,25 @@ struct IRCTranscriptTable: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.attachmentGeneration == generation else { return }
                 self.hasPendingWidthRefresh = false
-                // Mark the full sweep first so intrinsic-size invalidations
-                // caused by replacing the visible root views fold into it.
+                guard let tableView = self.tableView else { return }
+                let wasFollowingTail = self.followingTail
+                let readingAnchor = self.beginReadingPositionRestoration()
+                // NSTableView retains automatic-height proposals across an
+                // in-place hosted-root update. Rebuild the virtualized rows
+                // so every realized cell is proposed the new width before
+                // asking AppKit to measure its height again.
+                tableView.reloadData()
+                tableView.layoutSubtreeIfNeeded()
+                self.adjustTopSpacerForShortContent()
+                self.finishReadingPositionRestoration(
+                    readingAnchor,
+                    event: "width-reloaded-anchor-restored"
+                )
                 self.scheduleHeightRefresh()
-                self.refreshVisibleRowsForCurrentWidth()
+                if readingAnchor == nil, wasFollowingTail {
+                    self.followingTail = true
+                    self.positionAtTail()
+                }
             }
         }
 
@@ -812,27 +827,6 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // jump here would bypass the coalesced arrival animation.
                 guard !self.isAwaitingTailPosition else { return }
                 self.positionAtTail()
-            }
-        }
-
-        private func refreshVisibleRowsForCurrentWidth() {
-            guard let tableView else { return }
-            let visibleRect = tableView.visibleRect
-            let refreshRect = visibleRect.insetBy(dx: 0, dy: -visibleRect.height)
-            let visibleRows = tableView.rows(in: refreshRect)
-            guard visibleRows.location != NSNotFound else { return }
-            let width = currentContentWidth(in: tableView)
-            for row in visibleRows.location..<NSMaxRange(visibleRows) {
-                guard let message = message(atTableRow: row),
-                      let cell = tableView.view(
-                          atColumn: 0,
-                          row: row,
-                          makeIfNecessary: false
-                      ) as? TranscriptMessageCellView else { continue }
-                cell.hostingView.setHostedContent(
-                    sizedRow(message, width: width),
-                    for: message.id
-                )
             }
         }
 
@@ -866,10 +860,17 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     return
                 }
                 defer {
-                    // Any row-specific invalidations received while this full
-                    // sweep was pending are covered by the sweep.
+                    // SwiftUI can publish the final intrinsic height after
+                    // AppKit's full sweep has already measured a rewrapped
+                    // row. Preserve those late notifications for one
+                    // row-scoped follow-up instead of assuming the sweep
+                    // covered them and leaving the row at its old height.
+                    let followUpMessageIDs = self.pendingHeightMessageIDs
                     self.pendingHeightMessageIDs.removeAll()
                     self.fullHeightRefreshScheduled = false
+                    for messageID in followUpMessageIDs {
+                        self.scheduleHeightInvalidation(for: messageID)
+                    }
                 }
                 let readingAnchor = self.beginReadingPositionRestoration()
                 let messageRows = IndexSet(

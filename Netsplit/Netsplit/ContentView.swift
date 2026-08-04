@@ -2284,6 +2284,7 @@ private struct MessageRow: View {
                             .font(serverMessageFont)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     MessagePreviewStack(
                         previews: previews,
@@ -2318,6 +2319,7 @@ private struct MessageRow: View {
                             .font(chatFont.font(size: textMetrics.bodySize))
                             .foregroundStyle(.primary)
                             .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     MessagePreviewStack(
                         previews: previews,
