@@ -702,6 +702,10 @@ struct JumpPalette: View {
                             }
                         }
                     }
+                    // A List can retain an out-of-range scroll position when filtering
+                    // removes the rows that were previously visible. Give each result
+                    // set its own identity so a narrowed list starts at its first row.
+                    .id(results.map(\.selection))
                     .listStyle(.inset)
                 }
             }
@@ -900,6 +904,9 @@ struct ChannelBrowser: View {
                         }
                         .accessibilityElement(children: .contain)
                     }
+                    // Reset a stale List offset when filtering, without resetting
+                    // for each batch of channels received from the server.
+                    .id(search)
                 } else if isLoading {
                     VStack(spacing: 12) {
                         ProgressView()
