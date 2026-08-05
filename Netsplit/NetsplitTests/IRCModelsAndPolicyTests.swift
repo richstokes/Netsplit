@@ -3999,6 +3999,7 @@ struct IRCModelsAndPolicyTests {
         }
         var transcriptWidth: CGFloat = 720
         var didPositionInitially = false
+        var geometryEvents: [String] = []
 
         func rootView() -> AnyView {
             AnyView(
@@ -4031,7 +4032,7 @@ struct IRCModelsAndPolicyTests {
                     onInitialPositioned: { _ in didPositionInitially = true },
                     onFollowingTailChange: { _, _ in },
                     onTailPositioned: { _, _ in },
-                    onGeometryChange: { _, _ in }
+                    onGeometryChange: { event, _ in geometryEvents.append(event) }
                 )
                 .frame(width: transcriptWidth, height: 700)
             )
@@ -4081,16 +4082,20 @@ struct IRCModelsAndPolicyTests {
         }
         let wideRowHeight = tableView.rect(ofRow: appendedRow).height
 
-        transcriptWidth = 320
-        hostingController.rootView = rootView()
-        window.setContentSize(NSSize(width: transcriptWidth, height: 700))
-        hostingController.view.frame = NSRect(
-            x: 0,
-            y: 0,
-            width: transcriptWidth,
-            height: 700
-        )
-        hostingController.view.layoutSubtreeIfNeeded()
+        geometryEvents.removeAll()
+        for width: CGFloat in [640, 560, 480, 400, 320] {
+            transcriptWidth = width
+            hostingController.rootView = rootView()
+            window.setContentSize(NSSize(width: transcriptWidth, height: 700))
+            hostingController.view.frame = NSRect(
+                x: 0,
+                y: 0,
+                width: transcriptWidth,
+                height: 700
+            )
+            hostingController.view.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
 
         try await Self.waitUntil(timeout: .seconds(2)) {
             scrollView.contentView.bounds.width < 400
@@ -4100,6 +4105,7 @@ struct IRCModelsAndPolicyTests {
         #expect(wideRowHeight > 40)
         #expect(scrollView.contentView.bounds.width < 400)
         #expect(tableView.rect(ofRow: appendedRow).height > wideRowHeight + 40)
+        #expect(geometryEvents.filter { $0 == "width-reloaded" }.count == 1)
         #expect(IRCTranscriptScrollPolicy.isAtBottom(
             visibleBounds: scrollView.contentView.bounds,
             contentBounds: tableView.bounds,

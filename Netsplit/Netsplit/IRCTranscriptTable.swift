@@ -138,6 +138,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             "IRCTranscriptMessageCell"
         )
         private static let detachedContentReleaseDelay: TimeInterval = 2
+        private static let settledWidthRefreshDelay: TimeInterval = 0.08
 
         private var parent: IRCTranscriptTable
         private var contentIdentity: SidebarItem?
@@ -170,6 +171,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var pendingDebugGeometryWorkItem: DispatchWorkItem?
 #endif
         private var hasPendingWidthRefresh = false
+        private var pendingWidthRefreshWorkItem: DispatchWorkItem?
+        private var widthRefreshGeneration = 0
 
         init(parent: IRCTranscriptTable) {
             self.parent = parent
@@ -245,6 +248,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #endif
             hasPendingPositionReport = false
             pendingFollowingTailReport = nil
+            pendingWidthRefreshWorkItem?.cancel()
+            pendingWidthRefreshWorkItem = nil
             hasPendingWidthRefresh = false
             let center = NotificationCenter.default
             observers.forEach(center.removeObserver)
@@ -351,6 +356,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
             isRestoringReadingPosition = false
             hasPendingPositionReport = false
             pendingFollowingTailReport = nil
+            pendingWidthRefreshWorkItem?.cancel()
+            pendingWidthRefreshWorkItem = nil
             hasPendingWidthRefresh = false
             lastAnimatedScroll = .distantPast
             lastViewportWidth = max(0, scrollView.contentView.bounds.width)
@@ -841,12 +848,23 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private func viewportWidthDidChange(_ width: CGFloat) {
             guard width > 0, abs(width - lastViewportWidth) > 0.5 else { return }
             lastViewportWidth = width
-            guard !hasPendingWidthRefresh else { return }
+            let shouldDebounce = hasPositionedInitially
+            // The initial hidden layout still needs to settle on the next
+            // run-loop turn. Once visible, pane animations report a new width
+            // every frame; keep replacing the pending refresh so the table is
+            // rebuilt once, shortly after the final frame.
+            if !shouldDebounce, hasPendingWidthRefresh { return }
+            pendingWidthRefreshWorkItem?.cancel()
+            widthRefreshGeneration &+= 1
             hasPendingWidthRefresh = true
             let generation = attachmentGeneration
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.attachmentGeneration == generation else { return }
-                self.hasPendingWidthRefresh = false
+            let refreshGeneration = widthRefreshGeneration
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self,
+                      self.attachmentGeneration == generation,
+                      self.widthRefreshGeneration == refreshGeneration else { return }
+                self.pendingWidthRefreshWorkItem = nil
+                defer { self.hasPendingWidthRefresh = false }
                 guard let tableView = self.tableView else { return }
                 let wasFollowingTail = self.followingTail
                 let readingAnchor = self.beginReadingPositionRestoration()
@@ -866,6 +884,18 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     self.followingTail = true
                     self.positionAtTail()
                 }
+#if DEBUG
+                self.parent.onGeometryChange?("width-reloaded", self.geometry())
+#endif
+            }
+            pendingWidthRefreshWorkItem = workItem
+            if shouldDebounce {
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + Self.settledWidthRefreshDelay,
+                    execute: workItem
+                )
+            } else {
+                DispatchQueue.main.async(execute: workItem)
             }
         }
 
