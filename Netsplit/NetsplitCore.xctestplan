@@ -10,6 +10,12 @@
   ],
   "defaultOptions" : {
     "codeCoverage" : false,
+    "environmentVariableEntries" : [
+      {
+        "key" : "NETSPLIT_TEST_MODE",
+        "value" : "1"
+      }
+    ],
     "targetForVariableExpansion" : {
       "containerPath" : "container:Netsplit.xcodeproj",
       "identifier" : "9B86C40B3009D6870054D952",

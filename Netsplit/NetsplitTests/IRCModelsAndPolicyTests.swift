@@ -2559,6 +2559,26 @@ struct IRCModelsAndPolicyTests {
         ))
     }
 
+    @Test("Conversation replacement discards inherited momentum until a direct scroll")
+    func discardsInheritedTranscriptMomentum() {
+        var policy = IRCTranscriptScrollMomentumPolicy()
+
+        let forwardsInitialMomentum = policy.shouldForwardScroll(hasMomentum: true)
+        #expect(forwardsInitialMomentum)
+
+        policy.discardMomentumUntilNextDirectScroll()
+
+        let forwardsFirstInheritedMomentum = policy.shouldForwardScroll(hasMomentum: true)
+        let forwardsLaterInheritedMomentum = policy.shouldForwardScroll(hasMomentum: true)
+        let forwardsDirectScroll = policy.shouldForwardScroll(hasMomentum: false)
+        let forwardsNewMomentum = policy.shouldForwardScroll(hasMomentum: true)
+
+        #expect(!forwardsFirstInheritedMomentum)
+        #expect(!forwardsLaterInheritedMomentum)
+        #expect(forwardsDirectScroll)
+        #expect(forwardsNewMomentum)
+    }
+
     @Test("Transcript tail following tolerates the bottom inset and detects scrolling into history")
     func detectsTranscriptTailPosition() {
         let content = CGRect(x: 0, y: 0, width: 600, height: 1_000)
@@ -2888,6 +2908,34 @@ struct IRCModelsAndPolicyTests {
         #expect(!state.canToggleMemberList)
         state.toggleMemberList()
         #expect(state.showsMemberList == initialValue)
+    }
+
+    @Test("Join navigation waits for server confirmation and does not override later navigation")
+    func selectsChannelOnlyAfterSuccessfulJoin() {
+        let server = SidebarItem.server(UUID())
+        let otherConversation = SidebarItem.channel(UUID())
+        let joinedChannelID = UUID()
+
+        #expect(IRCJoinSelectionPolicy.selectionAfterSuccessfulJoin(
+            currentSelection: server,
+            requestDestination: server,
+            joinedChannelID: joinedChannelID,
+            selectsConversation: true
+        ) == .channel(joinedChannelID))
+
+        #expect(IRCJoinSelectionPolicy.selectionAfterSuccessfulJoin(
+            currentSelection: otherConversation,
+            requestDestination: server,
+            joinedChannelID: joinedChannelID,
+            selectsConversation: true
+        ) == otherConversation)
+
+        #expect(IRCJoinSelectionPolicy.selectionAfterSuccessfulJoin(
+            currentSelection: server,
+            requestDestination: server,
+            joinedChannelID: joinedChannelID,
+            selectsConversation: false
+        ) == server)
     }
 
     @Test("Sidebar conversation selection requests composer focus, including reselection")
@@ -3837,6 +3885,110 @@ struct IRCModelsAndPolicyTests {
             contentIsFlipped: tailUpdate.geometry.contentIsFlipped,
             tolerance: 1
         ))
+    }
+
+    @Test("Authoritative echo updates its native row without a second tail movement")
+    @MainActor
+    func updatesAuthoritativeEchoInPlace() async throws {
+        var messages = (0..<80).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var didPositionInitially = false
+        var tailUpdateCount = 0
+        var geometryEvents: [String] = []
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "authoritative-echo-in-place-test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in tailUpdateCount += 1 },
+                    onGeometryChange: { event, _ in geometryEvents.append(event) }
+                )
+                .frame(width: 320, height: 500)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 500),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { didPositionInitially }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        let lastRow = messages.count
+        let initialDocumentHeight = tableView.frame.height
+        let initialVisibleOrigin = scrollView.contentView.bounds.origin
+        tailUpdateCount = 0
+        geometryEvents.removeAll()
+
+        messages[messages.index(before: messages.endIndex)].timestamp =
+            messages[lastRow - 1].timestamp.addingTimeInterval(60)
+        messages[messages.index(before: messages.endIndex)].ircv3Tags = [
+            IRCMessageTag(name: "msgid", value: "authoritative-message")
+        ]
+        hostingController.rootView = rootView()
+
+        try await Self.waitUntil(timeout: .seconds(2)) {
+            geometryEvents.contains {
+                $0.hasPrefix("messages-reconfigured-in-place count=1")
+            }
+        }
+        try await Task.sleep(for: .milliseconds(250))
+
+        #expect(tailUpdateCount == 0)
+        #expect(!geometryEvents.contains {
+            $0.hasPrefix("hosted-content-release-scheduled")
+        })
+        #expect(!geometryEvents.contains { $0 == "row-height-changed" })
+        #expect(abs(tableView.frame.height - initialDocumentHeight) <= 1)
+        #expect(abs(
+            scrollView.contentView.bounds.origin.y - initialVisibleOrigin.y
+        ) <= 1)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: scrollView.contentView.bounds,
+            contentBounds: tableView.bounds,
+            contentIsFlipped: tableView.isFlipped,
+            tolerance: 1
+        ))
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
     }
 
     @Test("Appended native transcript rows expand to show every wrapped line")

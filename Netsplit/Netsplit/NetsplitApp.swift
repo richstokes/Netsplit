@@ -339,6 +339,7 @@ struct NetsplitApp: App {
                     appDelegate.state = state
                 }
                 .task {
+                    guard !NetsplitLaunchEnvironment.currentProcessIsInTestMode else { return }
                     state.connectProfilesConfiguredForLaunch()
                 }
         }

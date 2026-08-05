@@ -1877,6 +1877,19 @@ enum SidebarItem: Hashable {
     }
 }
 
+enum IRCJoinSelectionPolicy {
+    static func selectionAfterSuccessfulJoin(
+        currentSelection: SidebarItem?,
+        requestDestination: SidebarItem,
+        joinedChannelID: UUID,
+        selectsConversation: Bool
+    ) -> SidebarItem? {
+        guard selectsConversation,
+              currentSelection == requestDestination else { return currentSelection }
+        return .channel(joinedChannelID)
+    }
+}
+
 enum IRCDisconnectSelectionPolicy {
     static func fallback(
         afterDisconnecting disconnectedServerID: UUID,

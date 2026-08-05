@@ -1679,10 +1679,10 @@ final class IRCAppState: ObservableObject {
             channelID: channel.id,
             destination: destination,
             statusMessageID: joiningMessage.id,
-            topic: listing.topic
+            topic: listing.topic,
+            selectsConversationOnSuccess: selectConversation
         )
         connections[profile.id]?.send(command: "JOIN \(listing.name)")
-        if selectConversation { selection = .channel(channel.id) }
         messagesDidChange(for: channel.id)
     }
 
@@ -2192,6 +2192,8 @@ final class IRCAppState: ObservableObject {
             appendSystem("Changing nickname to \(newNickname)…", for: item)
         case "PART":
             executePart(argument, on: profile, from: item)
+        case "HOP":
+            executeHop(argument, on: profile, from: item)
         case "QUIT", "DISCONNECT":
             let reason = argument.trimmingCharacters(in: .whitespacesAndNewlines)
             disconnect(profile, reason: reason.isEmpty ? nil : reason)
@@ -2271,6 +2273,52 @@ final class IRCAppState: ObservableObject {
         } else {
             appendSystem("Join or select a channel, or use /part #channel [reason].", for: item)
         }
+    }
+
+    private func executeHop(_ argument: String, on profile: ServerProfile, from item: SidebarItem) {
+        let trimmed = argument.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentChannel: Conversation? = {
+            guard case .channel(let id) = item else { return nil }
+            return channels.first(where: { $0.id == id && $0.serverID == profile.id })
+        }()
+
+        let targetChannel: Conversation
+        let reason: String?
+        if trimmed.isEmpty {
+            guard let currentChannel else {
+                appendSystem("Usage: /hop [#channel] [message]", for: item)
+                return
+            }
+            targetChannel = currentChannel
+            reason = nil
+        } else {
+            let fields = trimmed.split(separator: " ", maxSplits: 1).map(String.init)
+            if isChannelName(fields[0], serverID: profile.id) {
+                guard let namedChannel = existingChannel(named: fields[0], serverID: profile.id) else {
+                    appendSystem("You are not joined to \(fields[0]).", for: item)
+                    return
+                }
+                targetChannel = namedChannel
+                reason = fields.count > 1 ? fields[1] : nil
+            } else if let currentChannel {
+                targetChannel = currentChannel
+                reason = trimmed
+            } else {
+                appendSystem("Join or select a channel, or use /hop #channel [message].", for: item)
+                return
+            }
+        }
+
+        let key = joinKey(serverID: profile.id, channel: targetChannel.name)
+        guard pendingJoins[key] == nil else {
+            appendSystem("Wait for \(targetChannel.name) to finish joining before hopping.", for: item)
+            return
+        }
+
+        let part = reason.map { "PART \(targetChannel.name) :\($0)" }
+            ?? "PART \(targetChannel.name)"
+        connections[profile.id]?.send(command: part)
+        rejoin(targetChannel, on: profile)
     }
 
     private func handle(_ event: IRCTransportEvent, from profile: ServerProfile, transport: IRCConnection) {
@@ -2630,6 +2678,15 @@ final class IRCAppState: ObservableObject {
                     let pendingJoin = pendingJoins.removeValue(forKey: joinKey(serverID: profile.id, channel: channelName))
                     if let pendingJoin {
                         conversations[channel.id]?.removeAll { $0.id == pendingJoin.statusMessageID }
+                        let confirmedSelection = IRCJoinSelectionPolicy.selectionAfterSuccessfulJoin(
+                            currentSelection: selection,
+                            requestDestination: pendingJoin.destination,
+                            joinedChannelID: channel.id,
+                            selectsConversation: pendingJoin.selectsConversationOnSuccess
+                        )
+                        if selection != confirmedSelection {
+                            selection = confirmedSelection
+                        }
                     }
                     let topic = pendingJoin?.topic.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let topicSuffix = topic.isEmpty ? "" : " Topic: \(topic)"
@@ -5261,6 +5318,7 @@ private struct PendingJoin {
     var statusMessageID: UUID
     var topic: String
     var preservesConversationOnFailure = false
+    var selectsConversationOnSuccess = false
 }
 
 private struct PendingInvite {

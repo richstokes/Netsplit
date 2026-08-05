@@ -325,6 +325,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
             tailPositionGeneration &+= 1
+            // The native scroll view is intentionally retained across
+            // conversations. A trackpad gesture can therefore keep sending
+            // momentum events after the sidebar selection has changed and
+            // move the newly positioned transcript away from its tail.
+            // Ignore only that inherited momentum; the next direct gesture
+            // clears the suppression and scrolls normally.
+            scrollView.discardMomentumUntilNextDirectScroll()
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
             pendingDebugGeometryWorkItem = nil
@@ -552,6 +559,22 @@ struct IRCTranscriptTable: NSViewRepresentable {
             to newMessages: [IRCMessage],
             in tableView: NSTableView
         ) {
+            let preservesMessageIdentity = oldMessages.count == newMessages.count
+                && zip(oldMessages, newMessages).allSatisfy { oldMessage, newMessage in
+                    oldMessage.id == newMessage.id
+                }
+            if preservesMessageIdentity {
+                let changedIndexes = oldMessages.indices.filter {
+                    oldMessages[$0] != newMessages[$0]
+                }
+                reconfigureMessagesInPlace(
+                    at: changedIndexes,
+                    with: newMessages,
+                    in: tableView
+                )
+                return
+            }
+
             let appendedCount = newMessages.count - oldMessages.count
             let isSimpleAppend = appendedCount > 0
                 && (oldMessages.isEmpty
@@ -587,6 +610,49 @@ struct IRCTranscriptTable: NSViewRepresentable {
             if readingAnchor == nil, followingTail, hasPositionedInitially {
                 scheduleTailPosition()
             }
+        }
+
+        /// Authoritative echo-message delivery replaces an optimistic row's
+        /// timestamp and IRCv3 tags while preserving its ID. Rebuilding the
+        /// table for that replacement briefly returns visible rows to their
+        /// estimated heights and schedules a redundant second tail movement.
+        /// Retarget only changed, currently realized hosting views; offscreen
+        /// rows pick up the new value when the data source realizes them.
+        private func reconfigureMessagesInPlace(
+            at messageIndexes: [Int],
+            with newMessages: [IRCMessage],
+            in tableView: NSTableView
+        ) {
+            messages = newMessages
+            let width = currentContentWidth(in: tableView)
+            for messageIndex in messageIndexes {
+                let row = messageIndex + 1
+                guard let cell = tableView.view(
+                    atColumn: 0,
+                    row: row,
+                    makeIfNecessary: false
+                ) as? TranscriptMessageCellView else { continue }
+                let message = newMessages[messageIndex]
+                let cancelledPendingRelease = cell.hostingView.setHostedContent(
+                    sizedRow(message, width: width),
+                    for: message.id
+                )
+#if DEBUG
+                if cancelledPendingRelease {
+                    reportHostedContentLifecycle(
+                        "release-cancelled-reconfigured",
+                        messageID: message.id,
+                        row: row
+                    )
+                }
+#endif
+            }
+#if DEBUG
+            parent.onGeometryChange?(
+                "messages-reconfigured-in-place count=\(messageIndexes.count)",
+                geometry()
+            )
+#endif
         }
 
         private func scheduleTailPosition() {
@@ -1109,12 +1175,33 @@ struct IRCTranscriptTable: NSViewRepresentable {
     }
 }
 
+struct IRCTranscriptScrollMomentumPolicy {
+    private(set) var discardsMomentum = false
+
+    mutating func discardMomentumUntilNextDirectScroll() {
+        discardsMomentum = true
+    }
+
+    mutating func shouldForwardScroll(hasMomentum: Bool) -> Bool {
+        guard hasMomentum else {
+            discardsMomentum = false
+            return true
+        }
+        return !discardsMomentum
+    }
+}
+
 final class TranscriptScrollView: NSScrollView {
     var onViewportWidthChange: ((CGFloat) -> Void)?
     var onViewportHeightChange: ((CGFloat) -> Void)?
     var onUserScroll: (() -> Void)?
     private var lastReportedViewportWidth: CGFloat = 0
     private var lastReportedViewportHeight: CGFloat = 0
+    private var momentumPolicy = IRCTranscriptScrollMomentumPolicy()
+
+    func discardMomentumUntilNextDirectScroll() {
+        momentumPolicy.discardMomentumUntilNextDirectScroll()
+    }
 
     override func layout() {
         super.layout()
@@ -1132,6 +1219,9 @@ final class TranscriptScrollView: NSScrollView {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        guard momentumPolicy.shouldForwardScroll(
+            hasMomentum: !event.momentumPhase.isEmpty
+        ) else { return }
         onUserScroll?()
         super.scrollWheel(with: event)
     }

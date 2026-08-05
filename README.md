@@ -90,10 +90,9 @@ palette.
 ## Development and tests
 
 Open `Netsplit/Netsplit.xcodeproj` and use the shared **Netsplit** scheme. Its
-normal Debug Build action compiles and runs the focused regression suite
-automatically, so no separate test command is required. **Test**
-(Command-U) uses the shared `NetsplitCore` test plan when you want the standard
-Xcode test report. Release archives omit the test bundle.
+normal **Run** action (Command-R) builds and launches the app. **Test**
+(Command-U) runs the focused regression suite using the shared `NetsplitCore`
+test plan.
 
 ## Supported commands
 
@@ -117,6 +116,7 @@ server, channel, or private message first.
 | Command | Description |
 | --- | --- |
 | `/join <channel>` | Join a channel. A missing channel prefix is automatically changed to `#`. |
+| `/hop [#channel] [message]` | Leave and immediately rejoin the current channel or a named joined channel, optionally with a part message. |
 | `/list [arguments]` | Open the live channel browser and request the server's channel list. |
 | `/part [#channel] [reason]` | Leave the current channel, a named joined channel, or include a part reason. |
 | `/server <hostname> [port] [--tls\|--no-tls]` | Connect for this session without saving a profile. With no port, the defaults are 6697/TLS or 6667 with `--no-tls`. Explicit port 6697 implies TLS; other explicit ports imply plaintext unless overridden by a flag. |
