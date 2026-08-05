@@ -1105,6 +1105,13 @@ private struct ConversationView: View {
                         )
                 }
             }
+            // A channel/DM switch changes whether the inspector is available,
+            // not the user's inspector preference. Treat that navigation as an
+            // immediate layout change while preserving the native animation for
+            // toolbar- and menu-driven inspector toggles.
+            .transaction(value: isChannel) { transaction in
+                transaction.disablesAnimations = true
+            }
         }
         .onAppear {
 #if DEBUG
