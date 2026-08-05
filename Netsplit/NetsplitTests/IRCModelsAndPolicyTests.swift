@@ -1650,6 +1650,32 @@ struct IRCModelsAndPolicyTests {
         ])
     }
 
+    @Test("Message previews skip direct non-image binary resources")
+    func skipsBinaryMessagePreviews() {
+        let message = IRCMessage(
+            sender: "Alice",
+            text: "https://example.com/movie.mp4 https://example.com/song.mp3 https://example.com/document.pdf https://example.com/article.html https://example.com/release.v2 https://example.com/photo.png https://example.com/archive.zip"
+        )
+
+        #expect(IRCMessagePreviewPolicy.previews(
+            for: message,
+            in: .channel(UUID()),
+            showsLinkPreviews: true,
+            showsImagePreviews: true
+        ) == [
+            .link(URL(string: "https://example.com/article.html")!),
+            .link(URL(string: "https://example.com/release.v2")!),
+            .image(URL(string: "https://example.com/photo.png")!)
+        ])
+
+        #expect(IRCMessagePreviewPolicy.previews(
+            for: IRCMessage(sender: "Alice", text: "https://example.com/photo.png"),
+            in: .channel(UUID()),
+            showsLinkPreviews: true,
+            showsImagePreviews: false
+        ).isEmpty)
+    }
+
     @Test("Preview disclosure state survives row reuse and channel changes")
     func preservesCollapsedPreviewStateByMessageAndChannel() {
         let firstMessageID = UUID()

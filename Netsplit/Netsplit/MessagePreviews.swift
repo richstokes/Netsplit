@@ -50,13 +50,22 @@ enum IRCMessagePreviewPolicy {
             .compactMap { url -> IRCMessagePreview? in
                 guard let networkURL = IRCRemotePreviewPolicy.normalizedNetworkURL(url),
                       seenResources.insert(networkURL).inserted else { return nil }
-                if showsImagePreviews, imageExtensions.contains(url.pathExtension.lowercased()) {
-                    return .image(url)
+                let pathExtension = url.pathExtension.lowercased()
+                if imageExtensions.contains(pathExtension) {
+                    return showsImagePreviews ? .image(url) : nil
                 }
+                guard !isKnownBinaryResource(pathExtension: pathExtension) else { return nil }
                 return showsLinkPreviews ? .link(url) : nil
             }
             .prefix(maximumPreviewsPerMessage)
             .map { $0 }
+    }
+
+    private static func isKnownBinaryResource(pathExtension: String) -> Bool {
+        guard !pathExtension.isEmpty,
+              let contentType = UTType(filenameExtension: pathExtension),
+              !contentType.isDynamic else { return false }
+        return !contentType.conforms(to: .text)
     }
 }
 
