@@ -3032,6 +3032,59 @@ struct IRCModelsAndPolicyTests {
         #expect(initialComposer.string == "Alice draft")
     }
 
+    @Test("Native composer recalls, edits, and resends history")
+    @MainActor
+    func navigatesHistoryInNativeComposer() async throws {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let alice = try #require(state.selection)
+        state.recordComposerInput("hello Alice", for: alice)
+        state.recordComposerInput("/msg Alice original", for: alice)
+        state.setDraft("unfinished draft", for: alice)
+
+        let hostingController = NSHostingController(
+            rootView: ContentView(state: state)
+                .frame(width: 1_000, height: 700)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil {
+            Self.composer(in: hostingController.view)?.string == "unfinished draft"
+        }
+        let composer = try #require(Self.composer(in: hostingController.view))
+
+        composer.keyDown(with: try #require(Self.keyEvent(keyCode: 126)))
+        #expect(composer.string == "/msg Alice original")
+        composer.keyDown(with: try #require(Self.keyEvent(keyCode: 126)))
+        #expect(composer.string == "hello Alice")
+        composer.keyDown(with: try #require(Self.keyEvent(keyCode: 125)))
+        #expect(composer.string == "/msg Alice original")
+        composer.keyDown(with: try #require(Self.keyEvent(keyCode: 125)))
+        #expect(composer.string == "unfinished draft")
+
+        composer.string = "/msg Alice edited"
+        composer.didChangeText()
+        composer.keyDown(with: try #require(Self.keyEvent(keyCode: 36, characters: "\r")))
+        try await Self.waitUntil { composer.string.isEmpty }
+        composer.keyDown(with: try #require(Self.keyEvent(keyCode: 126)))
+        #expect(composer.string == "/msg Alice edited")
+    }
+
     @Test("Native transcript virtualizes retained rows and initially positions at the tail")
     @MainActor
     func virtualizesNativeTranscript() async throws {
@@ -4494,6 +4547,91 @@ struct IRCModelsAndPolicyTests {
         #expect(state.draft(for: second) == "second draft")
     }
 
+    @Test("Composer history walks sent input and restores the unfinished draft")
+    func navigatesComposerHistory() {
+        var history = IRCComposerHistory()
+        history.record("hello everyone")
+        history.record("/join #swift")
+
+        #expect(history.navigate(.previous, from: "unfinished draft") == "/join #swift")
+        #expect(history.navigate(.previous, from: "ignored while navigating") == "hello everyone")
+        #expect(history.navigate(.previous, from: "ignored while navigating") == "hello everyone")
+        #expect(history.navigate(.next, from: "ignored while navigating") == "/join #swift")
+        #expect(history.navigate(.next, from: "ignored while navigating") == "unfinished draft")
+        #expect(history.navigate(.next, from: "unfinished draft") == nil)
+
+        history.record("/msg Alice edited version")
+        #expect(history.navigate(.previous, from: "") == "/msg Alice edited version")
+    }
+
+    @Test("Composer histories stay scoped to their channel or direct message")
+    @MainActor
+    func scopesComposerHistoryToConversation() throws {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        let aliceConversation = try #require(state.directMessages.first { $0.name == "Alice" })
+        let alice = SidebarItem.directMessage(aliceConversation.id)
+        state.startDirectMessage(with: "Bob", from: .server(profile.id))
+        let bobConversation = try #require(state.directMessages.first { $0.name == "Bob" })
+        let bob = SidebarItem.directMessage(bobConversation.id)
+
+        state.recordComposerInput("hello Alice", for: alice)
+        #expect(state.send("/join #alice", to: alice))
+        state.recordComposerInput("hello Bob", for: bob)
+
+        #expect(state.navigateComposerHistory(.previous, from: "Alice draft", for: alice) == "/join #alice")
+        #expect(state.navigateComposerHistory(.previous, from: "", for: alice) == "hello Alice")
+        #expect(state.navigateComposerHistory(.previous, from: "Bob draft", for: bob) == "hello Bob")
+        #expect(state.navigateComposerHistory(.next, from: "", for: bob) == "Bob draft")
+
+        state.close(aliceConversation)
+        #expect(state.navigateComposerHistory(.previous, from: "", for: alice) == nil)
+    }
+
+    @Test("Composer history arrows activate only at multiline boundaries")
+    func appliesComposerHistoryCaretPolicy() {
+        let multiline = "first line\nsecond line"
+        let string = multiline as NSString
+        let newline = string.range(of: "\n")
+
+        #expect(IRCComposerHistoryCaretPolicy.canNavigate(
+            .previous,
+            in: multiline,
+            selectedRange: NSRange(location: newline.location, length: 0)
+        ))
+        #expect(!IRCComposerHistoryCaretPolicy.canNavigate(
+            .previous,
+            in: multiline,
+            selectedRange: NSRange(location: NSMaxRange(newline), length: 0)
+        ))
+        #expect(!IRCComposerHistoryCaretPolicy.canNavigate(
+            .next,
+            in: multiline,
+            selectedRange: NSRange(location: newline.location, length: 0)
+        ))
+        #expect(IRCComposerHistoryCaretPolicy.canNavigate(
+            .next,
+            in: multiline,
+            selectedRange: NSRange(location: NSMaxRange(newline), length: 0)
+        ))
+        #expect(!IRCComposerHistoryCaretPolicy.canNavigate(
+            .previous,
+            in: "single line",
+            selectedRange: NSRange(location: 0, length: 1)
+        ))
+        #expect(IRCComposerHistoryCaretPolicy.canNavigate(
+            .previous,
+            in: "single line",
+            selectedRange: NSRange(location: 6, length: 0)
+        ))
+        #expect(IRCComposerHistoryCaretPolicy.canNavigate(
+            .next,
+            in: "single line",
+            selectedRange: NSRange(location: 6, length: 0)
+        ))
+    }
+
     @Test("Conversation composer stops at the target's UTF-8 message budget")
     @MainActor
     func boundsConversationComposerDrafts() throws {
@@ -4746,6 +4884,27 @@ struct IRCModelsAndPolicyTests {
             }
         }
         return nil
+    }
+
+    private static func keyEvent(
+        keyCode: UInt16,
+        characters: String? = nil
+    ) -> NSEvent? {
+        let characters = characters ?? String(
+            Character(UnicodeScalar(keyCode == 126 ? NSUpArrowFunctionKey : NSDownArrowFunctionKey)!)
+        )
+        return NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
+        )
     }
 
     @MainActor

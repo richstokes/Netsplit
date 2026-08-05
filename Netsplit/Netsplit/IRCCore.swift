@@ -1074,3 +1074,68 @@ enum IRCConversationHistory {
     return messages
   }
 }
+
+enum IRCComposerHistoryDirection {
+  case previous
+  case next
+}
+
+struct IRCComposerHistory {
+  static let retentionLimit = 500
+
+  private(set) var entries: [String] = []
+  private var position: Int?
+  private var preservedDraft: String?
+
+  mutating func record(_ input: String) {
+    guard !input.isEmpty else { return }
+    entries.append(input)
+    if entries.count > Self.retentionLimit {
+      entries.removeFirst(entries.count - Self.retentionLimit)
+    }
+    resetNavigation()
+  }
+
+  mutating func navigate(
+    _ direction: IRCComposerHistoryDirection,
+    from currentDraft: String
+  ) -> String? {
+    switch direction {
+    case .previous:
+      guard !entries.isEmpty else { return nil }
+      if let position {
+        let previousPosition = max(0, position - 1)
+        self.position = previousPosition
+        return entries[previousPosition]
+      }
+      preservedDraft = currentDraft
+      let newestPosition = entries.index(before: entries.endIndex)
+      position = newestPosition
+      return entries[newestPosition]
+
+    case .next:
+      guard let position else { return nil }
+      let nextPosition = entries.index(after: position)
+      guard nextPosition < entries.endIndex else {
+        let draft = preservedDraft ?? ""
+        resetNavigation()
+        return draft
+      }
+      self.position = nextPosition
+      return entries[nextPosition]
+    }
+  }
+
+  mutating func merge(_ other: IRCComposerHistory) {
+    entries.append(contentsOf: other.entries)
+    if entries.count > Self.retentionLimit {
+      entries.removeFirst(entries.count - Self.retentionLimit)
+    }
+    resetNavigation()
+  }
+
+  mutating func resetNavigation() {
+    position = nil
+    preservedDraft = nil
+  }
+}

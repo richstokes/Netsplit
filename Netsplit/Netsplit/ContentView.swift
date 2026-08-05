@@ -1049,7 +1049,14 @@ private struct ConversationView: View {
                                 focusRequestID: composerFocusRequestID,
                                 measuredHeight: $composerTextHeight,
                                 onSubmit: send,
-                                onTab: completeComposer
+                                onTab: completeComposer,
+                                onHistory: { direction, currentDraft in
+                                    state.navigateComposerHistory(
+                                        direction,
+                                        from: currentDraft,
+                                        for: selection
+                                    )
+                                }
                             )
                             if draft.isEmpty {
                                 Text("Message \(title)")
@@ -1104,13 +1111,16 @@ private struct ConversationView: View {
             TranscriptDebugLog.navigation("conversation-appeared", selection: selection)
 #endif
             state.markRead(selection)
+            state.resetComposerHistoryNavigation(for: selection)
             draft = state.boundedComposerDraft(state.draft(for: selection), for: selection)
             if state.workspaceFocusRequest?.target != .composer(selection) {
                 state.requestComposerFocus()
             }
         }
-        .onChange(of: selection) { _, newSelection in
+        .onChange(of: selection) { oldSelection, newSelection in
             state.markRead(newSelection)
+            state.resetComposerHistoryNavigation(for: oldSelection)
+            state.resetComposerHistoryNavigation(for: newSelection)
             draft = state.boundedComposerDraft(
                 state.draft(for: newSelection),
                 for: newSelection
@@ -1335,6 +1345,7 @@ private struct IRCComposerTextView: NSViewRepresentable {
     @Binding var measuredHeight: CGFloat
     let onSubmit: () -> Void
     let onTab: () -> Bool
+    let onHistory: (IRCComposerHistoryDirection, String) -> String?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -1370,6 +1381,7 @@ private struct IRCComposerTextView: NSViewRepresentable {
         )
         textView.onSubmit = onSubmit
         textView.onTab = onTab
+        textView.onHistory = onHistory
         textView.onDidMoveToWindow = { [weak textView, weak coordinator = context.coordinator] in
             guard let textView, let coordinator else { return }
             coordinator.scheduleFocusIfNeeded(for: textView)
@@ -1390,6 +1402,7 @@ private struct IRCComposerTextView: NSViewRepresentable {
         textView.font = font
         textView.onSubmit = onSubmit
         textView.onTab = onTab
+        textView.onHistory = onHistory
 
         let didReplaceText = textView.string != text
         if didReplaceText {
@@ -1547,6 +1560,7 @@ private struct IRCComposerTextView: NSViewRepresentable {
 private final class IRCComposerNativeTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onTab: (() -> Bool)?
+    var onHistory: ((IRCComposerHistoryDirection, String) -> String?)?
     var onDidMoveToWindow: (() -> Void)?
 
     override func viewDidMoveToWindow() {
@@ -1578,6 +1592,25 @@ private final class IRCComposerNativeTextView: NSTextView {
                 window?.selectNextKeyView(self)
             }
             return
+        }
+        if event.keyCode == 126 || event.keyCode == 125,
+           modifiers.isDisjoint(with: [.shift, .control, .option, .command]) {
+            let direction: IRCComposerHistoryDirection = event.keyCode == 126
+                ? .previous
+                : .next
+            if IRCComposerHistoryCaretPolicy.canNavigate(
+                direction,
+                in: string,
+                selectedRange: selectedRange()
+            ), let recalledDraft = onHistory?(direction, string) {
+                string = recalledDraft
+                setSelectedRange(NSRange(
+                    location: (recalledDraft as NSString).length,
+                    length: 0
+                ))
+                didChangeText()
+                return
+            }
         }
         super.keyDown(with: event)
     }

@@ -1877,6 +1877,34 @@ enum SidebarItem: Hashable {
     }
 }
 
+enum IRCComposerHistoryCaretPolicy {
+    static func canNavigate(
+        _ direction: IRCComposerHistoryDirection,
+        in text: String,
+        selectedRange: NSRange
+    ) -> Bool {
+        let utf16Length = (text as NSString).length
+        guard selectedRange.length == 0,
+              selectedRange.location >= 0,
+              selectedRange.location <= utf16Length else { return false }
+
+        let newlines = CharacterSet.newlines
+        switch direction {
+        case .previous:
+            let firstNewline = (text as NSString).rangeOfCharacter(from: newlines)
+            return firstNewline.location == NSNotFound
+                || selectedRange.location <= firstNewline.location
+        case .next:
+            let lastNewline = (text as NSString).rangeOfCharacter(
+                from: newlines,
+                options: .backwards
+            )
+            return lastNewline.location == NSNotFound
+                || selectedRange.location >= NSMaxRange(lastNewline)
+        }
+    }
+}
+
 enum IRCJoinSelectionPolicy {
     static func selectionAfterSuccessfulJoin(
         currentSelection: SidebarItem?,

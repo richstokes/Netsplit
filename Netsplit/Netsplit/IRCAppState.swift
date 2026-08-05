@@ -152,6 +152,7 @@ final class IRCAppState: ObservableObject {
 
     private var conversations: [UUID: [IRCMessage]] = [:]
     private var conversationDrafts: [SidebarItem: String] = [:]
+    private var composerHistories: [SidebarItem: IRCComposerHistory] = [:]
     private var channelMembers: [UUID: [ChannelMember]] = [:]
     private var messageUpdateSignals: [UUID: IRCRevisionSignal] = [:]
     private var memberUpdateSignals: [UUID: IRCRevisionSignal] = [:]
@@ -559,6 +560,31 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    func recordComposerInput(_ input: String, for item: SidebarItem) {
+        let input = IRCTextFraming.sanitizedSingleLine(input)
+        guard !input.isEmpty else { return }
+        var history = composerHistories[item] ?? IRCComposerHistory()
+        history.record(input)
+        composerHistories[item] = history
+    }
+
+    func navigateComposerHistory(
+        _ direction: IRCComposerHistoryDirection,
+        from currentDraft: String,
+        for item: SidebarItem
+    ) -> String? {
+        guard var history = composerHistories[item] else { return nil }
+        let recalledDraft = history.navigate(direction, from: currentDraft)
+        composerHistories[item] = history
+        return recalledDraft.map { boundedComposerDraft($0, for: item) }
+    }
+
+    func resetComposerHistoryNavigation(for item: SidebarItem) {
+        guard var history = composerHistories[item] else { return }
+        history.resetNavigation()
+        composerHistories[item] = history
+    }
+
     func maximumMessageBytes(for item: SidebarItem) -> Int? {
         guard isMessageDestination(item), let profile = profile(for: item) else { return nil }
         let commandPrefix = "PRIVMSG \(title(for: item)) :"
@@ -744,6 +770,7 @@ final class IRCAppState: ObservableObject {
         directMessages.removeAll { $0.id == directMessage.id }
         conversations.removeValue(forKey: directMessage.id)
         conversationDrafts.removeValue(forKey: .directMessage(directMessage.id))
+        composerHistories.removeValue(forKey: .directMessage(directMessage.id))
         if selection == .directMessage(directMessage.id) {
             selection = .server(profile.id)
         }
@@ -1716,6 +1743,7 @@ final class IRCAppState: ObservableObject {
     @discardableResult
     func send(_ text: String, to item: SidebarItem) -> Bool {
         if text.hasPrefix("/") {
+            recordComposerInput(text, for: item)
             executeCommand(text, in: item)
             return true
         }
@@ -1762,6 +1790,7 @@ final class IRCAppState: ObservableObject {
                 fallbackDestination: item
             )
         }
+        recordComposerInput(text, for: item)
         return true
     }
 
@@ -3675,6 +3704,7 @@ final class IRCAppState: ObservableObject {
         channels.removeAll { $0.id == channel.id }
         conversations.removeValue(forKey: channel.id)
         conversationDrafts.removeValue(forKey: .channel(channel.id))
+        composerHistories.removeValue(forKey: .channel(channel.id))
         channelTopics.removeValue(forKey: channel.id)
         channelMembers.removeValue(forKey: channel.id)
         pendingChannelMembers.removeValue(forKey: channel.id)
@@ -3732,6 +3762,10 @@ final class IRCAppState: ObservableObject {
             channelBanListErrors.removeValue(forKey: conversationID)
         }
         conversationDrafts = conversationDrafts.filter { item, _ in
+            guard let conversationID = conversationID(for: item) else { return true }
+            return !removedConversationIDs.contains(conversationID) && conversationID != serverID
+        }
+        composerHistories = composerHistories.filter { item, _ in
             guard let conversationID = conversationID(for: item) else { return true }
             return !removedConversationIDs.contains(conversationID) && conversationID != serverID
         }
@@ -3876,6 +3910,12 @@ final class IRCAppState: ObservableObject {
                 conversationDrafts[newDraftKey] = oldDraft
             }
             conversationDrafts.removeValue(forKey: oldDraftKey)
+            if let oldHistory = composerHistories[oldDraftKey] {
+                var mergedHistory = composerHistories[newDraftKey] ?? IRCComposerHistory()
+                mergedHistory.merge(oldHistory)
+                composerHistories[newDraftKey] = mergedHistory
+            }
+            composerHistories.removeValue(forKey: oldDraftKey)
             let mergedConversationIsMuted = isMuted(directMessages[newIndex])
             let existingHasUnread = directMessages[newIndex].hasUnread
             directMessages[newIndex].hasUnread = IRCConversationActivityPolicy.mergedUnreadState(
