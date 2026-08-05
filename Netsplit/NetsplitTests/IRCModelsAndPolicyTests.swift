@@ -1703,6 +1703,25 @@ struct IRCModelsAndPolicyTests {
         #expect(secondChange.revision > firstChange.revision)
     }
 
+    @Test("Preview layout changes remain available for each conversation")
+    func retainsPreviewLayoutChangesPerConversation() throws {
+        let firstMessageID = UUID()
+        let secondMessageID = UUID()
+        let firstSelection = SidebarItem.channel(UUID())
+        let secondSelection = SidebarItem.channel(UUID())
+        let expansion = IRCMessagePreviewExpansionStore()
+
+        expansion.invalidateLayout(for: firstMessageID, in: firstSelection)
+        let firstChange = try #require(
+            expansion.latestLayoutChange(for: firstSelection)
+        )
+        expansion.invalidateLayout(for: secondMessageID, in: secondSelection)
+
+        #expect(expansion.latestLayoutChange(for: firstSelection) == firstChange)
+        #expect(expansion.latestLayoutChange(for: secondSelection)?.messageID == secondMessageID)
+        #expect(expansion.latestLayoutChange?.selection == secondSelection)
+    }
+
     @Test("A burst of loaded previews produces one transcript layout refresh")
     @MainActor
     func coalescesPreviewLoadLayoutInvalidations() async throws {
@@ -3336,6 +3355,159 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
+    @Test("Native transcript reuses measured row heights when revisiting a conversation")
+    @MainActor
+    func reusesMeasuredTranscriptRowHeightsAcrossConversationChanges() async throws {
+        let firstIdentity = SidebarItem.channel(UUID())
+        let secondIdentity = SidebarItem.channel(UUID())
+        let firstMessages = (0..<80).map {
+            IRCMessage(sender: "first", text: "First conversation message \($0)")
+        }
+        let secondMessages = (0..<80).map {
+            IRCMessage(sender: "second", text: "Second conversation message \($0)")
+        }
+        let firstLayoutMessageID = try #require(firstMessages.last?.id)
+        var contentIdentity = firstIdentity
+        var messages = firstMessages
+        var firstRowHeight: CGFloat = 84
+        let secondRowHeight: CGFloat = 36
+        var firstLayoutRevision: UInt64?
+        var initialPositionCount = 0
+
+        func rootView() -> AnyView {
+            let rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation? =
+                if contentIdentity == firstIdentity, let firstLayoutRevision {
+                IRCTranscriptRowLayoutInvalidation(
+                    messageID: firstLayoutMessageID,
+                    revision: firstLayoutRevision
+                )
+            } else {
+                nil
+            }
+            return AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "conversation-height-cache-test",
+                    rowLayoutInvalidation: rowLayoutInvalidation,
+                    makeRow: { message in
+                        let fixedRowHeight = message.sender == "first"
+                            ? firstRowHeight
+                            : secondRowHeight
+                        return AnyView(
+                            Text(message.text)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: fixedRowHeight,
+                                    maxHeight: fixedRowHeight,
+                                    alignment: .leading
+                                )
+                        )
+                    },
+                    onInitialPositioned: { _ in initialPositionCount += 1 },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 500)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        hostingController.view.frame = NSRect(x: 0, y: 0, width: 320, height: 500)
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 1 }
+
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let delegate = try #require(tableView.delegate)
+        let firstHeight = delegate.tableView?(
+            tableView,
+            heightOfRow: firstMessages.count
+        )
+        #expect((firstHeight ?? 0) > 80)
+
+        contentIdentity = secondIdentity
+        messages = secondMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 2 }
+
+        let secondHeight = delegate.tableView?(
+            tableView,
+            heightOfRow: secondMessages.count
+        )
+        #expect((secondHeight ?? 0) > 32)
+        #expect((secondHeight ?? 0) < 40)
+
+        contentIdentity = firstIdentity
+        messages = firstMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        // Before the revisited rows are realized again, the delegate should
+        // already offer AppKit the exact height measured on the first visit.
+        let revisitedHeight = delegate.tableView?(
+            tableView,
+            heightOfRow: firstMessages.count
+        )
+        #expect(abs((revisitedHeight ?? 0) - (firstHeight ?? 0)) <= 0.5)
+
+        try await Self.waitUntil { initialPositionCount == 3 }
+
+        // Simulate an asynchronous preview completing after its conversation
+        // has gone inactive, followed by another visit. The pending per-
+        // conversation signal must discard the old estimate before reveal.
+        contentIdentity = secondIdentity
+        messages = secondMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 4 }
+
+        firstRowHeight = 124
+        firstLayoutRevision = 1
+        contentIdentity = firstIdentity
+        messages = firstMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil(timeout: .seconds(3)) {
+            initialPositionCount == 5
+                && tableView.rect(ofRow: firstMessages.count).height > 120
+        }
+        let refreshedHeight = delegate.tableView?(
+            tableView,
+            heightOfRow: firstMessages.count
+        )
+        #expect((refreshedHeight ?? 0) > 120)
+
+        // The applied revision should not keep evicting the now-correct cache.
+        contentIdentity = secondIdentity
+        messages = secondMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 6 }
+        contentIdentity = firstIdentity
+        messages = firstMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        let recachedHeight = delegate.tableView?(
+            tableView,
+            heightOfRow: firstMessages.count
+        )
+        #expect(abs((recachedHeight ?? 0) - (refreshedHeight ?? 0)) <= 0.5)
+        try await Self.waitUntil { initialPositionCount == 7 }
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Retained conversation stays bottom-aligned when its viewport height settles")
     @MainActor
     func bottomAlignsRetainedConversationAfterViewportHeightChange() async throws {
@@ -3851,6 +4023,7 @@ struct IRCModelsAndPolicyTests {
     @Test("Native transcript appends with one settled animated tail update")
     @MainActor
     func appendsNativeTranscriptAtTail() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
         var messages = (0..<100).map {
             IRCMessage(sender: "tester", text: "Message \($0)")
         }
@@ -3861,6 +4034,7 @@ struct IRCModelsAndPolicyTests {
         func rootView() -> AnyView {
             AnyView(
                 IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
                     messages: messages,
                     estimatedRowHeight: 24,
                     rowSpacing: 0,
@@ -3943,6 +4117,7 @@ struct IRCModelsAndPolicyTests {
     @Test("Authoritative echo updates its native row without a second tail movement")
     @MainActor
     func updatesAuthoritativeEchoInPlace() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
         var messages = (0..<80).map {
             IRCMessage(sender: "tester", text: "Message \($0)")
         }
@@ -3953,6 +4128,7 @@ struct IRCModelsAndPolicyTests {
         func rootView() -> AnyView {
             AnyView(
                 IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
                     messages: messages,
                     estimatedRowHeight: 24,
                     rowSpacing: 0,
@@ -4047,6 +4223,7 @@ struct IRCModelsAndPolicyTests {
     @Test("Appended native transcript rows expand to show every wrapped line")
     @MainActor
     func expandsAppendedWrappingTranscriptRow() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
         var messages = (0..<40).map {
             IRCMessage(sender: "tester", text: "Message \($0)")
         }
@@ -4057,6 +4234,7 @@ struct IRCModelsAndPolicyTests {
         func rootView() -> AnyView {
             AnyView(
                 IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
                     messages: messages,
                     estimatedRowHeight: 24,
                     rowSpacing: 0,
@@ -4170,6 +4348,7 @@ struct IRCModelsAndPolicyTests {
     @Test("Latest asynchronous preview growth finishes at the transcript tail")
     @MainActor
     func revealsLatestPreviewAfterAppendAnimation() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
         var messages = (0..<40).map {
             IRCMessage(sender: "tester", text: "Message \($0)")
         }
@@ -4187,6 +4366,7 @@ struct IRCModelsAndPolicyTests {
                 )
             return AnyView(
                 IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
                     messages: messages,
                     estimatedRowHeight: 30,
                     rowSpacing: 0,
@@ -4280,6 +4460,7 @@ struct IRCModelsAndPolicyTests {
     @Test("Retention trimming preserves the visible native transcript message and offset")
     @MainActor
     func preservesNativeTranscriptPositionAcrossRetentionTrim() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
         var messages = (0..<5_250).map {
             IRCMessage(sender: "tester", text: "Message \($0)")
         }
@@ -4289,6 +4470,7 @@ struct IRCModelsAndPolicyTests {
         func rootView() -> AnyView {
             AnyView(
                 IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
                     messages: messages,
                     estimatedRowHeight: 24,
                     rowSpacing: 0,
@@ -4404,6 +4586,7 @@ struct IRCModelsAndPolicyTests {
     @Test("Height remeasurement preserves the visible native transcript message and offset")
     @MainActor
     func preservesNativeTranscriptPositionAcrossHeightRemeasurement() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
         let messages = (0..<400).map {
             IRCMessage(sender: "tester", text: "Message \($0)")
         }
@@ -4415,6 +4598,7 @@ struct IRCModelsAndPolicyTests {
         func rootView() -> AnyView {
             AnyView(
                 IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
                     messages: messages,
                     estimatedRowHeight: 24,
                     rowSpacing: 0,
@@ -5048,6 +5232,7 @@ private struct PreviewExpansionHeightTestTranscript: View {
             )
         }
         IRCTranscriptTable(
+            contentIdentity: selection,
             messages: messages,
             estimatedRowHeight: 24,
             rowSpacing: 0,

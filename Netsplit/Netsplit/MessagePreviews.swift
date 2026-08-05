@@ -113,6 +113,9 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
     private static let previewLoadLayoutDelay: TimeInterval = 0.35
 
     @Published private(set) var latestLayoutChange: IRCMessagePreviewLayoutChange?
+    private var latestLayoutChangesBySelection: [
+        SidebarItem: IRCMessagePreviewLayoutChange
+    ] = [:]
     private var collapsedMessageIDsBySelection: [SidebarItem: Set<UUID>] = [:]
     private var pendingPreviewLayoutInvalidations: [
         SidebarItem: PendingPreviewLayoutInvalidation
@@ -153,11 +156,17 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
     func invalidateLayout(for messageID: UUID, in selection: SidebarItem) {
         cancelPendingPreviewLayoutInvalidation(in: selection)
         nextLayoutRevision &+= 1
-        latestLayoutChange = IRCMessagePreviewLayoutChange(
+        let change = IRCMessagePreviewLayoutChange(
             selection: selection,
             messageID: messageID,
             revision: nextLayoutRevision
         )
+        latestLayoutChangesBySelection[selection] = change
+        latestLayoutChange = change
+    }
+
+    func latestLayoutChange(for selection: SidebarItem) -> IRCMessagePreviewLayoutChange? {
+        latestLayoutChangesBySelection[selection]
     }
 
     /// Preview resources in a newly realized transcript commonly complete in

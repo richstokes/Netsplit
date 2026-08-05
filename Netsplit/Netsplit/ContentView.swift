@@ -1708,13 +1708,12 @@ private struct ConversationTranscript: View {
             channelEventVisibility: channelEventVisibility
         )
         let previewLayoutInvalidation: IRCTranscriptRowLayoutInvalidation? =
-            previewExpansion.latestLayoutChange.flatMap { change in
-            guard change.selection == selection else { return nil }
-            return IRCTranscriptRowLayoutInvalidation(
-                messageID: change.messageID,
-                revision: change.revision
-            )
-        }
+            previewExpansion.latestLayoutChange(for: selection).map { change in
+                IRCTranscriptRowLayoutInvalidation(
+                    messageID: change.messageID,
+                    revision: change.revision
+                )
+            }
 #if DEBUG
         let debugContext = TranscriptDebugContext(
             instanceID: debugInstanceID,

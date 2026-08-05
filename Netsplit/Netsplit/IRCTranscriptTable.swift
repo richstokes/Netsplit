@@ -132,6 +132,30 @@ struct IRCTranscriptTable: NSViewRepresentable {
             let candidates: [Candidate]
         }
 
+        /// Exact heights measured by realized hosting views, retained as
+        /// estimates for the next visit to the same conversation. AppKit
+        /// still verifies every realized row through automatic row heights,
+        /// so this cache can accelerate document geometry without becoming a
+        /// second source of layout truth.
+        private final class ConversationRowHeightCache {
+            let viewportWidth: CGFloat
+            let renderConfiguration: String
+            var heightsByMessageID: [UUID: CGFloat]
+            var lastAccess: UInt64
+
+            init(
+                viewportWidth: CGFloat,
+                renderConfiguration: String,
+                heightsByMessageID: [UUID: CGFloat],
+                lastAccess: UInt64
+            ) {
+                self.viewportWidth = viewportWidth
+                self.renderConfiguration = renderConfiguration
+                self.heightsByMessageID = heightsByMessageID
+                self.lastAccess = lastAccess
+            }
+        }
+
         private static let topInset: CGFloat = 18
         private static let bottomInset: CGFloat = 18
         private static let messageCellIdentifier = NSUserInterfaceItemIdentifier(
@@ -139,6 +163,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         )
         private static let detachedContentReleaseDelay: TimeInterval = 2
         private static let settledWidthRefreshDelay: TimeInterval = 0.08
+        private static let maximumCachedConversationCount = 24
 
         private var parent: IRCTranscriptTable
         private var contentIdentity: SidebarItem?
@@ -173,6 +198,14 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var hasPendingWidthRefresh = false
         private var pendingWidthRefreshWorkItem: DispatchWorkItem?
         private var widthRefreshGeneration = 0
+        /// Width represented by the estimates NSTableView has most recently
+        /// loaded. Keep this stable during a debounced pane resize: Apple's
+        /// delegate contract requires a row to return the same estimate until
+        /// reloadData or noteHeightOfRows invalidates AppKit's cache.
+        private var rowHeightEstimateViewportWidth: CGFloat = 0
+        private var rowHeightCaches: [SidebarItem: ConversationRowHeightCache] = [:]
+        private var rowHeightCacheAccess: UInt64 = 0
+        private var appliedRowLayoutRevisions: [SidebarItem: UInt64] = [:]
 
         init(parent: IRCTranscriptTable) {
             self.parent = parent
@@ -251,6 +284,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pendingWidthRefreshWorkItem?.cancel()
             pendingWidthRefreshWorkItem = nil
             hasPendingWidthRefresh = false
+            rowHeightEstimateViewportWidth = 0
             let center = NotificationCenter.default
             observers.forEach(center.removeObserver)
             observers.removeAll()
@@ -269,6 +303,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
             let contentChanged = contentIdentity != parent.contentIdentity
             let configurationChanged = renderConfiguration != parent.renderConfiguration
             let rowLayoutChanged = rowLayoutInvalidation != parent.rowLayoutInvalidation
+
+            if contentChanged || configurationChanged, let tableView {
+                // Capture the outgoing layout before replacing the identity or
+                // configuration used to key its measurements.
+                cacheRealizedRowHeights(in: tableView)
+            }
             self.parent = parent
             contentIdentity = parent.contentIdentity
             renderConfiguration = parent.renderConfiguration
@@ -362,8 +402,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
             lastAnimatedScroll = .distantPast
             lastViewportWidth = max(0, scrollView.contentView.bounds.width)
             lastViewportHeight = max(0, scrollView.contentView.bounds.height)
+            rowHeightEstimateViewportWidth = lastViewportWidth
 
             messages = newMessages
+            pruneCachedRowHeights(to: newMessages)
+            applyPendingRowLayoutInvalidation(to: newMessages)
+            touchCurrentRowHeightCache()
             tableView.intercellSpacing.height = parent.rowSpacing
             tableView.rowHeight = parent.estimatedRowHeight
             tableView.reloadData()
@@ -375,6 +419,17 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         func numberOfRows(in tableView: NSTableView) -> Int {
             messages.count + 2
+        }
+
+        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+            guard let message = message(atTableRow: row),
+                  let cachedHeight = cachedRowHeight(for: message.id) else {
+                // -1 preserves NSTableView's normal automatic-height path.
+                // Only a genuine cache hit should alter its row estimate;
+                // spacer and never-measured rows behave exactly as before.
+                return -1
+            }
+            return cachedHeight
         }
 
         func tableView(
@@ -542,6 +597,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
             guard messages.contains(where: { $0.id == invalidation.messageID }) else {
                 return
             }
+            guard needsApplying(invalidation) else { return }
+            // Preview-load notifications are coalesced per conversation, so
+            // the final signal can represent several rows changing height.
+            // Discard every estimate for that conversation before the full
+            // reload rather than leaving earlier previews with stale values.
+            removeCurrentRowHeightCache()
+            recordApplied(invalidation)
             let readingAnchor = beginReadingPositionRestoration()
             tableView.reloadData()
             tableView.layoutSubtreeIfNeeded()
@@ -602,6 +664,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 )
                 tableView.insertRows(at: insertedRows, withAnimation: [])
             } else {
+                // Appends cannot invalidate any existing measurement. Avoid
+                // rebuilding a retained-ID set on the hot arrival path; only
+                // deletion, trimming, or replacement needs cache pruning.
+                pruneCachedRowHeights(to: newMessages)
                 tableView.reloadData()
             }
 
@@ -872,6 +938,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // in-place hosted-root update. Rebuild the virtualized rows
                 // so every realized cell is proposed the new width before
                 // asking AppKit to measure its height again.
+                self.rowHeightEstimateViewportWidth = self.lastViewportWidth
                 tableView.reloadData()
                 tableView.layoutSubtreeIfNeeded()
                 self.adjustTopSpacerForShortContent()
@@ -972,6 +1039,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 let messageRows = IndexSet(
                     integersIn: 1..<(self.messages.count + 1)
                 )
+                // Publish measurements before invalidating AppKit's cached
+                // estimates so heightOfRow remains stable between invalidation
+                // points, as required by NSTableViewDelegate.
+                self.cacheRealizedRowHeights(in: tableView)
                 tableView.noteHeightOfRows(withIndexesChanged: messageRows)
                 tableView.layoutSubtreeIfNeeded()
                 self.adjustTopSpacerForShortContent()
@@ -1020,7 +1091,18 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     let proposedHeight = hostingView.fittingSize.height
                     guard currentHeight.isFinite,
                           proposedHeight.isFinite,
-                          abs(currentHeight - proposedHeight) > 0.5 else {
+                          proposedHeight > 0 else {
+                        return nil
+                    }
+                    let previousCachedHeight = self.cachedRowHeight(for: messageID)
+                    self.cacheRowHeight(proposedHeight, for: messageID)
+                    // A first measurement only seeds a future reload. Only a
+                    // changed estimate already exposed to AppKit needs noting.
+                    let cachedEstimateChanged = previousCachedHeight.map {
+                        abs($0 - proposedHeight) > 0.5
+                    } ?? false
+                    guard cachedEstimateChanged
+                            || abs(currentHeight - proposedHeight) > 0.5 else {
                         return nil
                     }
                     return row
@@ -1156,6 +1238,115 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 return nil
             }
             return cell.hostingView
+        }
+
+        private func cachedRowHeight(for messageID: UUID) -> CGFloat? {
+            guard let contentIdentity,
+                  let cache = rowHeightCaches[contentIdentity],
+                  rowHeightCacheMatchesCurrentLayout(cache) else { return nil }
+            return cache.heightsByMessageID[messageID]
+        }
+
+        private func cacheRowHeight(_ height: CGFloat, for messageID: UUID) {
+            guard height.isFinite,
+                  height > 0,
+                  !hasPendingWidthRefresh,
+                  let contentIdentity else { return }
+            let viewportWidth = currentRowHeightCacheWidth
+            guard viewportWidth > 0 else { return }
+
+            rowHeightCacheAccess &+= 1
+            if let cache = rowHeightCaches[contentIdentity],
+               rowHeightCacheMatchesCurrentLayout(cache) {
+                cache.heightsByMessageID[messageID] = height
+                cache.lastAccess = rowHeightCacheAccess
+            } else {
+                rowHeightCaches[contentIdentity] = ConversationRowHeightCache(
+                    viewportWidth: viewportWidth,
+                    renderConfiguration: renderConfiguration,
+                    heightsByMessageID: [messageID: height],
+                    lastAccess: rowHeightCacheAccess
+                )
+            }
+            evictOldRowHeightCachesIfNeeded()
+        }
+
+        private func cacheRealizedRowHeights(in tableView: NSTableView) {
+            let visibleRows = tableView.rows(in: tableView.visibleRect)
+            guard visibleRows.location != NSNotFound else { return }
+            for row in visibleRows.location..<NSMaxRange(visibleRows) {
+                guard let message = message(atTableRow: row),
+                      let hostingView = hostingView(at: row, in: tableView),
+                      hostingView.hasHostedContent,
+                      hostingView.representedMessageID == message.id else { continue }
+                hostingView.layoutSubtreeIfNeeded()
+                cacheRowHeight(hostingView.fittingSize.height, for: message.id)
+            }
+        }
+
+        private func removeCurrentRowHeightCache() {
+            guard let contentIdentity else { return }
+            rowHeightCaches.removeValue(forKey: contentIdentity)
+        }
+
+        private func applyPendingRowLayoutInvalidation(to messages: [IRCMessage]) {
+            guard let invalidation = rowLayoutInvalidation,
+                  messages.contains(where: { $0.id == invalidation.messageID }),
+                  needsApplying(invalidation) else { return }
+            removeCurrentRowHeightCache()
+            recordApplied(invalidation)
+        }
+
+        private func needsApplying(
+            _ invalidation: IRCTranscriptRowLayoutInvalidation
+        ) -> Bool {
+            guard let contentIdentity else { return true }
+            return appliedRowLayoutRevisions[contentIdentity] != invalidation.revision
+        }
+
+        private func recordApplied(_ invalidation: IRCTranscriptRowLayoutInvalidation) {
+            guard let contentIdentity else { return }
+            appliedRowLayoutRevisions[contentIdentity] = invalidation.revision
+        }
+
+        private func pruneCachedRowHeights(to messages: [IRCMessage]) {
+            guard let contentIdentity,
+                  let cache = rowHeightCaches[contentIdentity] else { return }
+            let retainedMessageIDs = Set(messages.map(\.id))
+            cache.heightsByMessageID = cache.heightsByMessageID.filter {
+                retainedMessageIDs.contains($0.key)
+            }
+        }
+
+        private func touchCurrentRowHeightCache() {
+            guard let contentIdentity,
+                  let cache = rowHeightCaches[contentIdentity],
+                  rowHeightCacheMatchesCurrentLayout(cache) else { return }
+            rowHeightCacheAccess &+= 1
+            cache.lastAccess = rowHeightCacheAccess
+        }
+
+        private var currentRowHeightCacheWidth: CGFloat {
+            if rowHeightEstimateViewportWidth > 0 {
+                return rowHeightEstimateViewportWidth
+            }
+            return max(0, tableView?.bounds.width ?? 0)
+        }
+
+        private func rowHeightCacheMatchesCurrentLayout(
+            _ cache: ConversationRowHeightCache
+        ) -> Bool {
+            abs(cache.viewportWidth - currentRowHeightCacheWidth) <= 0.5
+                && cache.renderConfiguration == renderConfiguration
+        }
+
+        private func evictOldRowHeightCachesIfNeeded() {
+            while rowHeightCaches.count > Self.maximumCachedConversationCount,
+                  let oldestIdentity = rowHeightCaches.min(
+                    by: { $0.value.lastAccess < $1.value.lastAccess }
+                  )?.key {
+                rowHeightCaches.removeValue(forKey: oldestIdentity)
+            }
         }
 
         private func adjustTopSpacerForShortContent() {
