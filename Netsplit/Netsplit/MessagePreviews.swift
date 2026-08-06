@@ -981,6 +981,12 @@ private struct IRCImageViewer: View {
                     Label("Save Image…", systemImage: "square.and.arrow.down")
                 }
 
+                Button {
+                    copyImageAndClose()
+                } label: {
+                    Label("Copy and Close", systemImage: "doc.on.doc")
+                }
+
                 Button("Done") {
                     dismiss()
                 }
@@ -1022,6 +1028,13 @@ private struct IRCImageViewer: View {
 
     private var viewerBackground: Color {
         themePalette?.background ?? Color(nsColor: .windowBackgroundColor)
+    }
+
+    private func copyImageAndClose() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects([resource.image])
+        dismiss()
     }
 
     private func saveImage() {
