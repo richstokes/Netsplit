@@ -10,11 +10,13 @@ import Testing
 struct IRCModelsAndPolicyTests {
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
-        #expect(IRCApplicationAppearance.allCases.count == 13)
+        #expect(IRCApplicationAppearance.allCases.count == 15)
         #expect(IRCApplicationAppearance.catppuccinLatte.colorScheme == .light)
         #expect(IRCApplicationAppearance.catppuccinMocha.colorScheme == .dark)
         #expect(IRCApplicationAppearance.githubLight.colorScheme == .light)
         #expect(IRCApplicationAppearance.githubDark.colorScheme == .dark)
+        #expect(IRCApplicationAppearance.gruvboxDark.colorScheme == .dark)
+        #expect(IRCApplicationAppearance.nord.colorScheme == .dark)
         #expect(IRCApplicationAppearance.rosePineDawn.colorScheme == .light)
         #expect(IRCApplicationAppearance.solarizedSepia.colorScheme == .light)
         #expect(IRCApplicationAppearance.solarizedSepia.rawValue == "pastelDaybreak")
@@ -26,6 +28,8 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.catppuccinMocha.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubLight.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubDark.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.gruvboxDark.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.nord.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.rosePineDawn.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.solarizedSepia.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.rosePine.palette?.nicknameColors.count == 8)
@@ -33,6 +37,16 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.c64.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.greyscale.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.system.palette == nil)
+    }
+
+    @Test("Settings list keeps built-in modes first and sorts named themes")
+    func sortsApplicationThemesForSettings() {
+        #expect(IRCApplicationAppearance.settingsCases.map(\.label) == [
+            "System", "Light", "Dark",
+            "C64", "Catppuccin Latte", "Catppuccin Mocha", "Cyberpunk",
+            "GitHub Dark", "GitHub Light", "Greyscale", "Gruvbox Dark", "Nord",
+            "Rose Pine", "Rose Pine Dawn", "Solarized Sepia",
+        ])
     }
 
     @Test("Every theme provides restrained connection presentation text")
@@ -140,6 +154,34 @@ struct IRCModelsAndPolicyTests {
         #expect(Self.contrastRatio(
             foreground: IRCThemePalette.greyscaleSecondaryTextHex,
             background: IRCThemePalette.greyscaleBarHex
+        ) >= 4.5)
+    }
+
+    @Test("Gruvbox Dark text colors meet normal-text contrast")
+    func validatesGruvboxDarkTextContrast() {
+        for color in IRCThemePalette.gruvboxDarkNicknameHexValues {
+            #expect(Self.contrastRatio(
+                foreground: color,
+                background: IRCThemePalette.gruvboxDarkBackgroundHex
+            ) >= 4.5)
+        }
+        #expect(Self.contrastRatio(
+            foreground: IRCThemePalette.gruvboxDarkSecondaryTextHex,
+            background: IRCThemePalette.gruvboxDarkBarHex
+        ) >= 4.5)
+    }
+
+    @Test("Nord text colors meet normal-text contrast")
+    func validatesNordTextContrast() {
+        for color in IRCThemePalette.nordNicknameHexValues {
+            #expect(Self.contrastRatio(
+                foreground: color,
+                background: IRCThemePalette.nordBackgroundHex
+            ) >= 4.5)
+        }
+        #expect(Self.contrastRatio(
+            foreground: IRCThemePalette.nordSecondaryTextHex,
+            background: IRCThemePalette.nordBarHex
         ) >= 4.5)
     }
 
@@ -3806,9 +3848,9 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
-    @Test("Detached hosted content releases to a height-preserving placeholder")
+    @Test("Detached hosted content releases to a neutral reusable placeholder")
     @MainActor
-    func releasesDetachedHostedContentWithoutCollapsingHeight() async throws {
+    func releasesDetachedHostedContentWithoutRetainingStaleHeight() async throws {
         let hostingView = IntrinsicInvalidatingHostingView(
             rootView: AnyView(EmptyView())
         )
@@ -3842,7 +3884,16 @@ struct IRCModelsAndPolicyTests {
         #expect(!hostingView.hasHostedContent)
         #expect(hostingView.representedMessageID == nil)
         #expect(!hostingView.hasPendingHostedContentRelease)
-        #expect(abs(hostingView.fittingSize.height - hostedHeight) < 0.5)
+
+        let releasedHeight = hostingView.fittingSize.height
+        #expect(releasedHeight < hostedHeight - 1)
+
+        hostingView.setHostedContent(
+            AnyView(Color.clear.frame(width: 320, height: 28)),
+            for: UUID()
+        )
+        hostingView.layoutSubtreeIfNeeded()
+        #expect(abs(hostingView.fittingSize.height - 28) < 0.5)
     }
 
     @Test("Transient native row removal does not restart an asynchronous preview")

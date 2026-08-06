@@ -1509,11 +1509,12 @@ final class IntrinsicInvalidatingHostingView: NSHostingView<AnyView> {
         cancelPendingHostedContentRelease()
         representedMessageID = nil
         guard hasHostedContent else { return }
-        let preservedHeight = fittingSize.height
         hasHostedContent = false
-        rootView = AnyView(
-            Color.clear.frame(height: max(0, preservedHeight))
-        )
+        // This view is no longer associated with a table row. Keeping the
+        // outgoing row's height in a placeholder can leak a tall preview's
+        // intrinsic size into the next message when NSTableView reuses the
+        // cell, until SwiftUI publishes the replacement view's size.
+        rootView = AnyView(EmptyView())
     }
 
     override func invalidateIntrinsicContentSize() {
@@ -1545,11 +1546,10 @@ private final class TranscriptMessageCellView: NSTableCellView {
         self.init(frame: .zero)
     }
 
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        releaseHostedContent()
-    }
-
+    // Deliberately keep the existing root through prepareForReuse so viewFor
+    // retargets it directly. Replacing it there adds a second root-view update
+    // and lets the outgoing row's intrinsic height win the sizing pass. Rows
+    // that remain detached are still emptied by the delayed release.
     func releaseHostedContent() {
         hostingView.releaseHostedContent()
     }

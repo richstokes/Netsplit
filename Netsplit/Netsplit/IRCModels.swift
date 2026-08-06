@@ -16,6 +16,8 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
     case catppuccinMocha
     case githubLight
     case githubDark
+    case gruvboxDark
+    case nord
     case rosePineDawn
     // Preserve the original stored value so existing selections migrate in place.
     case solarizedSepia = "pastelDaybreak"
@@ -26,6 +28,14 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
 
     var id: Self { self }
 
+    static var settingsCases: [Self] {
+        let builtInCases: [Self] = [.system, .light, .dark]
+        let namedThemes = allCases
+            .filter { !builtInCases.contains($0) }
+            .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
+        return builtInCases + namedThemes
+    }
+
     var label: String {
         switch self {
         case .system: return "System"
@@ -35,6 +45,8 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
         case .catppuccinMocha: return "Catppuccin Mocha"
         case .githubLight: return "GitHub Light"
         case .githubDark: return "GitHub Dark"
+        case .gruvboxDark: return "Gruvbox Dark"
+        case .nord: return "Nord"
         case .rosePineDawn: return "Rose Pine Dawn"
         case .solarizedSepia: return "Solarized Sepia"
         case .rosePine: return "Rose Pine"
@@ -48,7 +60,9 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
         switch self {
         case .system: return nil
         case .light, .catppuccinLatte, .githubLight, .rosePineDawn, .solarizedSepia: return .light
-        case .dark, .catppuccinMocha, .githubDark, .rosePine, .cyberpunk, .c64, .greyscale: return .dark
+        case .dark, .catppuccinMocha, .githubDark, .gruvboxDark, .nord,
+             .rosePine, .cyberpunk, .c64, .greyscale:
+            return .dark
         }
     }
 }

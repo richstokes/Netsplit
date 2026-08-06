@@ -60,7 +60,7 @@ extension IRCApplicationAppearance {
         connectingLabel: "Opening connection…",
         fontDesign: .rounded
       )
-    case .githubLight, .githubDark:
+    case .githubLight, .githubDark, .gruvboxDark, .nord:
       return IRCConnectionPresentation(
         title: "Server Connections",
         description: profileDescription,
@@ -115,6 +115,8 @@ extension IRCApplicationAppearance {
     case .catppuccinMocha: return .catppuccinMocha
     case .githubLight: return .githubLight
     case .githubDark: return .githubDark
+    case .gruvboxDark: return .gruvboxDark
+    case .nord: return .nord
     case .rosePineDawn: return .rosePineDawn
     case .solarizedSepia: return .solarizedSepia
     case .rosePine: return .rosePine

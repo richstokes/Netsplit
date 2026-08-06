@@ -1036,7 +1036,7 @@ struct SettingsView: View {
         Form {
             Section("Chat Appearance") {
                 Picker("Theme", selection: $state.applicationAppearance) {
-                    ForEach(IRCApplicationAppearance.allCases) { appearance in
+                    ForEach(IRCApplicationAppearance.settingsCases) { appearance in
                         Label {
                             Text(appearance.label)
                         } icon: {
