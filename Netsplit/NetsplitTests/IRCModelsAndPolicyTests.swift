@@ -1814,6 +1814,30 @@ struct IRCModelsAndPolicyTests {
         #expect(change.revision == 1)
     }
 
+    @Test("Preview cache keeps the newest visible resources under its cost limit")
+    @MainActor
+    func deterministicallyEvictsLeastRecentlyUsedPreview() {
+        var cache = IRCPreviewMemoryCache<String, Int>(
+            countLimit: 3,
+            totalCostLimit: 64
+        )
+        cache.insert(1, for: "older", cost: 46)
+        cache.insert(2, for: "first-visible", cost: 18)
+        cache.insert(3, for: "second-visible", cost: 18)
+
+        #expect(cache.value(for: "older") == nil)
+        #expect(cache.value(for: "first-visible") == 2)
+        #expect(cache.value(for: "second-visible") == 3)
+
+        // Reads refresh recency, so a later insertion evicts the entry that is
+        // no longer being used rather than either currently visible preview.
+        cache.insert(4, for: "later", cost: 32)
+
+        #expect(cache.value(for: "first-visible") == nil)
+        #expect(cache.value(for: "second-visible") == 3)
+        #expect(cache.value(for: "later") == 4)
+    }
+
     @Test("Preview disclosure updates an existing hosted row")
     @MainActor
     func updatesHostedRowWhenPreviewExpansionChanges() async throws {
@@ -3769,6 +3793,112 @@ struct IRCModelsAndPolicyTests {
 
         // Explicitly dismantle the representable and drain its queued AppKit
         // invalidation before the next serialized integration test begins.
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    @Test("Native transcript does not reuse hosted cells across conversations")
+    @MainActor
+    func isolatesNativeTranscriptCellsByConversation() async throws {
+        let firstIdentity = SidebarItem.channel(UUID())
+        let secondIdentity = SidebarItem.channel(UUID())
+        let firstMessages = (0..<100).map {
+            IRCMessage(sender: "first", text: "First conversation message \($0)")
+        }
+        let secondMessages = (0..<100).map {
+            IRCMessage(sender: "second", text: "Second conversation message \($0)")
+        }
+        var contentIdentity = firstIdentity
+        var messages = firstMessages
+        var initialPositionCount = 0
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "conversation-cell-isolation-test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: message.sender == "first" ? 72 : 24,
+                                    maxHeight: message.sender == "first" ? 72 : 24,
+                                    alignment: .leading
+                                )
+                        )
+                    },
+                    onInitialPositioned: { _ in initialPositionCount += 1 },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 320, height: 240)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { initialPositionCount == 1 }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+
+        func visibleHostingViewIDs() -> Set<ObjectIdentifier> {
+            let visibleRows = tableView.rows(in: tableView.visibleRect)
+            guard visibleRows.location != NSNotFound else { return [] }
+            return Set(
+                (visibleRows.location..<NSMaxRange(visibleRows)).compactMap { row in
+                    guard let cell = tableView.view(
+                        atColumn: 0,
+                        row: row,
+                        makeIfNecessary: false
+                    ),
+                    let hostingView = Self.view(
+                        withIdentifier: "IRCTranscriptHostedRow",
+                        in: cell
+                    ) else { return nil }
+                    return ObjectIdentifier(hostingView)
+                }
+            )
+        }
+
+        let firstHostingViewIDs = visibleHostingViewIDs()
+        #expect(!firstHostingViewIDs.isEmpty)
+
+        contentIdentity = secondIdentity
+        messages = secondMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil {
+            initialPositionCount == 2 && !visibleHostingViewIDs().isEmpty
+        }
+
+        let secondHostingViewIDs = visibleHostingViewIDs()
+        #expect(firstHostingViewIDs.isDisjoint(with: secondHostingViewIDs))
+
         hostingController.rootView = AnyView(EmptyView())
         hostingController.view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(50))

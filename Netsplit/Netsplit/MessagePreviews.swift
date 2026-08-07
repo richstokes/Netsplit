@@ -113,6 +113,65 @@ struct IRCMessagePreviewLayoutChange: Equatable {
     let revision: UInt64
 }
 
+/// A small, deterministic memory cache for preview state that must survive a
+/// native transcript-row rebuild. `NSCache` may discard any entry at any time;
+/// when that happened to two visible previews, each completed load rebuilt the
+/// table and discarded the other preview's row-local state, creating a reload
+/// loop. This cache keeps the same hard bounds while evicting the least recently
+/// used entry first.
+@MainActor
+struct IRCPreviewMemoryCache<Key: Hashable, Value> {
+    private struct Entry {
+        let value: Value
+        let cost: Int
+        var lastAccess: UInt64
+    }
+
+    private let countLimit: Int
+    private let totalCostLimit: Int
+    private var entries: [Key: Entry] = [:]
+    private var totalCost = 0
+    private var accessCounter: UInt64 = 0
+
+    init(countLimit: Int, totalCostLimit: Int = .max) {
+        self.countLimit = max(0, countLimit)
+        self.totalCostLimit = max(0, totalCostLimit)
+    }
+
+    mutating func value(for key: Key) -> Value? {
+        guard var entry = entries[key] else { return nil }
+        accessCounter &+= 1
+        entry.lastAccess = accessCounter
+        entries[key] = entry
+        return entry.value
+    }
+
+    mutating func insert(_ value: Value, for key: Key, cost: Int = 0) {
+        let boundedCost = max(0, cost)
+        if let existing = entries.removeValue(forKey: key) {
+            totalCost -= existing.cost
+        }
+        accessCounter &+= 1
+        entries[key] = Entry(
+            value: value,
+            cost: boundedCost,
+            lastAccess: accessCounter
+        )
+        totalCost += boundedCost
+        evictIfNeeded()
+    }
+
+    private mutating func evictIfNeeded() {
+        while entries.count > countLimit || totalCost > totalCostLimit {
+            guard let oldestKey = entries.min(
+                by: { $0.value.lastAccess < $1.value.lastAccess }
+            )?.key,
+            let removed = entries.removeValue(forKey: oldestKey) else { return }
+            totalCost -= removed.cost
+        }
+    }
+}
+
 final class IRCMessagePreviewExpansionStore: ObservableObject {
     private struct PendingPreviewLayoutInvalidation {
         let messageID: UUID
@@ -561,21 +620,16 @@ enum IRCLinkPreviewMetadataParser {
 private final class IRCLinkPreviewCache {
     static let shared = IRCLinkPreviewCache()
 
-    private final class Entry {
-        let metadata: IRCLinkPreviewMetadata
-        init(_ metadata: IRCLinkPreviewMetadata) { self.metadata = metadata }
-    }
-
-    private let cache = NSCache<NSURL, Entry>()
+    private var cache = IRCPreviewMemoryCache<URL, IRCLinkPreviewMetadata>(
+        countLimit: 200
+    )
     private var inFlight: [URL: Task<IRCLinkPreviewMetadata, Error>] = [:]
 
-    private init() {
-        cache.countLimit = 200
-    }
+    private init() {}
 
     func cachedMetadata(for url: URL) -> IRCLinkPreviewMetadata? {
         let key = IRCRemotePreviewPolicy.normalizedNetworkURL(url) ?? url
-        return cache.object(forKey: key as NSURL)?.metadata
+        return cache.value(for: key)
     }
 
     func metadata(for url: URL) async throws -> IRCLinkPreviewMetadata {
@@ -587,7 +641,7 @@ private final class IRCLinkPreviewCache {
         inFlight[key] = task
         do {
             let metadata = try await task.value
-            cache.setObject(Entry(metadata), forKey: key as NSURL)
+            cache.insert(metadata, for: key)
             inFlight[key] = nil
             return metadata
         } catch {
@@ -734,22 +788,17 @@ private struct IRCLinkPreviewCard: View {
 private final class IRCImagePreviewCache {
     static let shared = IRCImagePreviewCache()
 
-    private final class Entry {
-        let resource: IRCLoadedImage
-        init(_ resource: IRCLoadedImage) { self.resource = resource }
-    }
-
-    private let cache = NSCache<NSURL, Entry>()
+    private var cache = IRCPreviewMemoryCache<URL, IRCLoadedImage>(
+        countLimit: 100,
+        totalCostLimit: 64 * 1_024 * 1_024
+    )
     private var inFlight: [URL: Task<IRCLoadedImage, Error>] = [:]
 
-    private init() {
-        cache.countLimit = 100
-        cache.totalCostLimit = 64 * 1_024 * 1_024
-    }
+    private init() {}
 
     func cachedResource(for url: URL) -> IRCLoadedImage? {
         let key = IRCRemotePreviewPolicy.normalizedNetworkURL(url) ?? url
-        return cache.object(forKey: key as NSURL)?.resource
+        return cache.value(for: key)
     }
 
     func resource(for url: URL) async throws -> IRCLoadedImage {
@@ -762,9 +811,9 @@ private final class IRCImagePreviewCache {
         do {
             let resource = try await task.value
             let imageCost = Int(resource.image.size.width * resource.image.size.height * 4)
-            cache.setObject(
-                Entry(resource),
-                forKey: key as NSURL,
+            cache.insert(
+                resource,
+                for: key,
                 cost: imageCost + resource.sourceData.count
             )
             inFlight[key] = nil

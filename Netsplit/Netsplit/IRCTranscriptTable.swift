@@ -156,6 +156,17 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
         }
 
+#if DEBUG
+        private struct RowHeightCacheSwitchSnapshot {
+            let hasContentIdentity: Bool
+            let switchMessageCount: Int
+            let switchStartWidth: CGFloat
+            let storedCount: Int
+            let cachedWidth: CGFloat?
+            let cachedRenderConfiguration: String?
+        }
+#endif
+
         private static let topInset: CGFloat = 18
         private static let bottomInset: CGFloat = 18
         private static let messageCellIdentifier = NSUserInterfaceItemIdentifier(
@@ -194,6 +205,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var pendingFollowingTailReport: (Bool, IRCTranscriptTableGeometry)?
 #if DEBUG
         private var pendingDebugGeometryWorkItem: DispatchWorkItem?
+        private var crossConversationCellsDiscarded = 0
+        private var pendingRowHeightCacheSwitchSnapshot: RowHeightCacheSwitchSnapshot?
 #endif
         private var hasPendingWidthRefresh = false
         private var pendingWidthRefreshWorkItem: DispatchWorkItem?
@@ -278,6 +291,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
             pendingDebugGeometryWorkItem = nil
+            crossConversationCellsDiscarded = 0
+            pendingRowHeightCacheSwitchSnapshot = nil
 #endif
             hasPendingPositionReport = false
             pendingFollowingTailReport = nil
@@ -380,6 +395,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
             pendingDebugGeometryWorkItem = nil
+            crossConversationCellsDiscarded = 0
+            pendingRowHeightCacheSwitchSnapshot = nil
 #endif
 
             scrollView.alphaValue = 0
@@ -408,6 +425,11 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pruneCachedRowHeights(to: newMessages)
             applyPendingRowLayoutInvalidation(to: newMessages)
             touchCurrentRowHeightCache()
+#if DEBUG
+            pendingRowHeightCacheSwitchSnapshot = rowHeightCacheSwitchSnapshot(
+                messageCount: newMessages.count
+            )
+#endif
             tableView.intercellSpacing.height = parent.rowSpacing
             tableView.rowHeight = parent.estimatedRowHeight
             tableView.reloadData()
@@ -443,19 +465,33 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 )
             }
 
-            let cell: TranscriptMessageCellView
-            if let reusableCell = tableView.makeView(
+            let reusableCell = tableView.makeView(
                 withIdentifier: Self.messageCellIdentifier,
                 owner: self
-            ) as? TranscriptMessageCellView {
+            ) as? TranscriptMessageCellView
+            let cell: TranscriptMessageCellView
+            if let reusableCell,
+               reusableCell.canReuse(for: contentIdentity) {
                 cell = reusableCell
             } else {
+                // Row-height measurements are scoped per conversation, so
+                // the hosted AppKit view must use the same boundary. Directly
+                // retargeting a cell from another conversation can briefly
+                // expose its outgoing SwiftUI intrinsic height before the new
+                // root settles, leaving an incorrect automatic row height.
+                if let reusableCell {
+                    reusableCell.releaseHostedContent()
+#if DEBUG
+                    crossConversationCellsDiscarded += 1
+#endif
+                }
                 cell = TranscriptMessageCellView()
                 cell.identifier = Self.messageCellIdentifier
                 cell.hostingView.onIntrinsicSizeInvalidated = { [weak self] messageID in
                     self?.scheduleHeightInvalidation(for: messageID)
                 }
             }
+            cell.assignReuseScope(contentIdentity)
             let cancelledPendingRelease = cell.hostingView.setHostedContent(
                 sizedRow(message, width: currentContentWidth(in: tableView)),
                 for: message.id
@@ -574,6 +610,23 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 let geometry = self.geometry()
                 self.parent.onInitialPositioned?(geometry)
 #if DEBUG
+                if let cacheSnapshot = self.pendingRowHeightCacheSwitchSnapshot {
+                    self.pendingRowHeightCacheSwitchSnapshot = nil
+                    self.parent.onGeometryChange?(
+                        self.rowHeightCacheSwitchSummary(
+                            cacheSnapshot,
+                            attachedMessageCount: self.messages.count,
+                            finalWidth: geometry.visibleBounds.width
+                        ),
+                        geometry
+                    )
+                }
+                if self.crossConversationCellsDiscarded > 0 {
+                    self.parent.onGeometryChange?(
+                        "cross-conversation-cells-discarded count=\(self.crossConversationCellsDiscarded)",
+                        geometry
+                    )
+                }
                 self.parent.onGeometryChange?("attached", geometry)
 #endif
             }
@@ -1280,9 +1333,114 @@ struct IRCTranscriptTable: NSViewRepresentable {
                       hostingView.hasHostedContent,
                       hostingView.representedMessageID == message.id else { continue }
                 hostingView.layoutSubtreeIfNeeded()
-                cacheRowHeight(hostingView.fittingSize.height, for: message.id)
+                let proposedHeight = hostingView.fittingSize.height
+#if DEBUG
+                reportLargeHeightDisagreementIfNeeded(
+                    row: row,
+                    messageID: message.id,
+                    tableHeight: tableView.rect(ofRow: row).height,
+                    cachedHeight: cachedRowHeight(for: message.id),
+                    proposedHeight: proposedHeight,
+                    source: "realized-cache"
+                )
+#endif
+                cacheRowHeight(proposedHeight, for: message.id)
             }
         }
+
+#if DEBUG
+        private func rowHeightCacheSwitchSnapshot(
+            messageCount: Int
+        ) -> RowHeightCacheSwitchSnapshot {
+            guard let contentIdentity else {
+                return RowHeightCacheSwitchSnapshot(
+                    hasContentIdentity: false,
+                    switchMessageCount: messageCount,
+                    switchStartWidth: currentRowHeightCacheWidth,
+                    storedCount: 0,
+                    cachedWidth: nil,
+                    cachedRenderConfiguration: nil
+                )
+            }
+            let cache = rowHeightCaches[contentIdentity]
+            return RowHeightCacheSwitchSnapshot(
+                hasContentIdentity: true,
+                switchMessageCount: messageCount,
+                switchStartWidth: currentRowHeightCacheWidth,
+                storedCount: cache?.heightsByMessageID.count ?? 0,
+                cachedWidth: cache?.viewportWidth,
+                cachedRenderConfiguration: cache?.renderConfiguration
+            )
+        }
+
+        private func rowHeightCacheSwitchSummary(
+            _ snapshot: RowHeightCacheSwitchSnapshot,
+            attachedMessageCount: Int,
+            finalWidth: CGFloat
+        ) -> String {
+            let switchWidthDescription = String(format: "%.1f", snapshot.switchStartWidth)
+            let finalWidthDescription = String(format: "%.1f", finalWidth)
+            let messageDescription = "messages=\(snapshot.switchMessageCount) "
+                + "attachedMessages=\(attachedMessageCount)"
+            guard snapshot.hasContentIdentity else {
+                return "row-height-cache-switch status=no-identity \(messageDescription) "
+                    + "switchWidth=\(switchWidthDescription) finalWidth=\(finalWidthDescription)"
+            }
+            guard let cachedWidth = snapshot.cachedWidth,
+                  let cachedRenderConfiguration = snapshot.cachedRenderConfiguration else {
+                return "row-height-cache-switch status=miss \(messageDescription) "
+                    + "usable=0 stored=0 coverage=0.0 "
+                    + "switchWidth=\(switchWidthDescription) finalWidth=\(finalWidthDescription)"
+            }
+
+            // Evaluate the cache against the layout actually revealed to the
+            // user. Channel/DM inspector changes can make the width at switch
+            // start differ from the width after the hidden refresh settles.
+            let widthMatches = abs(cachedWidth - finalWidth) <= 0.5
+            let configurationMatches = cachedRenderConfiguration == renderConfiguration
+            let layoutMatches = widthMatches && configurationMatches
+            let usableCount = layoutMatches ? snapshot.storedCount : 0
+            let coverage = attachedMessageCount > 0
+                ? 100 * Double(usableCount) / Double(attachedMessageCount)
+                : 100
+            let status = layoutMatches ? "hit" : "layout-mismatch"
+            let coverageDescription = String(format: "%.1f", coverage)
+            let cachedWidthDescription = String(format: "%.1f", cachedWidth)
+            return "row-height-cache-switch status=\(status) \(messageDescription) "
+                + "usable=\(usableCount) stored=\(snapshot.storedCount) "
+                + "coverage=\(coverageDescription) "
+                + "switchWidth=\(switchWidthDescription) "
+                + "finalWidth=\(finalWidthDescription) "
+                + "cachedWidth=\(cachedWidthDescription) "
+                + "widthMatch=\(widthMatches) configurationMatch=\(configurationMatches)"
+        }
+
+        private func reportLargeHeightDisagreementIfNeeded(
+            row: Int,
+            messageID: UUID,
+            tableHeight: CGFloat,
+            cachedHeight: CGFloat?,
+            proposedHeight: CGFloat,
+            source: String
+        ) {
+            guard proposedHeight.isFinite, proposedHeight > 0 else { return }
+            let tableDelta = abs(tableHeight - proposedHeight)
+            let cacheDelta = cachedHeight.map { abs($0 - proposedHeight) } ?? 0
+            guard max(tableDelta, cacheDelta) > 40 else { return }
+            let messageDescription = String(messageID.uuidString.prefix(8))
+            let cachedDescription = cachedHeight.map {
+                String(format: "%.1f", $0)
+            } ?? "nil"
+            let tableDescription = String(format: "%.1f", tableHeight)
+            let proposedDescription = String(format: "%.1f", proposedHeight)
+            parent.onGeometryChange?(
+                "large-row-height-disagreement source=\(source) row=\(row) "
+                    + "message=\(messageDescription) table=\(tableDescription) "
+                    + "cached=\(cachedDescription) proposed=\(proposedDescription)",
+                geometry()
+            )
+        }
+#endif
 
         private func removeCurrentRowHeightCache() {
             guard let contentIdentity else { return }
@@ -1526,6 +1684,8 @@ final class IntrinsicInvalidatingHostingView: NSHostingView<AnyView> {
 
 private final class TranscriptMessageCellView: NSTableCellView {
     let hostingView: IntrinsicInvalidatingHostingView
+    private var representedContentIdentity: SidebarItem?
+    private var hasRepresentedContentIdentity = false
 
     override init(frame frameRect: NSRect) {
         hostingView = IntrinsicInvalidatingHostingView(rootView: AnyView(EmptyView()))
@@ -1544,6 +1704,16 @@ private final class TranscriptMessageCellView: NSTableCellView {
 
     convenience init() {
         self.init(frame: .zero)
+    }
+
+    func canReuse(for contentIdentity: SidebarItem?) -> Bool {
+        hasRepresentedContentIdentity
+            && representedContentIdentity == contentIdentity
+    }
+
+    func assignReuseScope(_ contentIdentity: SidebarItem?) {
+        representedContentIdentity = contentIdentity
+        hasRepresentedContentIdentity = true
     }
 
     // Deliberately keep the existing root through prepareForReuse so viewFor
