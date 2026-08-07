@@ -53,7 +53,7 @@ extension IRCApplicationAppearance {
         connectingLabel: "Connecting…",
         fontDesign: .default
       )
-    case .catppuccinLatte, .catppuccinMocha:
+    case .catppuccinLatte, .catppuccinMocha, .everforestLight:
       return IRCConnectionPresentation(
         title: "Network Connections",
         description: profileDescription,
@@ -113,6 +113,7 @@ extension IRCApplicationAppearance {
     case .system, .light, .dark: return nil
     case .catppuccinLatte: return .catppuccinLatte
     case .catppuccinMocha: return .catppuccinMocha
+    case .everforestLight: return .everforestLight
     case .githubLight: return .githubLight
     case .githubDark: return .githubDark
     case .gruvboxDark: return .gruvboxDark

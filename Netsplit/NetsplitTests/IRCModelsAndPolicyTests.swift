@@ -10,9 +10,10 @@ import Testing
 struct IRCModelsAndPolicyTests {
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
-        #expect(IRCApplicationAppearance.allCases.count == 15)
+        #expect(IRCApplicationAppearance.allCases.count == 16)
         #expect(IRCApplicationAppearance.catppuccinLatte.colorScheme == .light)
         #expect(IRCApplicationAppearance.catppuccinMocha.colorScheme == .dark)
+        #expect(IRCApplicationAppearance.everforestLight.colorScheme == .light)
         #expect(IRCApplicationAppearance.githubLight.colorScheme == .light)
         #expect(IRCApplicationAppearance.githubDark.colorScheme == .dark)
         #expect(IRCApplicationAppearance.gruvboxDark.colorScheme == .dark)
@@ -26,6 +27,7 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.greyscale.colorScheme == .dark)
         #expect(IRCApplicationAppearance.catppuccinLatte.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.catppuccinMocha.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.everforestLight.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubLight.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.githubDark.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.gruvboxDark.palette?.nicknameColors.count == 8)
@@ -44,8 +46,8 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.settingsCases.map(\.label) == [
             "System", "Light", "Dark",
             "C64", "Catppuccin Latte", "Catppuccin Mocha", "Cyberpunk",
-            "GitHub Dark", "GitHub Light", "Greyscale", "Gruvbox Dark", "Nord",
-            "Rose Pine", "Rose Pine Dawn", "Solarized Sepia",
+            "Everforest Light", "GitHub Dark", "GitHub Light", "Greyscale",
+            "Gruvbox Dark", "Nord", "Rose Pine", "Rose Pine Dawn", "Solarized Sepia",
         ])
     }
 
@@ -84,6 +86,20 @@ struct IRCModelsAndPolicyTests {
         #expect(Self.contrastRatio(
             foreground: IRCThemePalette.catppuccinLatteSecondaryTextHex,
             background: IRCThemePalette.catppuccinLatteBarHex
+        ) >= 4.5)
+    }
+
+    @Test("Everforest Light text colors meet normal-text contrast")
+    func validatesEverforestLightTextContrast() {
+        for color in IRCThemePalette.everforestLightNicknameHexValues {
+            #expect(Self.contrastRatio(
+                foreground: color,
+                background: IRCThemePalette.everforestLightBackgroundHex
+            ) >= 4.5)
+        }
+        #expect(Self.contrastRatio(
+            foreground: IRCThemePalette.everforestLightSecondaryTextHex,
+            background: IRCThemePalette.everforestLightBarHex
         ) >= 4.5)
     }
 
