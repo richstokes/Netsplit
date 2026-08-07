@@ -1326,6 +1326,16 @@ struct Conversation: Identifiable, Hashable {
 }
 
 enum IRCConversationActivityPolicy {
+    static let channelJoinGracePeriod: Duration = .seconds(5)
+
+    static func shouldAccumulateChannelActivity(
+        joinedAt: ContinuousClock.Instant?,
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        guard let joinedAt else { return false }
+        return joinedAt.duration(to: now) >= channelJoinGracePeriod
+    }
+
     static func mergedUnreadState(
         existingHasUnread: Bool,
         incomingHasUnread: Bool,

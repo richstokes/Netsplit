@@ -237,9 +237,10 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
         latestLayoutChangesBySelection[selection]
     }
 
-    /// Preview resources in a newly realized transcript commonly complete in
-    /// a short burst. AppKit needs a full native-table measurement to accept
-    /// their new automatic heights, so collapse that burst into one refresh.
+    /// Image preview resources in a newly realized transcript commonly
+    /// complete in a short burst. AppKit needs a full native-table measurement
+    /// to accept their new automatic heights, so collapse that burst into one
+    /// refresh.
     /// Disclosure changes continue to use invalidateLayout directly and stay
     /// immediate.
     func schedulePreviewLayoutInvalidation(
@@ -316,10 +317,7 @@ struct MessagePreviewStack: View {
                         ForEach(previews) { preview in
                             switch preview {
                             case .link(let url):
-                                IRCLinkPreviewCard(
-                                    url: url,
-                                    onLoad: invalidateRowLayout
-                                )
+                                IRCLinkPreviewCard(url: url)
                             case .image(let url):
                                 IRCImagePreview(
                                     url: url,
@@ -655,7 +653,6 @@ private struct IRCLinkPreviewCard: View {
     private static let maximumWidth: CGFloat = 440
 
     let url: URL
-    let onLoad: () -> Void
     @State private var metadata: IRCLinkPreviewMetadata?
     @State private var failureReason: IRCPreviewFailureReason?
     @State private var retryCount = 0
@@ -683,14 +680,13 @@ private struct IRCLinkPreviewCard: View {
         }
         .task(id: loadID) {
             failureReason = nil
-            let wasCached = IRCLinkPreviewCache.shared.cachedMetadata(for: url) != nil
             do {
                 let loadedMetadata = try await IRCLinkPreviewCache.shared.metadata(for: url)
                 guard !Task.isCancelled else { return }
+                // The hosting view propagates this intrinsic-size change to
+                // its table row. A separate delayed reload would resize the
+                // same link card a second time.
                 metadata = loadedMetadata
-                if !wasCached {
-                    onLoad()
-                }
             } catch {
                 guard !Task.isCancelled else { return }
                 failureReason = IRCPreviewFailureReason(error: error)

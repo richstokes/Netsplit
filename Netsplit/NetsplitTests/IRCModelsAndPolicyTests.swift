@@ -1790,9 +1790,9 @@ struct IRCModelsAndPolicyTests {
         #expect(expansion.latestLayoutChange?.selection == secondSelection)
     }
 
-    @Test("A burst of loaded previews produces one transcript layout refresh")
+    @Test("A burst of loaded image previews produces one transcript layout refresh")
     @MainActor
-    func coalescesPreviewLoadLayoutInvalidations() async throws {
+    func coalescesImagePreviewLoadLayoutInvalidations() async throws {
         let selection = SidebarItem.channel(UUID())
         let messageIDs = (0..<20).map { _ in UUID() }
         let expansion = IRCMessagePreviewExpansionStore()
@@ -2571,6 +2571,50 @@ struct IRCModelsAndPolicyTests {
         #expect(!activity.hasMention)
         #expect(activity.indicator == nil)
         #expect(activity.accessibilityDescription == nil)
+    }
+
+    @Test("Channel activity starts five seconds after joining")
+    func delaysChannelActivityAfterJoining() {
+        let joinedAt = ContinuousClock().now
+
+        #expect(!IRCConversationActivityPolicy.shouldAccumulateChannelActivity(
+            joinedAt: nil,
+            now: joinedAt.advanced(by: .seconds(10))
+        ))
+        #expect(!IRCConversationActivityPolicy.shouldAccumulateChannelActivity(
+            joinedAt: joinedAt,
+            now: joinedAt.advanced(by: .milliseconds(4_999))
+        ))
+        #expect(IRCConversationActivityPolicy.shouldAccumulateChannelActivity(
+            joinedAt: joinedAt,
+            now: joinedAt.advanced(by: .seconds(5))
+        ))
+    }
+
+    @Test("Messages received immediately after joining do not mark a channel unread")
+    @MainActor
+    func suppressesChannelActivityImmediatelyAfterJoining() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        let nickname = state.nickname
+
+        state.handle(
+            try #require(IRCWireMessage(line: ":\(nickname)!user@example.org JOIN #welcome")),
+            profile: profile
+        )
+        state.handle(
+            try #require(IRCWireMessage(line: ":Greeter!bot@example.org PRIVMSG #welcome :Welcome!")),
+            profile: profile
+        )
+
+        let channel = try #require(state.channels.first {
+            $0.serverID == profile.id && $0.name == "#welcome"
+        })
+        #expect(!channel.hasUnread)
+        #expect(state.messages(
+            for: .channel(channel.id),
+            channelEventVisibility: .alwaysShow
+        ).contains { $0.text == "Welcome!" })
     }
 
     @Test("Marking a server read clears only that server's conversation activity")

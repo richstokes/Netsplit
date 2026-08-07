@@ -151,6 +151,7 @@ final class IRCAppState: ObservableObject {
     @Published var keychainAccessIssue: KeychainAccessIssue?
 
     private var conversations: [UUID: [IRCMessage]] = [:]
+    private var channelJoinInstants: [UUID: ContinuousClock.Instant] = [:]
     private var conversationDrafts: [SidebarItem: String] = [:]
     private var composerHistories: [SidebarItem: IRCComposerHistory] = [:]
     private var channelMembers: [UUID: [ChannelMember]] = [:]
@@ -1651,6 +1652,7 @@ final class IRCAppState: ObservableObject {
         }
         let key = joinKey(serverID: profile.id, channel: channel.name)
         guard pendingJoins[key] == nil else { return }
+        channelJoinInstants.removeValue(forKey: channel.id)
         channelTopics.removeValue(forKey: channel.id)
         channelMembers[channel.id] = [
             ChannelMember(
@@ -2704,6 +2706,7 @@ final class IRCAppState: ObservableObject {
                 )
                 addMember(member, to: channel.id)
                 if identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
+                    channelJoinInstants[channel.id] = ContinuousClock().now
                     let pendingJoin = pendingJoins.removeValue(forKey: joinKey(serverID: profile.id, channel: channelName))
                     if let pendingJoin {
                         conversations[channel.id]?.removeAll { $0.id == pendingJoin.statusMessageID }
@@ -2736,6 +2739,9 @@ final class IRCAppState: ObservableObject {
                   let channel = existingChannel(named: channelName, serverID: profile.id) else { return }
             let memberCountBeforePart = channelMembers[channel.id]?.count ?? 0
             guard removeMember(named: sender, from: channel.id) else { return }
+            if identifiersEqual(sender, nickname(for: profile), serverID: profile.id) {
+                channelJoinInstants.removeValue(forKey: channel.id)
+            }
             let reason = wire.trailing.map { " — \($0)" } ?? ""
             let subject = identifiersEqual(sender, nickname(for: profile), serverID: profile.id) ? "You" : sender
             appendChannelEvent(
@@ -3706,6 +3712,7 @@ final class IRCAppState: ObservableObject {
         conversationDrafts.removeValue(forKey: .channel(channel.id))
         composerHistories.removeValue(forKey: .channel(channel.id))
         channelTopics.removeValue(forKey: channel.id)
+        channelJoinInstants.removeValue(forKey: channel.id)
         channelMembers.removeValue(forKey: channel.id)
         pendingChannelMembers.removeValue(forKey: channel.id)
         channelBanLists.removeValue(forKey: channel.id)
@@ -3730,6 +3737,7 @@ final class IRCAppState: ObservableObject {
         let retainedChannels = channels.filter { $0.serverID == serverID }
         guard !retainedChannels.isEmpty || pendingJoins.values.contains(where: { $0.serverID == serverID }) else { return }
         for channel in retainedChannels {
+            channelJoinInstants.removeValue(forKey: channel.id)
             channelMembers[channel.id] = []
             pendingChannelMembers.removeValue(forKey: channel.id)
             channelBanLists.removeValue(forKey: channel.id)
@@ -3753,6 +3761,7 @@ final class IRCAppState: ObservableObject {
         for conversationID in removedConversationIDs {
             conversations.removeValue(forKey: conversationID)
             channelTopics.removeValue(forKey: conversationID)
+            channelJoinInstants.removeValue(forKey: conversationID)
             channelMembers.removeValue(forKey: conversationID)
             pendingChannelMembers.removeValue(forKey: conversationID)
             channelBanLists.removeValue(forKey: conversationID)
@@ -4573,7 +4582,16 @@ final class IRCAppState: ObservableObject {
         }
         IRCConversationHistory.append(resolvedMessage, to: &conversations[id, default: []])
         let conversationIsMuted = conversation(for: item).map(isMuted) ?? false
-        if !conversationIsMuted, selection != item, !resolvedMessage.isSystem {
+        let canAccumulateActivity: Bool
+        if case .channel(let channelID) = item {
+            canAccumulateActivity = IRCConversationActivityPolicy.shouldAccumulateChannelActivity(
+                joinedAt: channelJoinInstants[channelID],
+                now: ContinuousClock().now
+            )
+        } else {
+            canAccumulateActivity = true
+        }
+        if canAccumulateActivity, !conversationIsMuted, selection != item, !resolvedMessage.isSystem {
             if shouldMarkMention {
                 markMention(item)
             } else if shouldMarkUnread {
