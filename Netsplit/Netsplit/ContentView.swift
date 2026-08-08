@@ -830,26 +830,38 @@ private struct ServerProfileCard: View {
             }
 
             VStack(alignment: .leading, spacing: textMetrics.spacing(7)) {
-                HStack(spacing: 6) {
-                    Label(profile.useTLS ? "TLS encrypted" : "Plain-text IRC", systemImage: profile.useTLS ? "lock.fill" : "exclamationmark.triangle")
-                    Text(verbatim: "· Port \(profile.port)")
+                ServerProfileDetailRow(systemImage: profile.useTLS ? "lock.fill" : "exclamationmark.triangle") {
+                    HStack(spacing: 6) {
+                        Text(profile.useTLS ? "TLS encrypted" : "Plain-text IRC")
+                        Text(verbatim: "· Port \(profile.port)")
+                    }
                 }
                 .lineLimit(1)
                 if let nickname = profile.nicknameOverride, !nickname.isEmpty {
-                    Label("Nickname: \(nickname)", systemImage: "person.crop.circle")
-                        .lineLimit(1)
+                    ServerProfileFieldRow(
+                        title: "Nickname:",
+                        value: nickname,
+                        systemImage: "person.crop.circle"
+                    )
+                    .lineLimit(1)
                 } else {
                     ServerProfileDetailPlaceholder()
                 }
                 if let realName = profile.realNameOverride, !realName.isEmpty {
-                    Label("Real name: \(realName)", systemImage: "person.text.rectangle")
-                        .lineLimit(1)
+                    ServerProfileFieldRow(
+                        title: "Real name:",
+                        value: realName,
+                        systemImage: "person.text.rectangle"
+                    )
+                    .lineLimit(1)
                 } else {
                     ServerProfileDetailPlaceholder()
                 }
                 if profile.useSSHTunnel == true, let sshHostname = profile.sshHostname {
-                    Label("SSH via \(sshHostname):\(profile.sshPort ?? 22)", systemImage: "point.3.connected.trianglepath.dotted")
-                        .lineLimit(1)
+                    ServerProfileDetailRow(systemImage: "point.3.connected.trianglepath.dotted") {
+                        Text(verbatim: "SSH via \(sshHostname):\(profile.sshPort ?? 22)")
+                    }
+                    .lineLimit(1)
                 } else {
                     ServerProfileDetailPlaceholder()
                 }
@@ -917,6 +929,39 @@ private struct ServerProfileCard: View {
                 }
             }
         }
+    }
+}
+
+private struct ServerProfileDetailRow<Content: View>: View {
+    let systemImage: String
+    @ViewBuilder let content: Content
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .frame(width: textMetrics.spacing(16), alignment: .center)
+                .accessibilityHidden(true)
+            content
+        }
+    }
+}
+
+private struct ServerProfileFieldRow: View {
+    let title: LocalizedStringKey
+    let value: String
+    let systemImage: String
+    @Environment(\.ircTextMetrics) private var textMetrics
+
+    var body: some View {
+        ServerProfileDetailRow(systemImage: systemImage) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .frame(width: textMetrics.spacing(62), alignment: .trailing)
+                Text(verbatim: value)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
