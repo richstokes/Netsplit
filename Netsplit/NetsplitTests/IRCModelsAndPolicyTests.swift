@@ -10,7 +10,7 @@ import Testing
 struct IRCModelsAndPolicyTests {
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
-        #expect(IRCApplicationAppearance.allCases.count == 16)
+        #expect(IRCApplicationAppearance.allCases.count == 17)
         #expect(IRCApplicationAppearance.catppuccinLatte.colorScheme == .light)
         #expect(IRCApplicationAppearance.catppuccinMocha.colorScheme == .dark)
         #expect(IRCApplicationAppearance.everforestLight.colorScheme == .light)
@@ -25,6 +25,7 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.cyberpunk.colorScheme == .dark)
         #expect(IRCApplicationAppearance.c64.colorScheme == .dark)
         #expect(IRCApplicationAppearance.greyscale.colorScheme == .dark)
+        #expect(IRCApplicationAppearance.lobster.colorScheme == .dark)
         #expect(IRCApplicationAppearance.catppuccinLatte.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.catppuccinMocha.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.everforestLight.palette?.nicknameColors.count == 8)
@@ -38,6 +39,7 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCApplicationAppearance.cyberpunk.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.c64.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.greyscale.palette?.nicknameColors.count == 8)
+        #expect(IRCApplicationAppearance.lobster.palette?.nicknameColors.count == 8)
         #expect(IRCApplicationAppearance.system.palette == nil)
     }
 
@@ -47,7 +49,7 @@ struct IRCModelsAndPolicyTests {
             "System", "Light", "Dark",
             "C64", "Catppuccin Latte", "Catppuccin Mocha", "Cyberpunk",
             "Everforest Light", "GitHub Dark", "GitHub Light", "Greyscale",
-            "Gruvbox Dark", "Nord", "Rose Pine", "Rose Pine Dawn", "Solarized Sepia",
+            "Gruvbox Dark", "Lobster", "Nord", "Rose Pine", "Rose Pine Dawn", "Solarized Sepia",
         ])
     }
 
@@ -170,6 +172,20 @@ struct IRCModelsAndPolicyTests {
         #expect(Self.contrastRatio(
             foreground: IRCThemePalette.greyscaleSecondaryTextHex,
             background: IRCThemePalette.greyscaleBarHex
+        ) >= 4.5)
+    }
+
+    @Test("Lobster text colors meet normal-text contrast")
+    func validatesLobsterTextContrast() {
+        for color in IRCThemePalette.lobsterNicknameHexValues {
+            #expect(Self.contrastRatio(
+                foreground: color,
+                background: IRCThemePalette.lobsterBackgroundHex
+            ) >= 4.5)
+        }
+        #expect(Self.contrastRatio(
+            foreground: IRCThemePalette.lobsterSecondaryTextHex,
+            background: IRCThemePalette.lobsterBarHex
         ) >= 4.5)
     }
 

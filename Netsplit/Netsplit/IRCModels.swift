@@ -26,6 +26,7 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
     case cyberpunk
     case c64
     case greyscale
+    case lobster
 
     var id: Self { self }
 
@@ -55,6 +56,7 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
         case .cyberpunk: return "Cyberpunk"
         case .c64: return "C64"
         case .greyscale: return "Greyscale"
+        case .lobster: return "Lobster"
         }
     }
 
@@ -65,7 +67,7 @@ enum IRCApplicationAppearance: String, CaseIterable, Identifiable {
              .rosePineDawn, .solarizedSepia:
             return .light
         case .dark, .catppuccinMocha, .githubDark, .gruvboxDark, .nord,
-             .rosePine, .cyberpunk, .c64, .greyscale:
+             .rosePine, .cyberpunk, .c64, .greyscale, .lobster:
             return .dark
         }
     }
