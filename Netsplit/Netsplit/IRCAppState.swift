@@ -63,6 +63,17 @@ final class IRCAppState: ObservableObject {
         let message: String
     }
 
+    struct IRCURLConnectionConfirmation: Identifiable {
+        let id = UUID()
+        let request: IRCURLRequest
+
+        var endpointLabel: String {
+            let hostname = request.endpoint.hostname
+            let displayedHostname = hostname.contains(":") ? "[\(hostname)]" : hostname
+            return "\(displayedHostname):\(request.endpoint.port)"
+        }
+    }
+
     private struct ScheduledReconnect {
         let requestID: UUID
         let reason: IRCReconnectReason
@@ -149,6 +160,7 @@ final class IRCAppState: ObservableObject {
     @Published private var channelBanListRequests = Set<UUID>()
     @Published private var channelBanListErrors: [UUID: String] = [:]
     @Published var keychainAccessIssue: KeychainAccessIssue?
+    @Published var pendingIRCURLConnectionConfirmation: IRCURLConnectionConfirmation?
 
     private var conversations: [UUID: [IRCMessage]] = [:]
     private var channelJoinInstants: [UUID: ContinuousClock.Instant] = [:]
@@ -920,24 +932,39 @@ final class IRCAppState: ObservableObject {
     func openIRCURL(_ url: URL) -> Bool {
         guard let request = IRCURLParser.request(from: url) else { return false }
         let endpoint = request.endpoint
-        let profile: ServerProfile
         if let existingProfile = profiles.first(where: {
             $0.hostname.compare(endpoint.hostname, options: [.caseInsensitive]) == .orderedSame
                 && $0.port == endpoint.port
                 && $0.useTLS == endpoint.useTLS
         }) {
-            profile = existingProfile
+            openIRCURLRequest(request, on: existingProfile)
         } else {
-            profile = ServerProfile(
-                name: endpoint.hostname,
-                hostname: endpoint.hostname,
-                port: endpoint.port,
-                useTLS: endpoint.useTLS
-            )
-            oneOffServerIDs.insert(profile.id)
-            profiles.append(profile)
+            pendingIRCURLConnectionConfirmation = IRCURLConnectionConfirmation(request: request)
         }
+        return true
+    }
 
+    func confirmIRCURLConnection(_ confirmation: IRCURLConnectionConfirmation) {
+        guard pendingIRCURLConnectionConfirmation?.id == confirmation.id else { return }
+        pendingIRCURLConnectionConfirmation = nil
+        let endpoint = confirmation.request.endpoint
+        let profile = ServerProfile(
+            name: endpoint.hostname,
+            hostname: endpoint.hostname,
+            port: endpoint.port,
+            useTLS: endpoint.useTLS
+        )
+        oneOffServerIDs.insert(profile.id)
+        profiles.append(profile)
+        openIRCURLRequest(confirmation.request, on: profile)
+    }
+
+    func cancelIRCURLConnection(_ confirmation: IRCURLConnectionConfirmation) {
+        guard pendingIRCURLConnectionConfirmation?.id == confirmation.id else { return }
+        pendingIRCURLConnectionConfirmation = nil
+    }
+
+    private func openIRCURLRequest(_ request: IRCURLRequest, on profile: ServerProfile) {
         selection = .server(profile.id)
         if !request.targets.isEmpty {
             var pending = pendingIRCURLTargets[profile.id, default: []]
@@ -954,7 +981,6 @@ final class IRCAppState: ObservableObject {
         } else if connections[profile.id] == nil {
             connect(profile)
         }
-        return true
     }
 
     func toggleConnection(for profile: ServerProfile) {

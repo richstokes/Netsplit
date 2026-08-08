@@ -156,6 +156,13 @@ struct ContentView: View {
         }) {
             JumpPalette(state: state)
         }
+        .sheet(item: $state.pendingIRCURLConnectionConfirmation) { confirmation in
+            IRCURLConnectionConfirmationView(
+                confirmation: confirmation,
+                connect: { state.confirmIRCURLConnection(confirmation) },
+                cancel: { state.cancelIRCURLConnection(confirmation) }
+            )
+        }
         .alert(item: $state.keychainAccessIssue) { issue in
             Alert(
                 title: Text(issue.title),
@@ -177,6 +184,42 @@ struct ContentView: View {
                 workspaceFocus = request.target
             }
         }
+    }
+}
+
+private struct IRCURLConnectionConfirmationView: View {
+    let confirmation: IRCAppState.IRCURLConnectionConfirmation
+    let connect: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                Image(systemName: confirmation.request.endpoint.useTLS ? "lock.shield.fill" : "network")
+                    .font(.system(size: 28))
+                    .foregroundStyle(confirmation.request.endpoint.useTLS ? Color.accentColor : Color.orange)
+                Text("Connect to \(confirmation.endpointLabel)?")
+                    .font(.title2.weight(.semibold))
+            }
+
+            Text("This server is not in your saved profiles. Connecting will share your configured nickname and real name with it.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LabeledContent("Security") {
+                Text(confirmation.request.endpoint.useTLS ? "TLS encrypted" : "Unencrypted")
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Connect", action: connect)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
     }
 }
 

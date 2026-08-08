@@ -8,6 +8,27 @@ import Testing
 // checks whose run-loop work must not overlap another test in this suite.
 @Suite("IRC models and state policies", .serialized)
 struct IRCModelsAndPolicyTests {
+    @Test("IRC URLs require confirmation before connecting to unknown servers")
+    func confirmsUnknownIRCURLServers() throws {
+        let state = IRCAppState()
+        let initialProfileIDs = Set(state.profiles.map(\.id))
+        let url = try #require(URL(string: "ircs://untrusted-url-test.invalid:7443/%23swift"))
+
+        #expect(state.openIRCURL(url))
+        let confirmation = try #require(state.pendingIRCURLConnectionConfirmation)
+        #expect(confirmation.endpointLabel == "untrusted-url-test.invalid:7443")
+        #expect(confirmation.request.targets == [
+            .channel(IRCURLChannel(name: "#swift", key: nil))
+        ])
+        #expect(Set(state.profiles.map(\.id)) == initialProfileIDs)
+        #expect(state.activeProfiles.isEmpty)
+
+        state.cancelIRCURLConnection(confirmation)
+        #expect(state.pendingIRCURLConnectionConfirmation == nil)
+        #expect(Set(state.profiles.map(\.id)) == initialProfileIDs)
+        #expect(state.activeProfiles.isEmpty)
+    }
+
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
         #expect(IRCApplicationAppearance.allCases.count == 17)
