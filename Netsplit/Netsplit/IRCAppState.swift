@@ -218,7 +218,7 @@ final class IRCAppState: ObservableObject {
     private let initialReconnectDelay: TimeInterval = 2
     private let maximumReconnectDelay: TimeInterval = 60
     private let wakeRecoveryStagger: TimeInterval = 0.2
-    private static let defaultQuitMessage = "Closing macOS client"
+    private static let defaultQuitMessage = "Closing Netsplit macOS client"
     private var hasStartedLaunchConnections = false
     private var hasReportedKeychainAccessIssue = false
     private var systemSleepState = IRCSystemSleepStateMachine()
