@@ -338,6 +338,11 @@ struct NetsplitApp: App {
                 .onAppear {
                     appDelegate.state = state
                 }
+                .onOpenURL { url in
+                    guard state.openIRCURL(url) else { return }
+                    NSApp.activate(ignoringOtherApps: true)
+                    appDelegate.mainWindow?.makeKeyAndOrderFront(nil)
+                }
                 .task {
                     guard !NetsplitLaunchEnvironment.currentProcessIsInTestMode else { return }
                     state.connectProfilesConfiguredForLaunch()

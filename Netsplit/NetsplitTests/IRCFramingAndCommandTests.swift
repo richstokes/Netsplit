@@ -84,6 +84,65 @@ struct IRCFramingAndCommandTests {
         }
     }
 
+    @Test("Parses IRC and secure IRC URLs")
+    func parsesIRCURLs() throws {
+        let plaintext = try #require(IRCURLParser.request(
+            from: URL(string: "irc://irc.example.com/swift")!
+        ))
+        #expect(plaintext.endpoint == IRCOneOffServerEndpoint(
+            hostname: "irc.example.com",
+            port: 6667,
+            useTLS: false
+        ))
+        #expect(plaintext.targets == [.channel(IRCURLChannel(name: "#swift", key: nil))])
+
+        let secure = try #require(IRCURLParser.request(
+            from: URL(string: "ircs://irc.example.com:7000/%23macos?channel=%2Bprivate,secret&query=Alice")!
+        ))
+        #expect(secure.endpoint == IRCOneOffServerEndpoint(
+            hostname: "irc.example.com",
+            port: 7000,
+            useTLS: true
+        ))
+        #expect(secure.targets == [
+            .channel(IRCURLChannel(name: "#macos", key: nil)),
+            .channel(IRCURLChannel(name: "+private", key: "secret")),
+            .directMessage("Alice"),
+        ])
+    }
+
+    @Test("Accepts legacy fragment channel IRC URLs")
+    func parsesLegacyIRCURLChannel() throws {
+        let request = try #require(IRCURLParser.request(
+            from: URL(string: "ircs://irc.example.com/#swift")!
+        ))
+        #expect(request.targets == [.channel(IRCURLChannel(name: "#swift", key: nil))])
+    }
+
+    @Test("Rejects unsupported or unsafe IRC URLs")
+    func rejectsInvalidIRCURLs() {
+        let invalidURLs = [
+            "https://irc.example.com/%23swift",
+            "irc:///swift",
+            "irc://nick:password@irc.example.com/%23swift",
+            "irc://irc.example.com:0/%23swift",
+            "irc://irc.example.com/%23bad%20channel",
+        ]
+        for value in invalidURLs {
+            guard let url = URL(string: value) else { continue }
+            #expect(IRCURLParser.request(from: url) == nil)
+        }
+    }
+
+    @Test("App bundle registers IRC URL schemes")
+    func registersIRCURLSchemes() throws {
+        let urlTypes = try #require(
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]]
+        )
+        let schemes = urlTypes.flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
+        #expect(Set(schemes).isSuperset(of: ["irc", "ircs"]))
+    }
+
     @Test("Builds CTCP VERSION replies from the app marketing version")
     func buildsClientVersionReply() throws {
         #expect(IRCClientVersion.ctcpReply(infoDictionary: [

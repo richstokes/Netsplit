@@ -166,6 +166,7 @@ final class IRCAppState: ObservableObject {
     private var oneOffServerIDs = Set<UUID>()
     private var shouldFocusComposerAfterJumpPaletteDismissal = false
     private var pendingJoins: [String: PendingJoin] = [:]
+    private var pendingIRCURLTargets: [UUID: [IRCURLTarget]] = [:]
     private var activeNicknames: [UUID: String] = [:]
     private var registeredServerIDs = Set<UUID>()
     private var pendingNickDestinations: [UUID: SidebarItem] = [:]
@@ -913,6 +914,47 @@ final class IRCAppState: ObservableObject {
                 }
             }
         }
+    }
+
+    @discardableResult
+    func openIRCURL(_ url: URL) -> Bool {
+        guard let request = IRCURLParser.request(from: url) else { return false }
+        let endpoint = request.endpoint
+        let profile: ServerProfile
+        if let existingProfile = profiles.first(where: {
+            $0.hostname.compare(endpoint.hostname, options: [.caseInsensitive]) == .orderedSame
+                && $0.port == endpoint.port
+                && $0.useTLS == endpoint.useTLS
+        }) {
+            profile = existingProfile
+        } else {
+            profile = ServerProfile(
+                name: endpoint.hostname,
+                hostname: endpoint.hostname,
+                port: endpoint.port,
+                useTLS: endpoint.useTLS
+            )
+            oneOffServerIDs.insert(profile.id)
+            profiles.append(profile)
+        }
+
+        selection = .server(profile.id)
+        if !request.targets.isEmpty {
+            var pending = pendingIRCURLTargets[profile.id, default: []]
+            for target in request.targets where !pending.contains(target) {
+                pending.append(target)
+            }
+            pendingIRCURLTargets[profile.id] = pending
+        }
+
+        if registeredServerIDs.contains(profile.id) {
+            openPendingIRCURLTargets(for: profile)
+        } else if case .failed = status(for: profile) {
+            reconnect(profile)
+        } else if connections[profile.id] == nil {
+            connect(profile)
+        }
+        return true
     }
 
     func toggleConnection(for profile: ServerProfile) {
@@ -1677,6 +1719,10 @@ final class IRCAppState: ObservableObject {
     }
 
     private func join(_ listing: ChannelListing, on profile: ServerProfile, selectConversation: Bool, destination: SidebarItem) {
+        join(listing, key: nil, on: profile, selectConversation: selectConversation, destination: destination)
+    }
+
+    private func join(_ listing: ChannelListing, key: String?, on profile: ServerProfile, selectConversation: Bool, destination: SidebarItem) {
         guard registeredServerIDs.contains(profile.id), connections[profile.id] != nil else {
             appendSystem("Wait for the server to finish connecting before joining a channel.", for: destination)
             return
@@ -1711,8 +1757,39 @@ final class IRCAppState: ObservableObject {
             topic: listing.topic,
             selectsConversationOnSuccess: selectConversation
         )
-        connections[profile.id]?.send(command: "JOIN \(listing.name)")
+        let joinCommand = key.map { "JOIN \(listing.name) \($0)" } ?? "JOIN \(listing.name)"
+        connections[profile.id]?.send(command: joinCommand)
         messagesDidChange(for: channel.id)
+    }
+
+    private func openPendingIRCURLTargets(for profile: ServerProfile) {
+        guard registeredServerIDs.contains(profile.id),
+              connections[profile.id] != nil,
+              let targets = pendingIRCURLTargets.removeValue(forKey: profile.id) else { return }
+        for (index, target) in targets.enumerated() {
+            let selectConversation = index == targets.indices.last
+            switch target {
+            case .channel(let channel):
+                join(
+                    ChannelListing(name: channel.name, userCount: 0, topic: ""),
+                    key: channel.key,
+                    on: profile,
+                    selectConversation: selectConversation,
+                    destination: .server(profile.id)
+                )
+            case .directMessage(let nickname):
+                let conversation = directMessage(named: nickname, serverID: profile.id)
+                if conversations[conversation.id] == nil {
+                    conversations[conversation.id] = [IRCMessage(
+                        sender: "System",
+                        text: "Private conversation with \(nickname).",
+                        isSystem: true
+                    )]
+                    messagesDidChange(for: conversation.id)
+                }
+                if selectConversation { selection = .directMessage(conversation.id) }
+            }
+        }
     }
 
     func beginNewConversation() {
@@ -2439,6 +2516,7 @@ final class IRCAppState: ObservableObject {
                 announcesRequest: false
             )
             runPostRegistrationSequence(for: profile)
+            openPendingIRCURLTargets(for: profile)
         case "005":
             updateServerFeatures(from: wire, serverID: profile.id)
         case "BATCH":

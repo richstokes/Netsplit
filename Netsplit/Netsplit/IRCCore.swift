@@ -217,6 +217,98 @@ enum IRCOneOffServerCommand {
   }
 }
 
+struct IRCURLChannel: Equatable, Hashable {
+  var name: String
+  var key: String?
+}
+
+enum IRCURLTarget: Equatable, Hashable {
+  case channel(IRCURLChannel)
+  case directMessage(String)
+}
+
+struct IRCURLRequest: Equatable {
+  var endpoint: IRCOneOffServerEndpoint
+  var targets: [IRCURLTarget]
+}
+
+enum IRCURLParser {
+  static func request(from url: URL) -> IRCURLRequest? {
+    guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+          let scheme = components.scheme?.lowercased(),
+          scheme == "irc" || scheme == "ircs",
+          let hostname = components.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !hostname.isEmpty,
+          components.user == nil,
+          components.password == nil else { return nil }
+
+    let useTLS = scheme == "ircs"
+    let port = components.port ?? (useTLS ? 6697 : 6667)
+    guard let parsedPort = UInt16(exactly: port), parsedPort > 0 else { return nil }
+
+    var targets: [IRCURLTarget] = []
+    let pathTarget = components.percentEncodedPath
+      .removingPercentEncoding?
+      .trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
+    if !pathTarget.isEmpty {
+      guard let channel = channel(from: pathTarget, key: nil) else { return nil }
+      targets.append(.channel(channel))
+    } else if let fragment = components.percentEncodedFragment?.removingPercentEncoding,
+              !fragment.isEmpty {
+      // A widespread legacy spelling is irc://server/#channel. In generic
+      // URL syntax the # begins a fragment, so restore it as the channel
+      // prefix for compatibility.
+      guard let channel = channel(from: "#\(fragment)", key: nil) else { return nil }
+      targets.append(.channel(channel))
+    }
+
+    for item in components.queryItems ?? [] {
+      guard let value = item.value?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !value.isEmpty else { continue }
+      switch item.name.lowercased() {
+      case "channel":
+        let fields = value.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
+        let name = String(fields[0])
+        let key = fields.count == 2 && !fields[1].isEmpty ? String(fields[1]) : nil
+        guard let channel = channel(from: name, key: key) else { return nil }
+        targets.append(.channel(channel))
+      case "query":
+        guard isValidIRCURLValue(value) else { return nil }
+        targets.append(.directMessage(value))
+      default:
+        continue
+      }
+    }
+
+    var seenTargets = Set<IRCURLTarget>()
+    targets = targets.filter { seenTargets.insert($0).inserted }
+    return IRCURLRequest(
+      endpoint: IRCOneOffServerEndpoint(
+        hostname: hostname,
+        port: parsedPort,
+        useTLS: useTLS
+      ),
+      targets: targets
+    )
+  }
+
+  private static func channel(from value: String, key: String?) -> IRCURLChannel? {
+    var name = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard isValidIRCURLValue(name) else { return nil }
+    if name.first.map({ "#&+!".contains($0) }) != true {
+      name = "#\(name)"
+    }
+    if let key, !isValidIRCURLValue(key) { return nil }
+    return IRCURLChannel(name: name, key: key)
+  }
+
+  private static func isValidIRCURLValue(_ value: String) -> Bool {
+    !value.isEmpty && !value.unicodeScalars.contains {
+      CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0)
+    }
+  }
+}
+
 struct IRCLineBufferOutput {
   var lines: [String] = []
   var exceededMaximumLineLength = false
