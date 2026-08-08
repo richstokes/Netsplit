@@ -129,6 +129,7 @@ struct ServerProfileTests {
         let profiles = ServerProfile.recommended
         let presetIDs = profiles.compactMap(\.presetID)
         let ircnet = profiles.first { $0.presetID == "ircnet" }
+        let skychatz = profiles.first { $0.presetID == "skychatz" }
 
         #expect(!profiles.isEmpty)
         #expect(presetIDs.count == profiles.count)
@@ -139,6 +140,10 @@ struct ServerProfileTests {
         #expect(ircnet?.hostname == "irc.ircnet.com")
         #expect(ircnet?.port == 6697)
         #expect(ircnet?.useTLS == true)
+        #expect(skychatz?.name == "SkyChatz")
+        #expect(skychatz?.hostname == "java.skychatz.org")
+        #expect(skychatz?.port == 6697)
+        #expect(skychatz?.useTLS == true)
     }
 
     @Test("One invalid saved profile does not discard valid profiles")
