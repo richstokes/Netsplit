@@ -3697,6 +3697,140 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
+    @Test("Revisited transcript keeps its newest message against the bottom inset")
+    @MainActor
+    func bottomAlignsMessagesAppendedWhileConversationIsInactive() async throws {
+        let firstIdentity = SidebarItem.channel(UUID())
+        let secondIdentity = SidebarItem.channel(UUID())
+        var firstMessages = (0..<416).map { index in
+            IRCMessage(sender: "first", text: "First conversation message \(index)")
+        }
+        let secondMessages = (0..<2_534).map { index in
+            IRCMessage(
+                sender: "second",
+                text: index == 418
+                    ? "Outgoing row that must not become the incoming bottom spacer"
+                    : "Second conversation message \(index)"
+            )
+        }
+        var contentIdentity = firstIdentity
+        var messages = firstMessages
+        var initialPositionCount = 0
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 3,
+                    renderConfiguration: "inactive-append-bottom-alignment-test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: message.text.contains("bottom spacer")
+                                        ? 120
+                                        : (message.text.contains("wrapped") ? 46 : 24),
+                                    maxHeight: message.text.contains("bottom spacer")
+                                        ? 120
+                                        : (message.text.contains("wrapped") ? 46 : 24),
+                                    alignment: .leading
+                                )
+                        )
+                    },
+                    onInitialPositioned: { _ in initialPositionCount += 1 },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 1_161, height: 879)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_161, height: 879),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { initialPositionCount == 1 }
+        contentIdentity = secondIdentity
+        messages = secondMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 2 }
+
+        let retainedTableView = try #require(Self.view(
+            withIdentifier: "IRCTranscriptTable",
+            in: hostingController.view
+        ) as? NSTableView)
+        retainedTableView.scrollRowToVisible(419)
+        retainedTableView.layoutSubtreeIfNeeded()
+        try await Self.waitUntil {
+            retainedTableView.rect(ofRow: 419).height > 100
+        }
+        retainedTableView.scrollRowToVisible(retainedTableView.numberOfRows - 1)
+        retainedTableView.layoutSubtreeIfNeeded()
+
+        firstMessages.append(IRCMessage(sender: "first", text: "New message"))
+        firstMessages.append(IRCMessage(sender: "first", text: "New wrapped message"))
+        contentIdentity = firstIdentity
+        messages = firstMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 3 }
+
+        let tableView = try #require(Self.view(
+            withIdentifier: "IRCTranscriptTable",
+            in: hostingController.view
+        ) as? NSTableView)
+        try await Self.waitUntil(timeout: .seconds(3)) {
+            tableView.layoutSubtreeIfNeeded()
+            let newestMessageBottom = tableView.rect(
+                ofRow: firstMessages.count
+            ).maxY
+            let bottomSpacerRect = tableView.rect(
+                ofRow: tableView.numberOfRows - 1
+            )
+            let distanceToTranscriptBottom = bottomSpacerRect.maxY
+                - newestMessageBottom
+            return abs(distanceToTranscriptBottom - 21) <= 0.5
+                && abs(bottomSpacerRect.height - 21) <= 0.5
+        }
+        let newestMessageBottom = tableView.rect(ofRow: firstMessages.count).maxY
+        let bottomSpacerRect = tableView.rect(
+            ofRow: tableView.numberOfRows - 1
+        )
+        let distanceToTranscriptBottom = bottomSpacerRect.maxY
+            - newestMessageBottom
+        let delegate = try #require(tableView.delegate)
+        let bottomSpacerHeight = delegate.tableView?(
+            tableView,
+            heightOfRow: tableView.numberOfRows - 1
+        )
+
+        #expect(abs(distanceToTranscriptBottom - 21) <= 0.5)
+        #expect(abs((bottomSpacerHeight ?? 0) - 18) <= 0.5)
+        #expect(abs(bottomSpacerRect.height - 21) <= 0.5)
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Retained conversation stays bottom-aligned when its viewport height settles")
     @MainActor
     func bottomAlignsRetainedConversationAfterViewportHeightChange() async throws {

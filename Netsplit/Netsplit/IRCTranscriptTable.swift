@@ -444,11 +444,14 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+            if row == messages.count + 1 {
+                return Self.bottomInset
+            }
             guard let message = message(atTableRow: row),
                   let cachedHeight = cachedRowHeight(for: message.id) else {
                 // -1 preserves NSTableView's normal automatic-height path.
-                // Only a genuine cache hit should alter its row estimate;
-                // spacer and never-measured rows behave exactly as before.
+                // Only a genuine message cache hit should alter its estimate;
+                // never-measured message rows use AppKit's normal path.
                 return -1
             }
             return cachedHeight
@@ -1089,14 +1092,21 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     }
                 }
                 let readingAnchor = self.beginReadingPositionRestoration()
-                let messageRows = IndexSet(
-                    integersIn: 1..<(self.messages.count + 1)
+                let messageAndBottomSpacerRows = IndexSet(
+                    integersIn: 1..<tableView.numberOfRows
                 )
                 // Publish measurements before invalidating AppKit's cached
                 // estimates so heightOfRow remains stable between invalidation
-                // points, as required by NSTableViewDelegate.
+                // points, as required by NSTableViewDelegate. Include the
+                // bottom spacer: after a conversation swap, it can occupy an
+                // index that held a tall message in the outgoing table, and
+                // AppKit can otherwise retain that stale automatic-height
+                // proposal as invisible space below the tail. The top spacer
+                // has its own height adjustment and invalidation path.
                 self.cacheRealizedRowHeights(in: tableView)
-                tableView.noteHeightOfRows(withIndexesChanged: messageRows)
+                tableView.noteHeightOfRows(
+                    withIndexesChanged: messageAndBottomSpacerRows
+                )
                 tableView.layoutSubtreeIfNeeded()
                 self.adjustTopSpacerForShortContent()
                 self.finishReadingPositionRestoration(
