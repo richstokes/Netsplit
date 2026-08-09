@@ -131,6 +131,7 @@ struct ServerProfileTests {
         let profiles = ServerProfile.recommended
         let presetIDs = profiles.compactMap(\.presetID)
         let ircnet = profiles.first { $0.presetID == "ircnet" }
+        let scuttled = profiles.first { $0.presetID == "scuttled" }
         let skychatz = profiles.first { $0.presetID == "skychatz" }
 
         #expect(!profiles.isEmpty)
@@ -142,6 +143,10 @@ struct ServerProfileTests {
         #expect(ircnet?.hostname == "irc.ircnet.com")
         #expect(ircnet?.port == 6697)
         #expect(ircnet?.useTLS == true)
+        #expect(scuttled?.name == "Scuttled")
+        #expect(scuttled?.hostname == "irc.scuttled.net")
+        #expect(scuttled?.port == 6697)
+        #expect(scuttled?.useTLS == true)
         #expect(skychatz?.name == "SkyChatz")
         #expect(skychatz?.hostname == "java.skychatz.org")
         #expect(skychatz?.port == 6697)
