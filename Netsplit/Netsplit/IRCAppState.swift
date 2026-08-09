@@ -2238,6 +2238,32 @@ final class IRCAppState: ObservableObject {
             connections[profile.id]?.send(command: "MODE \(argument)")
             let action = fields.count == 1 ? "Requesting modes for \(target)…" : "Changing modes for \(target)…"
             appendSystem(action, for: item)
+        case "OP", "DEOP", "VOICE", "DEVOICE":
+            let defaultChannel: String? = if case .channel(let channelID) = item {
+                channels.first(where: { $0.id == channelID })?.name
+            } else {
+                nil
+            }
+            guard let memberMode = IRCMemberModeCommand.parse(
+                argument,
+                defaultChannel: defaultChannel,
+                channelTypes: features(for: profile.id).channelTypes
+            ) else {
+                appendSystem("Usage: /\(command.lowercased()) [#channel] nickname", for: item)
+                return
+            }
+            guard let operation = IRCMemberModeOperation(command: command) else { return }
+            let membership = features(for: profile.id).membership
+            guard let wireCommand = memberMode.wireCommand(
+                for: operation,
+                membership: membership
+            ) else {
+                appendSystem("This server does not advertise a \(operation.roleName) channel mode.", for: item)
+                return
+            }
+            pendingModeDestinations[modeKey(serverID: profile.id, target: memberMode.channel)] = item
+            connections[profile.id]?.send(command: wireCommand)
+            appendSystem("Changing modes for \(memberMode.channel)…", for: item)
         case "BAN":
             let defaultChannel: String? = if case .channel(let channelID) = item {
                 channels.first(where: { $0.id == channelID })?.name

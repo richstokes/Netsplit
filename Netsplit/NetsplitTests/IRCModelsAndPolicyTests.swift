@@ -813,6 +813,45 @@ struct IRCModelsAndPolicyTests {
         ) == nil)
     }
 
+    @Test("Member mode commands use an explicit channel or fall back to the current channel")
+    func parsesMemberModeCommands() {
+        #expect(IRCMemberModeCommand.parse(
+            "Alice",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == IRCMemberModeCommand(channel: "#swift", nickname: "Alice"))
+        #expect(IRCMemberModeCommand.parse(
+            "&help Alice",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == IRCMemberModeCommand(channel: "&help", nickname: "Alice"))
+        #expect(IRCMemberModeCommand.parse(
+            "Alice",
+            defaultChannel: nil,
+            channelTypes: ["#", "&"]
+        ) == nil)
+        #expect(IRCMemberModeCommand.parse(
+            "#swift",
+            defaultChannel: "#help",
+            channelTypes: ["#", "&"]
+        ) == nil)
+        #expect(IRCMemberModeCommand.parse(
+            "Alice Bob",
+            defaultChannel: "#swift",
+            channelTypes: ["#", "&"]
+        ) == nil)
+
+        let command = IRCMemberModeCommand(channel: "#swift", nickname: "Alice")
+        #expect(command.wireCommand(for: .op, membership: .common) == "MODE #swift +o Alice")
+        #expect(command.wireCommand(for: .deop, membership: .common) == "MODE #swift -o Alice")
+        #expect(command.wireCommand(for: .voice, membership: .common) == "MODE #swift +v Alice")
+        #expect(command.wireCommand(for: .devoice, membership: .common) == "MODE #swift -v Alice")
+
+        let customMembership = IRCMembershipConfiguration(advertisedValue: "(Yw)@+")!
+        #expect(command.wireCommand(for: .op, membership: customMembership) == "MODE #swift +Y Alice")
+        #expect(command.wireCommand(for: .voice, membership: customMembership) == "MODE #swift +w Alice")
+    }
+
     @Test("Custom ban masks match complete member identities with IRC wildcards")
     func matchesCustomBanMasks() {
         let alice = ChannelMember(
@@ -5504,6 +5543,18 @@ struct IRCModelsAndPolicyTests {
         #expect(message.command == "MSG")
         #expect(message.prefix == "ali")
         #expect(String(messageInput[message.range]) == "ali")
+
+        let opInput = "/op ali"
+        let op = try #require(IRCComposerCompletion.recipientContext(in: opInput))
+        #expect(op.command == "OP")
+        #expect(op.prefix == "ali")
+        #expect(String(opInput[op.range]) == "ali")
+
+        let explicitOpInput = "/op #swift ali"
+        let explicitOp = try #require(IRCComposerCompletion.recipientContext(in: explicitOpInput))
+        #expect(explicitOp.command == "OP")
+        #expect(explicitOp.prefix == "ali")
+        #expect(String(explicitOpInput[explicitOp.range]) == "ali")
 
         #expect(IRCComposerCompletion.recipientContext(in: "/join #swift") == nil)
     }

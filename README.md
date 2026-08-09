@@ -143,6 +143,10 @@ These commands require the appropriate server or channel privileges.
 | --- | --- |
 | `/mode <nickname> <flags>` | View or change user modes. |
 | `/mode <#channel> <flags> [arguments]` | View or change channel modes. |
+| `/op [#channel] <nickname>` | Give channel operator status. Defaults to the current channel. |
+| `/deop [#channel] <nickname>` | Remove channel operator status. Defaults to the current channel. |
+| `/voice [#channel] <nickname>` | Give voice status. Defaults to the current channel. |
+| `/devoice [#channel] <nickname>` | Remove voice status. Defaults to the current channel. |
 | `/ban <mask> [#channel] [reason]` | Set a custom ban mask, then kick matching members after the server confirms it. Defaults to the current channel. |
 | `/invite <nickname> <#channel>` | Invite a user to a channel. |
 | `/kick [#channel] <nickname> [reason]` | Remove a user from a channel. Defaults to the current channel. |

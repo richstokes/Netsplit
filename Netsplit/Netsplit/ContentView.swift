@@ -1345,11 +1345,11 @@ private struct ConversationView: View {
     }
 
     private static let supportedCommands = [
-        "AWAY", "BAN", "CLEAR", "CTCP", "DISCONNECT", "HOP", "IGNORE", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
+        "AWAY", "BAN", "CLEAR", "CTCP", "DEOP", "DEVOICE", "DISCONNECT", "HOP", "IGNORE", "INVITE", "JOIN", "KICK", "KILL", "LIST", "ME",
         "MODE", "MOTD", "MSG", "MUTE", "NAMES", "NICK", "NOTICE", "PART",
-        "PING", "QUERY", "QUIT", "SERVER", "SHOWIGNORES", "SHOWMUTES", "SLAP", "TOPIC",
+        "OP", "PING", "QUERY", "QUIT", "SERVER", "SHOWIGNORES", "SHOWMUTES", "SLAP", "TOPIC",
         "UNIGNORE", "UNMUTE", "VERSION",
-        "WHO", "WHOIS"
+        "VOICE", "WHO", "WHOIS"
     ]
 
     private func completeRecipient() -> Bool {
@@ -1403,8 +1403,7 @@ enum IRCComposerCompletion {
         guard commandStart < input.endIndex else { return nil }
         let commandEnd = input[commandStart...].firstIndex(where: { $0.isWhitespace }) ?? input.endIndex
         let command = String(input[commandStart..<commandEnd]).uppercased()
-        guard commandEnd < input.endIndex,
-              let recipientIndex = recipientArgumentIndex(for: command) else { return nil }
+        guard commandEnd < input.endIndex else { return nil }
 
         var tokens: [(text: String, range: Range<String.Index>)] = []
         var index = commandEnd
@@ -1420,18 +1419,26 @@ enum IRCComposerCompletion {
             tokens.append((String(input[start..<index]), start..<index))
         }
 
+        guard let recipientIndex = recipientArgumentIndex(for: command, tokens: tokens) else { return nil }
         guard tokens.count == recipientIndex || tokens.count == recipientIndex + 1 else { return nil }
         if tokens.count == recipientIndex + 1 {
             let token = tokens[recipientIndex]
             return RecipientCompletionContext(command: command, prefix: token.text, range: token.range)
         }
+        guard input.last?.isWhitespace == true else { return nil }
         return RecipientCompletionContext(command: command, prefix: "", range: input.endIndex..<input.endIndex)
     }
 
-    private static func recipientArgumentIndex(for command: String) -> Int? {
+    private static func recipientArgumentIndex(
+        for command: String,
+        tokens: [(text: String, range: Range<String.Index>)]
+    ) -> Int? {
         switch command {
         case "SLAP", "PING", "MSG", "QUERY", "NOTICE", "WHOIS", "CTCP", "VERSION", "IGNORE", "UNIGNORE", "INVITE", "KILL", "WHO", "MODE":
             return 0
+        case "OP", "DEOP", "VOICE", "DEVOICE":
+            let conventionalChannelTypes = Set("#&+!")
+            return tokens.first?.text.first.map(conventionalChannelTypes.contains) == true ? 1 : 0
         case "KICK":
             return 1
         default:

@@ -1813,6 +1813,67 @@ struct IRCKickCommand: Equatable {
     }
 }
 
+enum IRCMemberModeOperation: Equatable {
+    case op
+    case deop
+    case voice
+    case devoice
+
+    init?(command: String) {
+        switch command.uppercased() {
+        case "OP": self = .op
+        case "DEOP": self = .deop
+        case "VOICE": self = .voice
+        case "DEVOICE": self = .devoice
+        default: return nil
+        }
+    }
+
+    var adding: Bool {
+        self == .op || self == .voice
+    }
+
+    var roleName: String {
+        self == .op || self == .deop ? "operator" : "voice"
+    }
+
+    func mode(in membership: IRCMembershipConfiguration) -> Character? {
+        self == .op || self == .deop
+            ? membership.operatorMode
+            : membership.voiceMode
+    }
+}
+
+struct IRCMemberModeCommand: Equatable {
+    var channel: String
+    var nickname: String
+
+    static func parse(
+        _ argument: String,
+        defaultChannel: String?,
+        channelTypes: Set<Character>
+    ) -> IRCMemberModeCommand? {
+        let fields = argument.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let first = fields.first, !first.isEmpty else { return nil }
+
+        let hasExplicitChannel = first.first.map(channelTypes.contains) == true
+        let channel = hasExplicitChannel ? first : defaultChannel
+        let nicknameIndex = hasExplicitChannel ? 1 : 0
+        guard let channel, !channel.isEmpty,
+              fields.count == nicknameIndex + 1 else { return nil }
+
+        return IRCMemberModeCommand(channel: channel, nickname: fields[nicknameIndex])
+    }
+
+    func wireCommand(
+        for operation: IRCMemberModeOperation,
+        membership: IRCMembershipConfiguration
+    ) -> String? {
+        guard let mode = operation.mode(in: membership) else { return nil }
+        return "MODE \(channel) \(operation.adding ? "+" : "-")\(mode) \(nickname)"
+    }
+}
+
 enum IRCBanConfirmationPolicy {
     static func pendingMaskIndex(
         in pendingMasks: [String],
