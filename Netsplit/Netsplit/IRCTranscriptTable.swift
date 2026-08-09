@@ -610,13 +610,23 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 self.positionAtTail()
                 self.adjustTopSpacerForShortContent()
                 self.positionAtTail()
-                // AppKit can consider a stale, oversized automatic row to be
-                // visible without asking the delegate for its view. Explicitly
-                // realize every intersecting message row so its hosted SwiftUI
-                // content can publish the exact height before the scroll view
-                // is revealed.
-                self.realizeVisibleMessageRows(in: tableView)
+                // Positioning can realize a new set of tail cells after the
+                // deferred full-height sweep has already run. Reconcile every
+                // intersecting message now so a recycled cell's previous
+                // intrinsic height cannot survive until the next append.
+                let reconciledVisibleRows = self.reconcileVisibleMessageRows(
+                    in: tableView
+                )
                 tableView.layoutSubtreeIfNeeded()
+                if reconciledVisibleRows {
+                    self.adjustTopSpacerForShortContent()
+                    self.positionAtTail()
+                    // Height correction can bring one more row into the
+                    // viewport. Verify the now-stable visible set on the next
+                    // run-loop turn before revealing the transcript.
+                    self.scheduleInitialPosition()
+                    return
+                }
                 guard !self.hasPendingInitialLayoutWork else {
                     // Positioning realizes the tail rows and can discover the
                     // viewport width for the first time. Let the resulting
@@ -1320,54 +1330,60 @@ struct IRCTranscriptTable: NSViewRepresentable {
             return cell.hostingView
         }
 
-        private func realizeVisibleMessageRows(in tableView: NSTableView) {
+        private func reconcileVisibleMessageRows(in tableView: NSTableView) -> Bool {
             let visibleRows = tableView.rows(in: tableView.visibleRect)
-            guard visibleRows.location != NSNotFound else { return }
+            guard visibleRows.location != NSNotFound else { return false }
+            var changedRows = IndexSet()
 #if DEBUG
-            var suspiciousRows: [String] = []
-            let suspiciousHeight = max(120, parent.estimatedRowHeight * 4)
+            var reconciledRows: [String] = []
 #endif
             for row in visibleRows.location..<NSMaxRange(visibleRows) {
                 guard let message = message(atTableRow: row) else { continue }
-                let existingView = tableView.view(
-                    atColumn: 0,
-                    row: row,
-                    makeIfNecessary: false
-                )
-                guard existingView == nil else { continue }
-#if DEBUG
-                let rowHeight = tableView.rect(ofRow: row).height
-#endif
-                _ = tableView.view(
+                guard let cell = tableView.view(
                     atColumn: 0,
                     row: row,
                     makeIfNecessary: true
+                ) as? TranscriptMessageCellView,
+                      cell.hostingView.hasHostedContent,
+                      cell.hostingView.representedMessageID == message.id else { continue }
+
+                cell.hostingView.layoutSubtreeIfNeeded()
+                let proposedHeight = cell.hostingView.fittingSize.height
+                guard proposedHeight.isFinite, proposedHeight > 0 else { continue }
+
+                let currentHeight = max(
+                    0,
+                    tableView.rect(ofRow: row).height
+                        - tableView.intercellSpacing.height
                 )
+                let previousCachedHeight = cachedRowHeight(for: message.id)
+                cacheRowHeight(proposedHeight, for: message.id)
+                let cachedHeightChanged = previousCachedHeight.map {
+                    abs($0 - proposedHeight) > 0.5
+                } ?? false
+                guard cachedHeightChanged
+                      || abs(currentHeight - proposedHeight) > 0.5 else { continue }
+                changedRows.insert(row)
 #if DEBUG
-                if rowHeight > suspiciousHeight {
-                    let messageDescription = String(message.id.uuidString.prefix(8))
-                    let isRealized = tableView.view(
-                        atColumn: 0,
-                        row: row,
-                        makeIfNecessary: false
-                    ) != nil
-                    suspiciousRows.append(
-                        "\(row)/\(messageDescription)"
-                            + "/\(String(format: "%.1f", rowHeight))"
-                            + "/\(isRealized ? "realized" : "missing")"
-                    )
-                }
+                reconciledRows.append(
+                    "\(row)/\(String(message.id.uuidString.prefix(8)))"
+                        + "/\(String(format: "%.1f", currentHeight))"
+                        + "->\(String(format: "%.1f", proposedHeight))"
+                )
 #endif
             }
+
+            guard !changedRows.isEmpty else { return false }
+            tableView.noteHeightOfRows(withIndexesChanged: changedRows)
+            tableView.layoutSubtreeIfNeeded()
 #if DEBUG
-            if !suspiciousRows.isEmpty {
-                parent.onGeometryChange?(
-                    "oversized-visible-rows-forced count=\(suspiciousRows.count) "
-                        + "rows=\(suspiciousRows.prefix(4).joined(separator: ","))",
-                    geometry()
-                )
-            }
+            parent.onGeometryChange?(
+                "visible-row-heights-reconciled count=\(changedRows.count) "
+                    + "rows=\(reconciledRows.prefix(4).joined(separator: ","))",
+                geometry()
+            )
 #endif
+            return true
         }
 
         private func cachedRowHeight(for messageID: UUID) -> CGFloat? {

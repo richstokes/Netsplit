@@ -3829,11 +3829,17 @@ struct IRCModelsAndPolicyTests {
             IRCMessage(sender: "first", text: "First conversation message \(index)")
         }
         let secondMessages = (0..<2_534).map { index in
-            IRCMessage(
+            let text: String
+            if index == 416 {
+                text = "Outgoing tall row that must not become an incoming tail message"
+            } else if index == 418 {
+                text = "Outgoing row that must not become the incoming bottom spacer"
+            } else {
+                text = "Second conversation message \(index)"
+            }
+            return IRCMessage(
                 sender: "second",
-                text: index == 418
-                    ? "Outgoing row that must not become the incoming bottom spacer"
-                    : "Second conversation message \(index)"
+                text: text
             )
         }
         var contentIdentity = firstIdentity
@@ -3853,10 +3859,10 @@ struct IRCModelsAndPolicyTests {
                             Text(message.text)
                                 .frame(
                                     maxWidth: .infinity,
-                                    minHeight: message.text.contains("bottom spacer")
+                                    minHeight: message.text.contains("Outgoing")
                                         ? 120
                                         : (message.text.contains("wrapped") ? 46 : 24),
-                                    maxHeight: message.text.contains("bottom spacer")
+                                    maxHeight: message.text.contains("Outgoing")
                                         ? 120
                                         : (message.text.contains("wrapped") ? 46 : 24),
                                     alignment: .leading
