@@ -444,15 +444,25 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+            if row == 0 {
+                return topSpacerHeight
+            }
             if row == messages.count + 1 {
                 return Self.bottomInset
             }
-            guard let message = message(atTableRow: row),
-                  let cachedHeight = cachedRowHeight(for: message.id) else {
-                // -1 preserves NSTableView's normal automatic-height path.
-                // Only a genuine message cache hit should alter its estimate;
-                // never-measured message rows use AppKit's normal path.
+            guard let message = message(atTableRow: row) else {
                 return -1
+            }
+            guard let cachedHeight = cachedRowHeight(for: message.id) else {
+                // A retained NSTableView keeps automatic-height proposals by
+                // row index across reloadData. During initial/replacement
+                // layout, an incoming message received while inactive has no
+                // cached measurement and can otherwise inherit a wildly
+                // different outgoing row's height. Seed every unmeasured row
+                // with this transcript's clean estimate while it remains
+                // hidden; realized rows publish their exact intrinsic height
+                // before initial positioning completes.
+                return hasPositionedInitially ? -1 : parent.estimatedRowHeight
             }
             return cachedHeight
         }
@@ -600,6 +610,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 self.positionAtTail()
                 self.adjustTopSpacerForShortContent()
                 self.positionAtTail()
+                // AppKit can consider a stale, oversized automatic row to be
+                // visible without asking the delegate for its view. Explicitly
+                // realize every intersecting message row so its hosted SwiftUI
+                // content can publish the exact height before the scroll view
+                // is revealed.
+                self.realizeVisibleMessageRows(in: tableView)
+                tableView.layoutSubtreeIfNeeded()
                 guard !self.hasPendingInitialLayoutWork else {
                     // Positioning realizes the tail rows and can discover the
                     // viewport width for the first time. Let the resulting
@@ -1301,6 +1318,56 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 return nil
             }
             return cell.hostingView
+        }
+
+        private func realizeVisibleMessageRows(in tableView: NSTableView) {
+            let visibleRows = tableView.rows(in: tableView.visibleRect)
+            guard visibleRows.location != NSNotFound else { return }
+#if DEBUG
+            var suspiciousRows: [String] = []
+            let suspiciousHeight = max(120, parent.estimatedRowHeight * 4)
+#endif
+            for row in visibleRows.location..<NSMaxRange(visibleRows) {
+                guard let message = message(atTableRow: row) else { continue }
+                let existingView = tableView.view(
+                    atColumn: 0,
+                    row: row,
+                    makeIfNecessary: false
+                )
+                guard existingView == nil else { continue }
+#if DEBUG
+                let rowHeight = tableView.rect(ofRow: row).height
+#endif
+                _ = tableView.view(
+                    atColumn: 0,
+                    row: row,
+                    makeIfNecessary: true
+                )
+#if DEBUG
+                if rowHeight > suspiciousHeight {
+                    let messageDescription = String(message.id.uuidString.prefix(8))
+                    let isRealized = tableView.view(
+                        atColumn: 0,
+                        row: row,
+                        makeIfNecessary: false
+                    ) != nil
+                    suspiciousRows.append(
+                        "\(row)/\(messageDescription)"
+                            + "/\(String(format: "%.1f", rowHeight))"
+                            + "/\(isRealized ? "realized" : "missing")"
+                    )
+                }
+#endif
+            }
+#if DEBUG
+            if !suspiciousRows.isEmpty {
+                parent.onGeometryChange?(
+                    "oversized-visible-rows-forced count=\(suspiciousRows.count) "
+                        + "rows=\(suspiciousRows.prefix(4).joined(separator: ","))",
+                    geometry()
+                )
+            }
+#endif
         }
 
         private func cachedRowHeight(for messageID: UUID) -> CGFloat? {

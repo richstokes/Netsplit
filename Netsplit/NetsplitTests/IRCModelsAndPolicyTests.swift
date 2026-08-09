@@ -3797,6 +3797,8 @@ struct IRCModelsAndPolicyTests {
             withIdentifier: "IRCTranscriptTable",
             in: hostingController.view
         ) as? NSTableView)
+        let normalMessageRow = firstMessages.count - 1
+        let wrappedMessageRow = firstMessages.count
         try await Self.waitUntil(timeout: .seconds(3)) {
             tableView.layoutSubtreeIfNeeded()
             let newestMessageBottom = tableView.rect(
@@ -3807,8 +3809,16 @@ struct IRCModelsAndPolicyTests {
             )
             let distanceToTranscriptBottom = bottomSpacerRect.maxY
                 - newestMessageBottom
+            let normalMessageHeight = tableView.rect(
+                ofRow: normalMessageRow
+            ).height
+            let wrappedMessageHeight = tableView.rect(
+                ofRow: wrappedMessageRow
+            ).height
             return abs(distanceToTranscriptBottom - 21) <= 0.5
                 && abs(bottomSpacerRect.height - 21) <= 0.5
+                && abs(normalMessageHeight - 27) <= 0.5
+                && abs(wrappedMessageHeight - 49) <= 0.5
         }
         let newestMessageBottom = tableView.rect(ofRow: firstMessages.count).maxY
         let bottomSpacerRect = tableView.rect(
@@ -3825,10 +3835,32 @@ struct IRCModelsAndPolicyTests {
         #expect(abs(distanceToTranscriptBottom - 21) <= 0.5)
         #expect(abs((bottomSpacerHeight ?? 0) - 18) <= 0.5)
         #expect(abs(bottomSpacerRect.height - 21) <= 0.5)
+        #expect(abs(tableView.rect(ofRow: normalMessageRow).height - 27) <= 0.5)
+        #expect(abs(tableView.rect(ofRow: wrappedMessageRow).height - 49) <= 0.5)
 
         hostingController.rootView = AnyView(EmptyView())
         hostingController.view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(50))
+    }
+
+    @Test("Unmeasured rows start from a clean height estimate")
+    @MainActor
+    func estimatesUnmeasuredRowsBeforeInitialPositioning() {
+        let message = IRCMessage(sender: "tester", text: "Unmeasured message")
+        let transcript = IRCTranscriptTable(
+            contentIdentity: .channel(UUID()),
+            messages: [message],
+            estimatedRowHeight: 24,
+            rowSpacing: 3,
+            renderConfiguration: "unmeasured-row-estimate-test",
+            makeRow: { _ in AnyView(Color.clear.frame(height: 24)) }
+        )
+        let coordinator = transcript.makeCoordinator()
+        let tableView = NSTableView()
+
+        #expect(coordinator.tableView(tableView, heightOfRow: 0) == 18)
+        #expect(coordinator.tableView(tableView, heightOfRow: 1) == 24)
+        #expect(coordinator.tableView(tableView, heightOfRow: 2) == 18)
     }
 
     @Test("Retained conversation stays bottom-aligned when its viewport height settles")
