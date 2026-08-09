@@ -3843,24 +3843,33 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
-    @Test("Unmeasured rows start from a clean height estimate")
+    @Test("Every initial transcript row category has an explicit height")
     @MainActor
-    func estimatesUnmeasuredRowsBeforeInitialPositioning() {
-        let message = IRCMessage(sender: "tester", text: "Unmeasured message")
+    func assignsExplicitHeightsToEveryInitialRowCategory() {
+        let messages = [
+            IRCMessage(sender: "tester", text: "First message"),
+            IRCMessage(sender: "tester", text: "Last message")
+        ]
         let transcript = IRCTranscriptTable(
             contentIdentity: .channel(UUID()),
-            messages: [message],
+            messages: messages,
             estimatedRowHeight: 24,
             rowSpacing: 3,
-            renderConfiguration: "unmeasured-row-estimate-test",
+            renderConfiguration: "initial-row-category-height-test",
             makeRow: { _ in AnyView(Color.clear.frame(height: 24)) }
         )
         let coordinator = transcript.makeCoordinator()
         let tableView = NSTableView()
+        let rowCount = coordinator.numberOfRows(in: tableView)
+        let rowHeights = (0..<rowCount).map {
+            coordinator.tableView(tableView, heightOfRow: $0)
+        }
 
-        #expect(coordinator.tableView(tableView, heightOfRow: 0) == 18)
-        #expect(coordinator.tableView(tableView, heightOfRow: 1) == 24)
-        #expect(coordinator.tableView(tableView, heightOfRow: 2) == 18)
+        #expect(rowCount == messages.count + 2)
+        #expect(rowHeights == [18, 24, 24, 18])
+        #expect(!rowHeights.contains(-1))
+        #expect(coordinator.tableView(tableView, heightOfRow: -1) == -1)
+        #expect(coordinator.tableView(tableView, heightOfRow: rowCount) == -1)
     }
 
     @Test("Retained conversation stays bottom-aligned when its viewport height settles")
