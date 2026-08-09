@@ -1,10 +1,19 @@
 import Foundation
 import Network
+import NIOSSL
 import Testing
 @testable import Netsplit
 
 @Suite("IRC transport boundaries")
 struct IRCTransportBoundaryTests {
+    @Test("SSH TLS supports servers that require secp521r1")
+    func sshTLSSupportsSecp521r1() {
+        let configuration = SSHTunnelTLSPolicy.makeClientConfiguration()
+
+        #expect(configuration.curves == SSHTunnelTLSPolicy.supportedCurves)
+        #expect(configuration.curves?.contains(.secp521r1) == true)
+    }
+
     @Test("Reassembles a line when both content and CRLF cross packet boundaries")
     func reassemblesFragmentedLine() {
         var buffer = IRCLineBuffer(maximumLineBytes: 510)

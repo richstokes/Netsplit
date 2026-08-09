@@ -23,6 +23,23 @@ struct SSHTunnelConfiguration: Sendable {
     var useTLS: Bool
 }
 
+enum SSHTunnelTLSPolicy {
+    nonisolated static let supportedCurves: [NIOTLSCurve] = [
+        .x25519_MLKEM768,
+        .x25519,
+        .secp256r1,
+        .secp384r1,
+        .secp521r1
+    ]
+
+    nonisolated static func makeClientConfiguration() -> TLSConfiguration {
+        var configuration = TLSConfiguration.makeClientConfiguration()
+        configuration.certificateVerification = .fullVerification
+        configuration.curves = supportedCurves
+        return configuration
+    }
+}
+
 enum SSHTunnelError: LocalizedError {
     case invalidPrivateKey
     case unsupportedPrivateKeyType
@@ -183,8 +200,7 @@ final class SSHTunnelConnection {
                             }
                         )
                         if configuration.useTLS {
-                            var tls = TLSConfiguration.makeClientConfiguration()
-                            tls.certificateVerification = .fullVerification
+                            let tls = SSHTunnelTLSPolicy.makeClientConfiguration()
                             let context = try NIOSSLContext(configuration: tls)
                             let tlsHandler = try NIOSSLClientHandler(
                                 context: context,
