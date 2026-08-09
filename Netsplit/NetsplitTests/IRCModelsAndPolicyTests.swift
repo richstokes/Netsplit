@@ -2941,6 +2941,33 @@ struct IRCModelsAndPolicyTests {
         #expect(state.selection == .server(profile.id))
     }
 
+    @Test("Favorited direct messages reopen when the server registers")
+    @MainActor
+    func reopensFavoritedDirectMessagesOnConnect() throws {
+        let state = IRCAppState()
+        let originalProfile = try #require(state.profiles.first)
+        let nickname = "FavoriteDM\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        state.startDirectMessage(with: nickname, from: .server(originalProfile.id))
+        let directMessage = try #require(state.directMessages.first { $0.name == nickname })
+
+        state.toggleFavoriteDirectMessage(directMessage)
+        #expect(state.isFavoriteDirectMessage(directMessage))
+        state.close(directMessage)
+        #expect(!state.directMessages.contains { $0.name == nickname })
+
+        let updatedProfile = try #require(state.profiles.first { $0.id == originalProfile.id })
+        let welcome = try #require(IRCWireMessage(
+            line: ":irc.example.org 001 NetsplitUser :Welcome"
+        ))
+        state.handle(welcome, profile: updatedProfile)
+
+        let reopened = try #require(state.directMessages.first { $0.name == nickname })
+        #expect(state.isFavoriteDirectMessage(reopened))
+        #expect(state.selection == .server(originalProfile.id))
+
+        state.toggleFavoriteDirectMessage(reopened)
+    }
+
     @Test("Conversation mute state toggles with IRC case mapping")
     @MainActor
     func togglesConversationMuteStateUsingIRCCaseMapping() throws {

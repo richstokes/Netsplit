@@ -79,6 +79,7 @@ struct ServerProfileTests {
         #expect(profile.realNameOverride == nil)
         #expect(profile.mentionNotificationsOverride == nil)
         #expect(profile.favoriteChannels == nil)
+        #expect(profile.favoriteDirectMessages == nil)
         #expect(profile.ignoredNicknames == nil)
         #expect(profile.mutedConversationNames == nil)
         #expect(profile.useSASL == nil)
@@ -107,6 +108,7 @@ struct ServerProfileTests {
             realNameOverride: "Alice Example",
             mentionNotificationsOverride: true,
             favoriteChannels: ["#swift"],
+            favoriteDirectMessages: ["Bob"],
             ignoredNicknames: ["bot"],
             mutedConversationNames: ["#quiet", "Bob"],
             useSASL: true,

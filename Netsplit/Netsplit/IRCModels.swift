@@ -228,6 +228,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     var mentionNotificationsOverride: Bool?
     var isPresetModified: Bool?
     var favoriteChannels: [String]?
+    var favoriteDirectMessages: [String]?
     var ignoredNicknames: [String]?
     var mutedConversationNames: [String]?
     var useSASL: Bool?
@@ -258,6 +259,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         mentionNotificationsOverride: Bool? = nil,
         isPresetModified: Bool? = nil,
         favoriteChannels: [String]? = nil,
+        favoriteDirectMessages: [String]? = nil,
         ignoredNicknames: [String]? = nil,
         mutedConversationNames: [String]? = nil,
         useSASL: Bool? = nil,
@@ -282,6 +284,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         self.mentionNotificationsOverride = mentionNotificationsOverride
         self.isPresetModified = isPresetModified
         self.favoriteChannels = favoriteChannels
+        self.favoriteDirectMessages = favoriteDirectMessages
         self.ignoredNicknames = ignoredNicknames
         self.mutedConversationNames = mutedConversationNames
         self.useSASL = useSASL
@@ -297,7 +300,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, hostname, port, useTLS, autoConnect, isBuiltIn
-        case nicknameOverride, realNameOverride, mentionNotificationsOverride, isPresetModified, favoriteChannels
+        case nicknameOverride, realNameOverride, mentionNotificationsOverride, isPresetModified, favoriteChannels, favoriteDirectMessages
         case ignoredNicknames, mutedConversationNames
         case useSASL, saslUsername
         case useSSHTunnel, sshHostname, sshPort, sshUsername, sshKeyFilename, sshTrustedHostKey, presetID
@@ -322,6 +325,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         mentionNotificationsOverride = try container.decodeIfPresent(Bool.self, forKey: .mentionNotificationsOverride)
         isPresetModified = try container.decodeIfPresent(Bool.self, forKey: .isPresetModified)
         favoriteChannels = try container.decodeIfPresent([String].self, forKey: .favoriteChannels)
+        favoriteDirectMessages = try container.decodeIfPresent([String].self, forKey: .favoriteDirectMessages)
         ignoredNicknames = try container.decodeIfPresent([String].self, forKey: .ignoredNicknames)
             ?? legacyContainer.decodeIfPresent([String].self, forKey: .mutedNicknames)
         mutedConversationNames = try container.decodeIfPresent([String].self, forKey: .mutedConversationNames)
@@ -442,6 +446,7 @@ enum ServerProfileStore {
             current.autoConnect = profile.autoConnect
             current.mentionNotificationsOverride = profile.mentionNotificationsOverride
             current.favoriteChannels = profile.favoriteChannels
+            current.favoriteDirectMessages = profile.favoriteDirectMessages
             current.ignoredNicknames = profile.ignoredNicknames
             current.mutedConversationNames = profile.mutedConversationNames
             current.useSASL = profile.useSASL

@@ -292,6 +292,12 @@ private struct SidebarView: View {
                                         .foregroundStyle(.tertiary)
                                         .accessibilityHidden(true)
                                 }
+                                if state.isFavoriteDirectMessage(message) {
+                                    Image(systemName: "star.fill")
+                                        .font(.system(size: textMetrics.size(10)))
+                                        .foregroundStyle(.tertiary)
+                                        .accessibilityHidden(true)
+                                }
                             }
                                 .foregroundStyle(message.hasUnread ? .primary : .secondary)
                                 .font(.system(size: textMetrics.size(15), weight: message.hasUnread ? .semibold : .regular))
@@ -299,6 +305,9 @@ private struct SidebarView: View {
                                 .tag(SidebarItem.directMessage(message.id))
                                 .accessibilityValue(directMessageAccessibilityValue(message))
                                 .contextMenu {
+                                    Button(state.isFavoriteDirectMessage(message) ? "Unfavorite" : "Favorite", systemImage: state.isFavoriteDirectMessage(message) ? "star.slash" : "star") {
+                                        state.toggleFavoriteDirectMessage(message)
+                                    }
                                     Button(state.isMuted(message) ? "Unmute Conversation" : "Mute Conversation", systemImage: state.isMuted(message) ? "bell" : "bell.slash") {
                                         if state.isMuted(message) {
                                             state.unmute(message)
@@ -455,6 +464,7 @@ private struct SidebarView: View {
 
     private func directMessageAccessibilityValue(_ message: Conversation) -> String {
         var values = [message.hasUnread ? "Unread messages" : "No unread messages"]
+        if state.isFavoriteDirectMessage(message) { values.append("Favorite") }
         if state.isMuted(message) { values.append("Muted") }
         return values.joined(separator: ", ")
     }

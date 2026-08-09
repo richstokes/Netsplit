@@ -663,6 +663,27 @@ final class IRCAppState: ObservableObject {
         saveProfiles()
     }
 
+    func isFavoriteDirectMessage(_ directMessage: Conversation) -> Bool {
+        guard let profile = profiles.first(where: { $0.id == directMessage.serverID }) else { return false }
+        return profile.favoriteDirectMessages?.contains {
+            identifiersEqual($0, directMessage.name, serverID: profile.id)
+        } ?? false
+    }
+
+    func toggleFavoriteDirectMessage(_ directMessage: Conversation) {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == directMessage.serverID }) else { return }
+        var favorites = profiles[profileIndex].favoriteDirectMessages ?? []
+        if let index = favorites.firstIndex(where: {
+            identifiersEqual($0, directMessage.name, serverID: directMessage.serverID)
+        }) {
+            favorites.remove(at: index)
+        } else {
+            favorites.append(directMessage.name)
+        }
+        profiles[profileIndex].favoriteDirectMessages = favorites.isEmpty ? nil : favorites
+        saveProfiles()
+    }
+
     func isIgnored(_ nickname: String, from item: SidebarItem) -> Bool {
         ignoreSnapshot(for: item)?.contains(nickname) ?? false
     }
@@ -1229,6 +1250,7 @@ final class IRCAppState: ObservableObject {
         preset.autoConnect = profile.autoConnect
         preset.mentionNotificationsOverride = profile.mentionNotificationsOverride
         preset.favoriteChannels = profile.favoriteChannels
+        preset.favoriteDirectMessages = profile.favoriteDirectMessages
         preset.ignoredNicknames = profile.ignoredNicknames
         preset.mutedConversationNames = profile.mutedConversationNames
         preset.useSASL = profile.useSASL
@@ -1835,6 +1857,25 @@ final class IRCAppState: ObservableObject {
             messagesDidChange(for: conversation.id)
         }
         selection = .directMessage(conversation.id)
+    }
+
+    private func openFavoriteDirectMessages(for serverID: UUID) {
+        guard let favoriteNames = profiles.first(where: { $0.id == serverID })?.favoriteDirectMessages else { return }
+        var openedNames = Set<String>()
+        for favoriteName in favoriteNames {
+            let nickname = favoriteName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !nickname.isEmpty,
+                  openedNames.insert(normalizedIdentifier(nickname, serverID: serverID)).inserted else { continue }
+            let conversation = directMessage(named: nickname, serverID: serverID)
+            if conversations[conversation.id] == nil {
+                conversations[conversation.id] = [IRCMessage(
+                    sender: "System",
+                    text: "Private conversation with \(nickname).",
+                    isSystem: true
+                )]
+                messagesDidChange(for: conversation.id)
+            }
+        }
     }
 
     func requestWhois(for nickname: String, from item: SidebarItem) {
@@ -2536,6 +2577,7 @@ final class IRCAppState: ObservableObject {
             connectionStatuses[profile.id] = .online
             cancelScheduledReconnect(for: profile.id, resetAttempts: true)
             appendSystem(wire.trailing ?? "Connected.", for: .server(profile.id))
+            openFavoriteDirectMessages(for: profile.id)
             requestMOTD(
                 from: profile,
                 deliveringTo: .server(profile.id),
@@ -4000,6 +4042,11 @@ final class IRCAppState: ObservableObject {
             to: newNickname,
             serverID: serverID
         )
+        renameFavoriteDirectMessage(
+            from: oldNickname,
+            to: newNickname,
+            serverID: serverID
+        )
         var affectedConversationIDs = [oldConversation.id]
         var retiresOldConversation = false
         if let newIndex = directMessages.firstIndex(where: {
@@ -4064,6 +4111,24 @@ final class IRCAppState: ObservableObject {
             mutedNames[oldIndex] = newName
         }
         profiles[profileIndex].mutedConversationNames = mutedNames.isEmpty ? nil : mutedNames
+        saveProfiles()
+    }
+
+    private func renameFavoriteDirectMessage(from oldName: String, to newName: String, serverID: UUID) {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == serverID }),
+              var favoriteNames = profiles[profileIndex].favoriteDirectMessages,
+              let oldIndex = favoriteNames.firstIndex(where: {
+                  identifiersEqual($0, oldName, serverID: serverID)
+              }) else { return }
+
+        if favoriteNames.indices.contains(where: {
+            $0 != oldIndex && identifiersEqual(favoriteNames[$0], newName, serverID: serverID)
+        }) {
+            favoriteNames.remove(at: oldIndex)
+        } else {
+            favoriteNames[oldIndex] = newName
+        }
+        profiles[profileIndex].favoriteDirectMessages = favoriteNames.isEmpty ? nil : favoriteNames
         saveProfiles()
     }
 
