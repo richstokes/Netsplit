@@ -1463,9 +1463,10 @@ struct IRCModelsAndPolicyTests {
     func retainsUnmatchedSelfNotices() throws {
         let state = IRCAppState()
         let profile = try #require(state.profiles.first)
+        let nickname = configuredNickname(in: state, for: profile)
         state.handle(
             try #require(IRCWireMessage(
-                line: "@msgid=notice-2 :\(state.nickname)!user@example.org NOTICE Alice :hello"
+                line: "@msgid=notice-2 :\(nickname)!user@example.org NOTICE Alice :hello"
             )),
             profile: profile
         )
@@ -1487,7 +1488,7 @@ struct IRCModelsAndPolicyTests {
     func deduplicatesSelfTargetedLabeledNotices() throws {
         let state = IRCAppState()
         let profile = try #require(state.profiles.first)
-        let nickname = state.nickname
+        let nickname = configuredNickname(in: state, for: profile)
 
         state.handle(
             try #require(IRCWireMessage(
@@ -1521,7 +1522,10 @@ struct IRCModelsAndPolicyTests {
 
         let reverseOrderState = IRCAppState()
         let reverseOrderProfile = try #require(reverseOrderState.profiles.first)
-        let reverseOrderNickname = reverseOrderState.nickname
+        let reverseOrderNickname = configuredNickname(
+            in: reverseOrderState,
+            for: reverseOrderProfile
+        )
         reverseOrderState.handle(
             try #require(IRCWireMessage(
                 line: "@msgid=notice-self-2 :\(reverseOrderNickname)!user@example.org NOTICE \(reverseOrderNickname) :hello"
@@ -2649,7 +2653,7 @@ struct IRCModelsAndPolicyTests {
     func suppressesChannelActivityImmediatelyAfterJoining() throws {
         let state = IRCAppState()
         let profile = try #require(state.profiles.first)
-        let nickname = state.nickname
+        let nickname = configuredNickname(in: state, for: profile)
 
         state.handle(
             try #require(IRCWireMessage(line: ":\(nickname)!user@example.org JOIN #welcome")),
@@ -2668,6 +2672,12 @@ struct IRCModelsAndPolicyTests {
             for: .channel(channel.id),
             channelEventVisibility: .alwaysShow
         ).contains { $0.text == "Welcome!" })
+    }
+
+    @MainActor
+    private func configuredNickname(in state: IRCAppState, for profile: ServerProfile) -> String {
+        let nicknameOverride = profile.nicknameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return nicknameOverride.isEmpty ? state.nickname : nicknameOverride
     }
 
     @Test("Marking a server read clears only that server's conversation activity")
@@ -2946,12 +2956,26 @@ struct IRCModelsAndPolicyTests {
     func reopensFavoritedDirectMessagesOnConnect() throws {
         let state = IRCAppState()
         let originalProfile = try #require(state.profiles.first)
-        let nickname = "FavoriteDM\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let suffix = UUID().uuidString.prefix(4)
+        let nickname = "F\(suffix)[D]"
         state.startDirectMessage(with: nickname, from: .server(originalProfile.id))
         let directMessage = try #require(state.directMessages.first { $0.name == nickname })
 
+        let wasFavorite = state.isFavoriteDirectMessage(directMessage)
         state.toggleFavoriteDirectMessage(directMessage)
+        defer {
+            if state.isFavoriteDirectMessage(directMessage) != wasFavorite {
+                state.toggleFavoriteDirectMessage(directMessage)
+            }
+        }
         #expect(state.isFavoriteDirectMessage(directMessage))
+        let equivalentNickname = nickname.lowercased()
+            .replacingOccurrences(of: "[", with: "{")
+            .replacingOccurrences(of: "]", with: "}")
+        #expect(state.isFavoriteDirectMessage(Conversation(
+            name: equivalentNickname,
+            serverID: originalProfile.id
+        )))
         state.close(directMessage)
         #expect(!state.directMessages.contains { $0.name == nickname })
 
@@ -2964,8 +2988,41 @@ struct IRCModelsAndPolicyTests {
         let reopened = try #require(state.directMessages.first { $0.name == nickname })
         #expect(state.isFavoriteDirectMessage(reopened))
         #expect(state.selection == .server(originalProfile.id))
+    }
 
-        state.toggleFavoriteDirectMessage(reopened)
+    @Test("A favorited direct message follows the peer's nickname change")
+    @MainActor
+    func renamesFavoritedDirectMessages() throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        let suffix = UUID().uuidString.prefix(4)
+        let oldNickname = "A\(suffix)"
+        let newNickname = "B\(suffix)"
+        state.startDirectMessage(with: oldNickname, from: .server(profile.id))
+        let oldDirectMessage = try #require(state.directMessages.first { $0.name == oldNickname })
+        let newDirectMessage = Conversation(name: newNickname, serverID: profile.id)
+        let wasOldFavorite = state.isFavoriteDirectMessage(oldDirectMessage)
+        let wasNewFavorite = state.isFavoriteDirectMessage(newDirectMessage)
+
+        state.toggleFavoriteDirectMessage(oldDirectMessage)
+        defer {
+            if state.isFavoriteDirectMessage(oldDirectMessage) != wasOldFavorite {
+                state.toggleFavoriteDirectMessage(oldDirectMessage)
+            }
+            if state.isFavoriteDirectMessage(newDirectMessage) != wasNewFavorite {
+                state.toggleFavoriteDirectMessage(newDirectMessage)
+            }
+        }
+        state.handle(
+            try #require(IRCWireMessage(
+                line: ":\(oldNickname)!user@example.org NICK :\(newNickname)"
+            )),
+            profile: profile
+        )
+
+        let renamed = try #require(state.directMessages.first { $0.name == newNickname })
+        #expect(state.isFavoriteDirectMessage(renamed))
+        #expect(!state.isFavoriteDirectMessage(oldDirectMessage))
     }
 
     @Test("Conversation mute state toggles with IRC case mapping")

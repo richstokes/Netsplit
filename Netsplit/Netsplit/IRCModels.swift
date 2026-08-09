@@ -228,6 +228,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     var mentionNotificationsOverride: Bool?
     var isPresetModified: Bool?
     var favoriteChannels: [String]?
+    /// Nicknames whose direct-message conversations should open after registration.
     var favoriteDirectMessages: [String]?
     var ignoredNicknames: [String]?
     var mutedConversationNames: [String]?

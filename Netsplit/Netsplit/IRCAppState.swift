@@ -1826,15 +1826,7 @@ final class IRCAppState: ObservableObject {
                     destination: .server(profile.id)
                 )
             case .directMessage(let nickname):
-                let conversation = directMessage(named: nickname, serverID: profile.id)
-                if conversations[conversation.id] == nil {
-                    conversations[conversation.id] = [IRCMessage(
-                        sender: "System",
-                        text: "Private conversation with \(nickname).",
-                        isSystem: true
-                    )]
-                    messagesDidChange(for: conversation.id)
-                }
+                let conversation = openDirectMessage(named: nickname, serverID: profile.id)
                 if selectConversation { selection = .directMessage(conversation.id) }
             }
         }
@@ -1851,11 +1843,7 @@ final class IRCAppState: ObservableObject {
 
     func startDirectMessage(with nickname: String, from item: SidebarItem) {
         guard let profile = profile(for: item) else { return }
-        let conversation = directMessage(named: nickname, serverID: profile.id)
-        if conversations[conversation.id] == nil {
-            conversations[conversation.id] = [IRCMessage(sender: "System", text: "Private conversation with \(nickname).", isSystem: true)]
-            messagesDidChange(for: conversation.id)
-        }
+        let conversation = openDirectMessage(named: nickname, serverID: profile.id)
         selection = .directMessage(conversation.id)
     }
 
@@ -1866,15 +1854,7 @@ final class IRCAppState: ObservableObject {
             let nickname = favoriteName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !nickname.isEmpty,
                   openedNames.insert(normalizedIdentifier(nickname, serverID: serverID)).inserted else { continue }
-            let conversation = directMessage(named: nickname, serverID: serverID)
-            if conversations[conversation.id] == nil {
-                conversations[conversation.id] = [IRCMessage(
-                    sender: "System",
-                    text: "Private conversation with \(nickname).",
-                    isSystem: true
-                )]
-                messagesDidChange(for: conversation.id)
-            }
+            openDirectMessage(named: nickname, serverID: serverID)
         }
     }
 
@@ -2025,10 +2005,7 @@ final class IRCAppState: ObservableObject {
         case "MSG", "QUERY":
             let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
             guard fields.count == 2 else { appendSystem("Usage: /msg nickname message", for: item); return }
-            let conversation = directMessage(named: fields[0], serverID: profile.id)
-            if conversations[conversation.id] == nil {
-                conversations[conversation.id] = [IRCMessage(sender: "System", text: "Private conversation with \(fields[0]).", isSystem: true)]
-            }
+            let conversation = openDirectMessage(named: fields[0], serverID: profile.id)
             let sender = nickname(for: profile)
             for chunk in outgoingTextChunks(
                 fields[1],
@@ -4028,6 +4005,20 @@ final class IRCAppState: ObservableObject {
         if let existing = directMessages.first(where: { $0.serverID == serverID && identifiersEqual($0.name, name, serverID: serverID) }) { return existing }
         let conversation = Conversation(name: name, serverID: serverID)
         directMessages.append(conversation)
+        return conversation
+    }
+
+    @discardableResult
+    private func openDirectMessage(named nickname: String, serverID: UUID) -> Conversation {
+        let conversation = directMessage(named: nickname, serverID: serverID)
+        if conversations[conversation.id] == nil {
+            conversations[conversation.id] = [IRCMessage(
+                sender: "System",
+                text: "Private conversation with \(nickname).",
+                isSystem: true
+            )]
+            messagesDidChange(for: conversation.id)
+        }
         return conversation
     }
 
