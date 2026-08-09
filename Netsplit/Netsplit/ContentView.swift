@@ -299,7 +299,7 @@ private struct SidebarView: View {
                                         .accessibilityHidden(true)
                                 }
                             }
-                                .foregroundStyle(message.hasUnread ? .primary : .secondary)
+                                .foregroundStyle(message.hasUnread ? Color.primary : Color.secondary)
                                 .font(.system(size: textMetrics.size(15), weight: message.hasUnread ? .semibold : .regular))
                                 .padding(.vertical, textMetrics.spacing(1.5))
                                 .tag(SidebarItem.directMessage(message.id))
