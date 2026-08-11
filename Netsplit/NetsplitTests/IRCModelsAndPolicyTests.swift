@@ -3845,6 +3845,7 @@ struct IRCModelsAndPolicyTests {
         var contentIdentity = firstIdentity
         var messages = firstMessages
         var initialPositionCount = 0
+        var initialVisibleHeightVerificationCount = 0
 
         func rootView() -> AnyView {
             AnyView(
@@ -3872,7 +3873,11 @@ struct IRCModelsAndPolicyTests {
                     onInitialPositioned: { _ in initialPositionCount += 1 },
                     onFollowingTailChange: { _, _ in },
                     onTailPositioned: { _, _ in },
-                    onGeometryChange: { _, _ in }
+                    onGeometryChange: { event, _ in
+                        if event.hasPrefix("initial-visible-row-heights-verified") {
+                            initialVisibleHeightVerificationCount += 1
+                        }
+                    }
                 )
                 .frame(width: 1_161, height: 879)
             )
@@ -3966,6 +3971,7 @@ struct IRCModelsAndPolicyTests {
         #expect(abs(bottomSpacerRect.height - 21) <= 0.5)
         #expect(abs(tableView.rect(ofRow: normalMessageRow).height - 27) <= 0.5)
         #expect(abs(tableView.rect(ofRow: wrappedMessageRow).height - 49) <= 0.5)
+        #expect(initialVisibleHeightVerificationCount >= 3)
 
         hostingController.rootView = AnyView(EmptyView())
         hostingController.view.layoutSubtreeIfNeeded()

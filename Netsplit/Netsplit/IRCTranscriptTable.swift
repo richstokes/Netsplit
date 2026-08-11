@@ -191,6 +191,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var lastViewportWidth: CGFloat = 0
         private var lastViewportHeight: CGFloat = 0
         private var pendingHeightMessageIDs = Set<UUID>()
+        private var initiallyVerifiedMessageIDs = Set<UUID>()
         private var heightInvalidationScheduled = false
         private var fullHeightRefreshScheduled = false
         private var viewportHeightReconciliationScheduled = false
@@ -283,6 +284,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pendingTailStartOrigin = nil
             isRestoringReadingPosition = false
             pendingHeightMessageIDs.removeAll()
+            initiallyVerifiedMessageIDs.removeAll()
             initialPositionScheduled = false
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
@@ -405,6 +407,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             followingTail = true
             topSpacerHeight = Self.topInset
             pendingHeightMessageIDs.removeAll()
+            initiallyVerifiedMessageIDs.removeAll()
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
             viewportHeightReconciliationScheduled = false
@@ -614,16 +617,17 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // deferred full-height sweep has already run. Reconcile every
                 // intersecting message now so a recycled cell's previous
                 // intrinsic height cannot survive until the next append.
-                let reconciledVisibleRows = self.reconcileVisibleMessageRows(
+                let visibleRowsNeedAnotherPass = self.reconcileVisibleMessageRows(
                     in: tableView
                 )
                 tableView.layoutSubtreeIfNeeded()
-                if reconciledVisibleRows {
+                if visibleRowsNeedAnotherPass {
                     self.adjustTopSpacerForShortContent()
                     self.positionAtTail()
-                    // Height correction can bring one more row into the
-                    // viewport. Verify the now-stable visible set on the next
-                    // run-loop turn before revealing the transcript.
+                    // Invalidating a stale row can bring one more row into the
+                    // viewport, while a newly realized SwiftUI root may need
+                    // a run-loop turn to publish its intrinsic height. Verify
+                    // the now-stable visible set before revealing the table.
                     self.scheduleInitialPosition()
                     return
                 }
@@ -1333,9 +1337,11 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private func reconcileVisibleMessageRows(in tableView: NSTableView) -> Bool {
             let visibleRows = tableView.rows(in: tableView.visibleRect)
             guard visibleRows.location != NSNotFound else { return false }
-            var changedRows = IndexSet()
+            var invalidatedRows = IndexSet()
+            var hasUnverifiedRows = false
 #if DEBUG
-            var reconciledRows: [String] = []
+            var verifiedRows: [String] = []
+            var unverifiedRows: [String] = []
 #endif
             for row in visibleRows.location..<NSMaxRange(visibleRows) {
                 guard let message = message(atTableRow: row) else { continue }
@@ -1345,11 +1351,23 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     makeIfNecessary: true
                 ) as? TranscriptMessageCellView,
                       cell.hostingView.hasHostedContent,
-                      cell.hostingView.representedMessageID == message.id else { continue }
+                      cell.hostingView.representedMessageID == message.id else {
+                    hasUnverifiedRows = true
+#if DEBUG
+                    unverifiedRows.append("\(row)/\(String(message.id.uuidString.prefix(8)))")
+#endif
+                    continue
+                }
 
                 cell.hostingView.layoutSubtreeIfNeeded()
                 let proposedHeight = cell.hostingView.fittingSize.height
-                guard proposedHeight.isFinite, proposedHeight > 0 else { continue }
+                guard proposedHeight.isFinite, proposedHeight > 0 else {
+                    hasUnverifiedRows = true
+#if DEBUG
+                    unverifiedRows.append("\(row)/\(String(message.id.uuidString.prefix(8)))")
+#endif
+                    continue
+                }
 
                 let currentHeight = max(
                     0,
@@ -1358,14 +1376,18 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 )
                 let previousCachedHeight = cachedRowHeight(for: message.id)
                 cacheRowHeight(proposedHeight, for: message.id)
+                let isFirstInitialVerification = initiallyVerifiedMessageIDs.insert(
+                    message.id
+                ).inserted
                 let cachedHeightChanged = previousCachedHeight.map {
                     abs($0 - proposedHeight) > 0.5
                 } ?? false
-                guard cachedHeightChanged
+                guard isFirstInitialVerification
+                      || cachedHeightChanged
                       || abs(currentHeight - proposedHeight) > 0.5 else { continue }
-                changedRows.insert(row)
+                invalidatedRows.insert(row)
 #if DEBUG
-                reconciledRows.append(
+                verifiedRows.append(
                     "\(row)/\(String(message.id.uuidString.prefix(8)))"
                         + "/\(String(format: "%.1f", currentHeight))"
                         + "->\(String(format: "%.1f", proposedHeight))"
@@ -1373,17 +1395,28 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #endif
             }
 
-            guard !changedRows.isEmpty else { return false }
-            tableView.noteHeightOfRows(withIndexesChanged: changedRows)
-            tableView.layoutSubtreeIfNeeded()
+            if !invalidatedRows.isEmpty {
+                // NSTableView can retain a stale automatic-height proposal by
+                // row index even when its rect happens to agree with the new
+                // hosting view during the first layout pass. Explicitly
+                // invalidate each initially visible message once per
+                // attachment so AppKit adopts the conversation-scoped cache.
+                tableView.noteHeightOfRows(withIndexesChanged: invalidatedRows)
+                tableView.layoutSubtreeIfNeeded()
+            }
 #if DEBUG
-            parent.onGeometryChange?(
-                "visible-row-heights-reconciled count=\(changedRows.count) "
-                    + "rows=\(reconciledRows.prefix(4).joined(separator: ","))",
-                geometry()
-            )
+            if !invalidatedRows.isEmpty || hasUnverifiedRows {
+                parent.onGeometryChange?(
+                    "initial-visible-row-heights-verified "
+                        + "invalidated=\(invalidatedRows.count) "
+                        + "pending=\(unverifiedRows.count) "
+                        + "rows=\(verifiedRows.prefix(4).joined(separator: ",")) "
+                        + "pendingRows=\(unverifiedRows.prefix(4).joined(separator: ","))",
+                    geometry()
+                )
+            }
 #endif
-            return true
+            return !invalidatedRows.isEmpty || hasUnverifiedRows
         }
 
         private func cachedRowHeight(for messageID: UUID) -> CGFloat? {
@@ -1611,15 +1644,24 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 + max(0, viewportHeight - measuredHeight)
             guard abs(desiredHeight - topSpacerHeight) > 0.5 else { return }
             topSpacerHeight = desiredHeight
-            if let topSpacer = tableView.view(
-                atColumn: 0,
-                row: 0,
-                makeIfNecessary: false
-            ) as? TranscriptSpacerCellView {
-                topSpacer.height = desiredHeight
+            // View-based NSTableView animates noteHeightOfRows by default.
+            // This spacer can grow by almost the full viewport when switching
+            // to a short transcript, so allowing that animation makes the
+            // messages visibly slide from the top to their bottom alignment
+            // after the scroll view is revealed.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                if let topSpacer = tableView.view(
+                    atColumn: 0,
+                    row: 0,
+                    makeIfNecessary: false
+                ) as? TranscriptSpacerCellView {
+                    topSpacer.height = desiredHeight
+                }
+                tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: 0))
+                tableView.layoutSubtreeIfNeeded()
             }
-            tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: 0))
-            tableView.layoutSubtreeIfNeeded()
         }
 
         private func message(atTableRow row: Int) -> IRCMessage? {
