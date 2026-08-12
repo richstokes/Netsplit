@@ -76,6 +76,28 @@ enum IRCClientVersion {
   }
 }
 
+enum IRCCTCPCommand: String, CaseIterable, Identifiable {
+  case version = "VERSION"
+  case ping = "PING"
+  case time = "TIME"
+  case clientInfo = "CLIENTINFO"
+
+  var id: String { rawValue }
+
+  var label: String {
+    switch self {
+    case .version: "Version"
+    case .ping: "Ping"
+    case .time: "Time"
+    case .clientInfo: "Client Info"
+    }
+  }
+
+  static var supportedReply: String {
+    (["ACTION"] + allCases.map(\.rawValue)).sorted().joined(separator: " ")
+  }
+}
+
 enum IRCSystemSleepPolicy {
   static func shouldRestoreConnection(status: ConnectionStatus, reconnectWasScheduled: Bool) -> Bool
   {

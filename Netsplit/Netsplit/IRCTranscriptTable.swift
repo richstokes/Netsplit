@@ -1135,10 +1135,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // proposal as invisible space below the tail. The top spacer
                 // has its own height adjustment and invalidation path.
                 self.cacheRealizedRowHeights(in: tableView)
-                tableView.noteHeightOfRows(
-                    withIndexesChanged: messageAndBottomSpacerRows
+                self.applyRowHeightChangesWithoutAnimation(
+                    messageAndBottomSpacerRows,
+                    in: tableView
                 )
-                tableView.layoutSubtreeIfNeeded()
                 self.adjustTopSpacerForShortContent()
                 self.finishReadingPositionRestoration(
                     readingAnchor,
@@ -1204,8 +1204,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 self.pendingHeightMessageIDs.removeAll()
                 guard !rows.isEmpty else { return }
                 let readingAnchor = self.beginReadingPositionRestoration()
-                tableView.noteHeightOfRows(withIndexesChanged: rows)
-                tableView.layoutSubtreeIfNeeded()
+                self.applyRowHeightChangesWithoutAnimation(rows, in: tableView)
                 self.adjustTopSpacerForShortContent()
                 self.finishReadingPositionRestoration(
                     readingAnchor,
@@ -1375,6 +1374,16 @@ struct IRCTranscriptTable: NSViewRepresentable {
                         - tableView.intercellSpacing.height
                 )
                 let previousCachedHeight = cachedRowHeight(for: message.id)
+#if DEBUG
+                reportLargeHeightDisagreementIfNeeded(
+                    row: row,
+                    messageID: message.id,
+                    tableHeight: currentHeight,
+                    cachedHeight: previousCachedHeight,
+                    proposedHeight: proposedHeight,
+                    source: "initial-visible-verification"
+                )
+#endif
                 cacheRowHeight(proposedHeight, for: message.id)
                 let isFirstInitialVerification = initiallyVerifiedMessageIDs.insert(
                     message.id
@@ -1401,8 +1410,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // hosting view during the first layout pass. Explicitly
                 // invalidate each initially visible message once per
                 // attachment so AppKit adopts the conversation-scoped cache.
-                tableView.noteHeightOfRows(withIndexesChanged: invalidatedRows)
-                tableView.layoutSubtreeIfNeeded()
+                applyRowHeightChangesWithoutAnimation(
+                    invalidatedRows,
+                    in: tableView
+                )
             }
 #if DEBUG
             if !invalidatedRows.isEmpty || hasUnverifiedRows {
@@ -1417,6 +1428,19 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
 #endif
             return !invalidatedRows.isEmpty || hasUnverifiedRows
+        }
+
+        private func applyRowHeightChangesWithoutAnimation(
+            _ rows: IndexSet,
+            in tableView: NSTableView
+        ) {
+            guard !rows.isEmpty else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                tableView.noteHeightOfRows(withIndexesChanged: rows)
+                tableView.layoutSubtreeIfNeeded()
+            }
         }
 
         private func cachedRowHeight(for messageID: UUID) -> CGFloat? {

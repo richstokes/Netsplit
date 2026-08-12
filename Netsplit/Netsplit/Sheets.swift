@@ -1027,6 +1027,12 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Menus") {
+                Toggle("Show CTCP commands in menu", isOn: $state.showsCTCPCommandsInUserMenu)
+                Text("Adds Version, Ping, Time, and Client Info commands when you right-click a nickname.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding(16)

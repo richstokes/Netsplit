@@ -98,6 +98,14 @@ final class IRCAppState: ObservableObject {
     @Published var warnBeforeOpeningLinks: Bool {
         didSet { UserDefaults.standard.set(warnBeforeOpeningLinks, forKey: "warnBeforeOpeningLinks") }
     }
+    @Published var showsCTCPCommandsInUserMenu: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                showsCTCPCommandsInUserMenu,
+                forKey: "showsCTCPCommandsInUserMenu"
+            )
+        }
+    }
     @Published var mentionNotificationsEnabled: Bool {
         didSet {
             UserDefaults.standard.set(mentionNotificationsEnabled, forKey: "mentionNotificationsEnabled")
@@ -197,6 +205,7 @@ final class IRCAppState: ObservableObject {
     private var pendingClientVersionDestinations: [String: SidebarItem] = [:]
     private var pendingClientVersionRequestIDs: [String: UUID] = [:]
     private var pendingUserPings: [String: PendingUserPing] = [:]
+    private var pendingCTCPRequests: [String: PendingCTCPRequest] = [:]
     private var terminalServerErrors: [UUID: String] = [:]
     private var pendingOutgoingEchoes: [UUID: [PendingOutgoingEcho]] = [:]
     private var recentSelfTargetedConfirmations: [UUID: [IRCRecentSelfTargetedConfirmation]] = [:]
@@ -274,6 +283,7 @@ final class IRCAppState: ObservableObject {
         quitMessage = savedQuitMessage.isEmpty ? Self.defaultQuitMessage : savedQuitMessage
         reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
+        showsCTCPCommandsInUserMenu = defaults.object(forKey: "showsCTCPCommandsInUserMenu") as? Bool ?? false
         mentionNotificationsEnabled = defaults.object(forKey: "mentionNotificationsEnabled") as? Bool ?? false
         directMessageNotificationsEnabled = defaults.object(forKey: "directMessageNotificationsEnabled") as? Bool ?? false
         applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
@@ -1866,6 +1876,21 @@ final class IRCAppState: ObservableObject {
         appendSystem("Looking up \(nickname)…", for: item)
     }
 
+    func requestCTCP(_ command: IRCCTCPCommand, of nickname: String, from item: SidebarItem) {
+        let target = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let profile = profile(for: item), !target.isEmpty else { return }
+        guard canSendMessages(on: profile, reportingTo: item) else { return }
+
+        switch command {
+        case .version:
+            requestClientVersion(of: target, on: profile, from: item)
+        case .ping:
+            requestUserPing(of: target, on: profile, from: item)
+        case .time, .clientInfo:
+            requestSimpleCTCP(command, of: target, on: profile, from: item)
+        }
+    }
+
     @discardableResult
     func send(_ text: String, to item: SidebarItem) -> Bool {
         if text.hasPrefix("/") {
@@ -2201,11 +2226,12 @@ final class IRCAppState: ObservableObject {
             }
         case "CTCP":
             let fields = argument.split(separator: " ", maxSplits: 1).map(String.init)
-            guard fields.count == 2, fields[1].caseInsensitiveCompare("VERSION") == .orderedSame else {
-                appendSystem("Usage: /ctcp nickname version", for: item)
+            guard fields.count == 2,
+                  let ctcpCommand = IRCCTCPCommand(rawValue: fields[1].uppercased()) else {
+                appendSystem("Usage: /ctcp nickname version|ping|time|clientinfo", for: item)
                 return
             }
-            requestClientVersion(of: fields[0], on: profile, from: item)
+            requestCTCP(ctcpCommand, of: fields[0], from: item)
         case "WHOIS":
             guard let target = argument.split(separator: " ").first.map(String.init), !target.isEmpty else {
                 appendSystem("Usage: /whois nickname", for: item)
@@ -3635,6 +3661,31 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    private func requestSimpleCTCP(
+        _ command: IRCCTCPCommand,
+        of nickname: String,
+        on profile: ServerProfile,
+        from item: SidebarItem
+    ) {
+        precondition(command == .time || command == .clientInfo)
+        let key = ctcpRequestKey(serverID: profile.id, nickname: nickname, command: command)
+        let requestID = UUID()
+        pendingCTCPRequests[key] = PendingCTCPRequest(requestID: requestID, destination: item)
+        connections[profile.id]?.send(
+            command: "PRIVMSG \(nickname) :\u{01}\(command.rawValue)\u{01}"
+        )
+        appendSystem("Requesting \(nickname)'s CTCP \(command.label.lowercased())…", for: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self,
+                  self.pendingCTCPRequests[key]?.requestID == requestID,
+                  self.pendingCTCPRequests.removeValue(forKey: key) != nil else { return }
+            self.appendSystem(
+                "\(nickname) did not return a CTCP \(command.label.lowercased()) reply.",
+                for: item
+            )
+        }
+    }
+
     @discardableResult
     private func handleCTCP(
         _ text: String,
@@ -3722,6 +3773,36 @@ final class IRCAppState: ObservableObject {
                 )
                 appendSystem("Ping reply from \(sender): \(milliseconds) ms.", for: pending.destination)
             }
+        case "TIME", "CLIENTINFO":
+            guard let ctcpCommand = IRCCTCPCommand(rawValue: name) else { return false }
+            if command.count == 1 {
+                guard canReplyToRequest else { return false }
+                let reply: String
+                switch ctcpCommand {
+                case .time:
+                    reply = Date().formatted(date: .complete, time: .complete)
+                case .clientInfo:
+                    reply = IRCCTCPCommand.supportedReply
+                case .version, .ping:
+                    return false
+                }
+                connections[profile.id]?.send(
+                    command: "NOTICE \(sender) :\u{01}\(name) \(reply)\u{01}"
+                )
+                appendSystem("\(sender) requested Netsplit's CTCP \(ctcpCommand.label.lowercased()).", for: .server(profile.id))
+            } else {
+                let key = ctcpRequestKey(
+                    serverID: profile.id,
+                    nickname: sender,
+                    command: ctcpCommand
+                )
+                let destination = pendingCTCPRequests.removeValue(forKey: key)?.destination
+                    ?? .server(profile.id)
+                appendSystem(
+                    "CTCP \(ctcpCommand.label) reply from \(sender): \(command[1])",
+                    for: destination
+                )
+            }
         default:
             return false
         }
@@ -3730,6 +3811,14 @@ final class IRCAppState: ObservableObject {
 
     private func ctcpRequestKey(serverID: UUID, nickname: String) -> String {
         "\(serverID.uuidString)|\(normalizedIdentifier(nickname, serverID: serverID))"
+    }
+
+    private func ctcpRequestKey(
+        serverID: UUID,
+        nickname: String,
+        command: IRCCTCPCommand
+    ) -> String {
+        "\(ctcpRequestKey(serverID: serverID, nickname: nickname))|\(command.rawValue)"
     }
 
     private func recordSelectionChange(from previousSelection: SidebarItem?) {
@@ -3961,6 +4050,7 @@ final class IRCAppState: ObservableObject {
         pendingClientVersionDestinations = pendingClientVersionDestinations.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingClientVersionRequestIDs = pendingClientVersionRequestIDs.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingUserPings = pendingUserPings.filter { !$0.key.hasPrefix(keyPrefix) }
+        pendingCTCPRequests = pendingCTCPRequests.filter { !$0.key.hasPrefix(keyPrefix) }
         finalizePendingOutgoingEchoes(for: serverID)
         recentSelfTargetedConfirmations.removeValue(forKey: serverID)
         incomingBatchesByServer.removeValue(forKey: serverID)
@@ -5551,6 +5641,11 @@ private struct IRCIncomingBatch {
 private struct PendingUserPing {
     var token: String
     var sentAt: Date
+    var destination: SidebarItem
+}
+
+private struct PendingCTCPRequest {
+    var requestID: UUID
     var destination: SidebarItem
 }
 

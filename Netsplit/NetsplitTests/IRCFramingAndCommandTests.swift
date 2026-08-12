@@ -171,6 +171,15 @@ struct IRCFramingAndCommandTests {
         ) == 0)
     }
 
+    @Test("Defines the supported user-menu CTCP commands")
+    func definesSupportedCTCPCommands() {
+        #expect(IRCCTCPCommand.allCases.map(\.rawValue) == [
+            "VERSION", "PING", "TIME", "CLIENTINFO"
+        ])
+        #expect(IRCCTCPCommand.supportedReply == "ACTION CLIENTINFO PING TIME VERSION")
+        #expect(IRCCTCPCommand.clientInfo.label == "Client Info")
+    }
+
     @Test("Suppresses reflected CTCP requests but permits requests to yourself")
     func distinguishesSelfTargetedCTCPRequestsFromEchoes() {
         #expect(IRCCTCPEchoPolicy.isSelfEcho(

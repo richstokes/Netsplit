@@ -2215,6 +2215,14 @@ private struct NicknameContextMenu: View {
         Button("Whois \(nickname)", systemImage: "person.text.rectangle") {
             state.requestWhois(for: nickname, from: selection)
         }
+        if state.showsCTCPCommandsInUserMenu {
+            Divider()
+            ForEach(IRCCTCPCommand.allCases) { command in
+                Button("CTCP \(command.label) \(nickname)", systemImage: ctcpSystemImage(for: command)) {
+                    state.requestCTCP(command, of: nickname, from: selection)
+                }
+            }
+        }
         Divider()
         if isIgnored {
             Button("Unignore \(nickname)", systemImage: "person") {
@@ -2259,6 +2267,15 @@ private struct NicknameContextMenu: View {
             Button("Ban and Kick \(nickname)", systemImage: "person.crop.circle.badge.xmark") {
                 state.banAndKick(nickname, from: selection)
             }
+        }
+    }
+
+    private func ctcpSystemImage(for command: IRCCTCPCommand) -> String {
+        switch command {
+        case .version: "info.circle"
+        case .ping: "wave.3.right"
+        case .time: "clock"
+        case .clientInfo: "list.bullet.rectangle"
         }
     }
 }
