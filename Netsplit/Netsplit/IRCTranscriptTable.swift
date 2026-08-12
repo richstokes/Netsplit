@@ -198,6 +198,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var pendingTailWorkItem: DispatchWorkItem?
         private var lastAnimatedScroll = Date.distantPast
         private var isAwaitingTailPosition = false
+        private var isTailPositionAnimationInFlight = false
         private var pendingTailStartOrigin: NSPoint?
         private var isRestoringReadingPosition = false
         private var tailPositionGeneration = 0
@@ -241,7 +242,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 self?.viewportHeightDidChange(height)
             }
             scrollView.onUserScroll = { [weak self] in
-                self?.userDidScroll()
+                self?.userDidScroll(source: "scroll-wheel")
             }
 
             let center = NotificationCenter.default
@@ -271,7 +272,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.userDidScroll()
+                    self?.liveScrollWillStart()
                 }
             })
         }
@@ -280,7 +281,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
             attachmentGeneration &+= 1
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
+            tailPositionGeneration &+= 1
+            if isTailPositionAnimationInFlight {
+                scrollView?.stopAnimatedContentScrollAtCurrentOrigin()
+            }
             isAwaitingTailPosition = false
+            isTailPositionAnimationInFlight = false
             pendingTailStartOrigin = nil
             isRestoringReadingPosition = false
             pendingHeightMessageIDs.removeAll()
@@ -289,7 +295,6 @@ struct IRCTranscriptTable: NSViewRepresentable {
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
             viewportHeightReconciliationScheduled = false
-            tailPositionGeneration &+= 1
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
             pendingDebugGeometryWorkItem = nil
@@ -387,6 +392,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
             tailPositionGeneration &+= 1
+            if isTailPositionAnimationInFlight {
+                scrollView.stopAnimatedContentScrollAtCurrentOrigin()
+            }
             // The native scroll view is intentionally retained across
             // conversations. A trackpad gesture can therefore keep sending
             // momentum events after the sidebar selection has changed and
@@ -412,6 +420,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             fullHeightRefreshScheduled = false
             viewportHeightReconciliationScheduled = false
             isAwaitingTailPosition = false
+            isTailPositionAnimationInFlight = false
             pendingTailStartOrigin = nil
             isRestoringReadingPosition = false
             hasPendingPositionReport = false
@@ -831,8 +840,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 if shouldAnimate {
                     self.lastAnimatedScroll = now
                 }
+                if !shouldAnimate, self.isTailPositionAnimationInFlight {
+                    self.scrollView?.stopAnimatedContentScrollAtCurrentOrigin()
+                    self.isTailPositionAnimationInFlight = false
+                }
                 self.positionAtTail(animated: shouldAnimate) { [weak self] didAnimate in
                     guard let self, self.tailPositionGeneration == generation else { return }
+                    self.isTailPositionAnimationInFlight = false
                     // An asynchronous preview can change the final row's
                     // height while the append animation is in flight. Its
                     // target was calculated from the earlier document
@@ -900,6 +914,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 return
             }
 
+            isTailPositionAnimationInFlight = true
+#if DEBUG
+            parent.onGeometryChange?("tail-position-animation-started", geometry())
+#endif
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = IRCTranscriptScrollPolicy.animationDuration
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -942,13 +960,41 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #endif
         }
 
-        private func userDidScroll() {
+        private func liveScrollWillStart() {
+#if DEBUG
+            parent.onGeometryChange?("user-scroll-started source=live-scroll", geometry())
+#endif
+            userDidScroll(source: "live-scroll")
+        }
+
+        private func userDidScroll(source: String) {
             guard isAwaitingTailPosition else { return }
+            let cancellationPhase: String
+            if isTailPositionAnimationInFlight {
+                cancellationPhase = "in-flight"
+            } else if pendingTailWorkItem != nil {
+                cancellationPhase = "scheduled"
+            } else {
+                cancellationPhase = "settling"
+            }
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
+            // Invalidate the completion before stopping the AppKit animation:
+            // a zero-duration replacement may deliver that completion while
+            // this method is still unwinding.
+            tailPositionGeneration &+= 1
             isAwaitingTailPosition = false
             pendingTailStartOrigin = nil
-            tailPositionGeneration &+= 1
+            if isTailPositionAnimationInFlight {
+                scrollView?.stopAnimatedContentScrollAtCurrentOrigin()
+            }
+            isTailPositionAnimationInFlight = false
+#if DEBUG
+            parent.onGeometryChange?(
+                "tail-position-cancelled source=\(source) phase=\(cancellationPhase)",
+                geometry()
+            )
+#endif
         }
 
         /// AppKit posts bounds changes from inside scrolling and layout. Keep
@@ -1739,6 +1785,18 @@ final class TranscriptScrollView: NSScrollView {
 
     func discardMomentumUntilNextDirectScroll() {
         momentumPolicy.discardMomentumUntilNextDirectScroll()
+    }
+
+    /// Give a newly started user gesture immediate ownership of the clip
+    /// view. AppKit otherwise continues an already-running bounds animation
+    /// after the coordinator has cancelled its completion bookkeeping.
+    func stopAnimatedContentScrollAtCurrentOrigin() {
+        let currentOrigin = contentView.bounds.origin
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            contentView.animator().setBoundsOrigin(currentOrigin)
+        }
+        reflectScrolledClipView(contentView)
     }
 
     override func layout() {

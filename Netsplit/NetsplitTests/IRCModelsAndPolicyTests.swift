@@ -4728,6 +4728,110 @@ struct IRCModelsAndPolicyTests {
         ))
     }
 
+    @Test("A user scroll cancels an in-flight transcript tail animation")
+    @MainActor
+    func userScrollCancelsTranscriptTailAnimation() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
+        var messages = (0..<100).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var didPositionInitially = false
+        var tailUpdateCount = 0
+        var geometryEvents: [String] = []
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "user-scroll-tail-cancellation-test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in tailUpdateCount += 1 },
+                    onGeometryChange: { event, _ in geometryEvents.append(event) }
+                )
+                .frame(width: 320, height: 700)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 700),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { didPositionInitially }
+        let scrollView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptScrollView",
+                in: hostingController.view
+            ) as? NSScrollView
+        )
+        geometryEvents.removeAll()
+
+        messages.append(IRCMessage(sender: "tester", text: "Appended message"))
+        hostingController.rootView = rootView()
+        try await Self.waitUntil {
+            geometryEvents.contains("tail-position-animation-started")
+        }
+
+        NotificationCenter.default.post(
+            name: NSScrollView.willStartLiveScrollNotification,
+            object: scrollView
+        )
+        let clipView = scrollView.contentView
+        let cancelledOrigin = clipView.bounds.origin
+
+        // The original animation has another run-loop interval in which it
+        // could continue moving. Verify cancellation itself freezes the clip
+        // view before simulating the user's movement into history.
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(abs(clipView.bounds.origin.y - cancelledOrigin.y) <= 1)
+
+        let historyOrigin = clipView.constrainBoundsRect(
+            NSRect(
+                x: clipView.bounds.origin.x,
+                y: max(0, clipView.bounds.origin.y - 100),
+                width: clipView.bounds.width,
+                height: clipView.bounds.height
+            )
+        ).origin
+        clipView.setBoundsOrigin(historyOrigin)
+        scrollView.reflectScrolledClipView(clipView)
+
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(geometryEvents.contains("user-scroll-started source=live-scroll"))
+        #expect(geometryEvents.contains(
+            "tail-position-cancelled source=live-scroll phase=in-flight"
+        ))
+        #expect(tailUpdateCount == 0)
+        #expect(abs(clipView.bounds.origin.y - historyOrigin.y) <= 1)
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Authoritative echo updates its native row without a second tail movement")
     @MainActor
     func updatesAuthoritativeEchoInPlace() async throws {
