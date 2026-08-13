@@ -1785,6 +1785,7 @@ private struct ConversationTranscript: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.ircThemePalette) private var themePalette
     @Environment(\.openURL) private var openURL
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         state: IRCAppState,
@@ -1866,6 +1867,7 @@ private struct ConversationTranscript: View {
             updateRevision: revision,
             estimatedRowHeight: textMetrics.size(24),
             rowSpacing: messageSpacing == .compact ? 0 : textMetrics.spacing(3),
+            allowsTailAnimation: !reduceMotion,
             renderConfiguration: [
                 chatFont.rawValue,
                 String(usesColoredNicknames),

@@ -1284,18 +1284,62 @@ final class IRCMessageWebURLCache {
 
 enum IRCTranscriptUpdatePolicy {
     /// Keep ordinary messages immediate while bounding state publication and
-    /// visible-row update work during a sustained flood.
-    static let burstPublicationInterval: Duration = .milliseconds(250)
+    /// visible-row update work during a sustained flood. The trailing cadence
+    /// also gives a normal arrival motion time to settle before the next batch.
+    static let burstPublicationInterval: Duration = .milliseconds(300)
+}
+
+enum IRCTranscriptTailMotionKind: Equatable {
+    case messageArrival
+    case layoutChange
+}
+
+struct IRCTranscriptTailMotion: Equatable {
+    let duration: TimeInterval
 }
 
 enum IRCTranscriptScrollPolicy {
     static let coalescingDelay: Duration = .milliseconds(60)
-    static let minimumAnimatedScrollInterval: TimeInterval = 0.35
-    static let animationDuration: TimeInterval = 0.12
+    static let minimumAnimationDuration: TimeInterval = 0.20
+    static let maximumAnimationDuration: TimeInterval = 0.22
+    static let maximumAnimatedViewportFraction: CGFloat = 0.85
+    static let minimumMaximumAnimatedDistance: CGFloat = 320
     static let tailTolerance: CGFloat = 24
 
-    static func shouldAnimate(lastAnimatedScroll: Date, now: Date) -> Bool {
-        now.timeIntervalSince(lastAnimatedScroll) >= minimumAnimatedScrollInterval
+    /// Small and ordinary batched arrivals receive the same polished motion.
+    /// A true flood can add more than a viewport at once; sweeping through all
+    /// of it is slower and more disorienting than settling immediately.
+    static func tailMotion(
+        kind: IRCTranscriptTailMotionKind,
+        distance: CGFloat,
+        viewportHeight: CGFloat,
+        allowsAnimation: Bool
+    ) -> IRCTranscriptTailMotion? {
+        let resolvedDistance = abs(distance)
+        guard allowsAnimation,
+              resolvedDistance > 0.5,
+              viewportHeight > 0 else { return nil }
+
+        let maximumDistance = max(
+            minimumMaximumAnimatedDistance,
+            viewportHeight * maximumAnimatedViewportFraction
+        )
+        guard resolvedDistance <= maximumDistance else { return nil }
+
+        let distanceFraction = min(1, resolvedDistance / viewportHeight)
+        let distanceAdjustment: TimeInterval
+        switch kind {
+        case .messageArrival:
+            distanceAdjustment = TimeInterval(distanceFraction) * 0.05
+        case .layoutChange:
+            // Preview growth is already visually substantial; keep its tail
+            // compensation restrained instead of stretching the transition.
+            distanceAdjustment = TimeInterval(distanceFraction) * 0.03
+        }
+        return IRCTranscriptTailMotion(duration: min(
+            maximumAnimationDuration,
+            minimumAnimationDuration + distanceAdjustment
+        ))
     }
 
     static func isAtBottom(

@@ -32,6 +32,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
     let updateRevision: Int
     let estimatedRowHeight: CGFloat
     let rowSpacing: CGFloat
+    let allowsTailAnimation: Bool
     let renderConfiguration: String
     let rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation?
     let makeRow: (IRCMessage) -> AnyView
@@ -46,6 +47,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         updateRevision: Int = 0,
         estimatedRowHeight: CGFloat,
         rowSpacing: CGFloat,
+        allowsTailAnimation: Bool = true,
         renderConfiguration: String,
         rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation? = nil,
         makeRow: @escaping (IRCMessage) -> AnyView,
@@ -59,6 +61,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         self.updateRevision = updateRevision
         self.estimatedRowHeight = estimatedRowHeight
         self.rowSpacing = rowSpacing
+        self.allowsTailAnimation = allowsTailAnimation
         self.renderConfiguration = renderConfiguration
         self.rowLayoutInvalidation = rowLayoutInvalidation
         self.makeRow = makeRow
@@ -132,6 +135,24 @@ struct IRCTranscriptTable: NSViewRepresentable {
             let candidates: [Candidate]
         }
 
+        private struct PendingTailMotionRequest {
+            var appendedMessageCount = 0
+            var includesLayoutChange = false
+
+            var kind: IRCTranscriptTailMotionKind {
+                appendedMessageCount > 0 ? .messageArrival : .layoutChange
+            }
+
+            mutating func merge(
+                appendedMessageCount: Int,
+                includesLayoutChange: Bool
+            ) {
+                self.appendedMessageCount += max(0, appendedMessageCount)
+                self.includesLayoutChange = self.includesLayoutChange
+                    || includesLayoutChange
+            }
+        }
+
         /// Exact heights measured by realized hosting views, retained as
         /// estimates for the next visit to the same conversation. AppKit
         /// still verifies every realized row through automatic row heights,
@@ -196,7 +217,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var fullHeightRefreshScheduled = false
         private var viewportHeightReconciliationScheduled = false
         private var pendingTailWorkItem: DispatchWorkItem?
-        private var lastAnimatedScroll = Date.distantPast
+        private var pendingTailMotionRequest: PendingTailMotionRequest?
         private var isAwaitingTailPosition = false
         private var isTailPositionAnimationInFlight = false
         private var pendingTailStartOrigin: NSPoint?
@@ -281,6 +302,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             attachmentGeneration &+= 1
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
+            pendingTailMotionRequest = nil
             tailPositionGeneration &+= 1
             if isTailPositionAnimationInFlight {
                 scrollView?.stopAnimatedContentScrollAtCurrentOrigin()
@@ -391,6 +413,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             attachmentGeneration &+= 1
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
+            pendingTailMotionRequest = nil
             tailPositionGeneration &+= 1
             if isTailPositionAnimationInFlight {
                 scrollView.stopAnimatedContentScrollAtCurrentOrigin()
@@ -428,7 +451,6 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pendingWidthRefreshWorkItem?.cancel()
             pendingWidthRefreshWorkItem = nil
             hasPendingWidthRefresh = false
-            lastAnimatedScroll = .distantPast
             lastViewportWidth = max(0, scrollView.contentView.bounds.width)
             lastViewportHeight = max(0, scrollView.contentView.bounds.height)
             rowHeightEstimateViewportWidth = lastViewportWidth
@@ -701,6 +723,12 @@ struct IRCTranscriptTable: NSViewRepresentable {
             removeCurrentRowHeightCache()
             recordApplied(invalidation)
             let readingAnchor = beginReadingPositionRestoration()
+            let shouldFollowLayoutChange = readingAnchor == nil
+                && followingTail
+                && hasPositionedInitially
+            if shouldFollowLayoutChange {
+                prepareForTailMotion()
+            }
             tableView.reloadData()
             tableView.layoutSubtreeIfNeeded()
             adjustTopSpacerForShortContent()
@@ -708,8 +736,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 readingAnchor,
                 event: "row-layout-reloaded-anchor-restored"
             )
-            if readingAnchor == nil, followingTail {
-                positionAtTail()
+            if shouldFollowLayoutChange {
+                restorePendingTailStartOrigin()
+                scheduleTailPosition(includesLayoutChange: true)
             }
 #if DEBUG
             parent.onGeometryChange?(
@@ -747,10 +776,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                         && newMessages[oldMessages.count - 1].id == oldMessages.last?.id))
             let readingAnchor = isSimpleAppend ? nil : beginReadingPositionRestoration()
             if followingTail, hasPositionedInitially {
-                if !isAwaitingTailPosition || pendingTailWorkItem == nil {
-                    pendingTailStartOrigin = tailOrigin()
-                }
-                isAwaitingTailPosition = true
+                prepareForTailMotion()
             }
 
             messages = newMessages
@@ -777,7 +803,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
             // Do not replace a restored reading anchor with a tail jump in
             // the same update merely because it now fits within the viewport.
             if readingAnchor == nil, followingTail, hasPositionedInitially {
-                scheduleTailPosition()
+                scheduleTailPosition(
+                    appendedMessageCount: isSimpleAppend ? appendedCount : 0,
+                    includesLayoutChange: !isSimpleAppend
+                )
             }
         }
 
@@ -824,27 +853,70 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #endif
         }
 
-        private func scheduleTailPosition() {
+        private func prepareForTailMotion() {
+            guard let scrollView else { return }
+            if isTailPositionAnimationInFlight {
+                // Continue from the animation's presentation position when a
+                // new batch arrives instead of snapping to its obsolete target.
+                tailPositionGeneration &+= 1
+                scrollView.stopAnimatedContentScrollAtCurrentOrigin()
+                isTailPositionAnimationInFlight = false
+#if DEBUG
+                parent.onGeometryChange?("tail-motion-retargeted", geometry())
+#endif
+            }
+            if !isAwaitingTailPosition || pendingTailWorkItem == nil {
+                pendingTailStartOrigin = scrollView.contentView.bounds.origin
+            }
+            isAwaitingTailPosition = true
+        }
+
+        private func scheduleTailPosition(
+            appendedMessageCount: Int = 0,
+            includesLayoutChange: Bool = false
+        ) {
+            var request = pendingTailMotionRequest ?? PendingTailMotionRequest()
+            request.merge(
+                appendedMessageCount: appendedMessageCount,
+                includesLayoutChange: includesLayoutChange
+            )
+            pendingTailMotionRequest = request
             pendingTailWorkItem?.cancel()
             tailPositionGeneration &+= 1
             let generation = tailPositionGeneration
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 self.pendingTailWorkItem = nil
-                guard self.followingTail else { return }
-                let now = Date()
-                let shouldAnimate = IRCTranscriptScrollPolicy.shouldAnimate(
-                    lastAnimatedScroll: self.lastAnimatedScroll,
-                    now: now
+                let request = self.pendingTailMotionRequest
+                    ?? PendingTailMotionRequest()
+                self.pendingTailMotionRequest = nil
+                guard self.followingTail else {
+                    self.isAwaitingTailPosition = false
+                    self.pendingTailStartOrigin = nil
+                    return
+                }
+                self.tableView?.layoutSubtreeIfNeeded()
+                self.restorePendingTailStartOrigin()
+                let currentOriginY = self.scrollView?.contentView.bounds.origin.y ?? 0
+                let targetOriginY = self.tailOrigin()?.y ?? currentOriginY
+                let distance = abs(targetOriginY - currentOriginY)
+                let viewportHeight = self.scrollView?.contentView.bounds.height ?? 0
+                let motion = IRCTranscriptScrollPolicy.tailMotion(
+                    kind: request.kind,
+                    distance: distance,
+                    viewportHeight: viewportHeight,
+                    allowsAnimation: self.parent.allowsTailAnimation
                 )
-                if shouldAnimate {
-                    self.lastAnimatedScroll = now
-                }
-                if !shouldAnimate, self.isTailPositionAnimationInFlight {
-                    self.scrollView?.stopAnimatedContentScrollAtCurrentOrigin()
-                    self.isTailPositionAnimationInFlight = false
-                }
-                self.positionAtTail(animated: shouldAnimate) { [weak self] didAnimate in
+#if DEBUG
+                let kind = request.kind == .messageArrival ? "arrival" : "layout"
+                let duration = motion.map { String(format: "%.3f", $0.duration) }
+                    ?? "immediate"
+                self.parent.onGeometryChange?(
+                    "tail-motion-started kind=\(kind) appended=\(request.appendedMessageCount) layout=\(request.includesLayoutChange) distance=\(String(format: "%.1f", distance)) duration=\(duration)",
+                    self.geometry()
+                )
+#endif
+                self.positionAtTail(animationDuration: motion?.duration) { [weak self] didAnimate in
                     guard let self, self.tailPositionGeneration == generation else { return }
                     self.isTailPositionAnimationInFlight = false
                     // An asynchronous preview can change the final row's
@@ -872,19 +944,19 @@ struct IRCTranscriptTable: NSViewRepresentable {
         }
 
         private func positionAtTail(
-            animated: Bool = false,
+            animationDuration: TimeInterval? = nil,
             completion: ((Bool) -> Void)? = nil
         ) {
             guard let tableView, let scrollView, tableView.numberOfRows > 0 else { return }
             tableView.layoutSubtreeIfNeeded()
-            if animated {
+            if animationDuration != nil {
                 // NSTableView automatically re-anchors at the new bottom when
                 // rows are inserted. Restore the pre-append origin in the same
                 // run-loop turn that starts the animation so no intermediate
                 // frame is displayed.
                 restorePendingTailStartOrigin()
             }
-            guard animated else {
+            guard let animationDuration else {
                 // Realize the final row first, then use the resulting exact
                 // document height. scrollRowToVisible alone can leave an
                 // automatic-height table overscrolled by the last estimate
@@ -919,8 +991,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
             parent.onGeometryChange?("tail-position-animation-started", geometry())
 #endif
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = IRCTranscriptScrollPolicy.animationDuration
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.duration = animationDuration
+                context.timingFunction = CAMediaTimingFunction(
+                    controlPoints: 0.22,
+                    0.75,
+                    0.28,
+                    1
+                )
                 clipView.animator().setBoundsOrigin(targetOrigin)
             } completionHandler: { [weak scrollView, weak clipView] in
                 guard let scrollView, let clipView else { return }
@@ -979,6 +1056,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
             pendingTailWorkItem?.cancel()
             pendingTailWorkItem = nil
+            pendingTailMotionRequest = nil
             // Invalidate the completion before stopping the AppKit animation:
             // a zero-duration replacement may deliver that completion while
             // this method is still unwinding.
@@ -1118,9 +1196,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // but they do change the spacer needed to keep a short
                 // transcript growing upward from the bottom.
                 self.adjustTopSpacerForShortContent()
-                // A pending append owns the eventual tail move. Updating its
+                // A pending tail motion owns the eventual move. Updating its
                 // short-content spacer is still necessary, but an immediate
-                // jump here would bypass the coalesced arrival animation.
+                // jump here would bypass the coalesced transition.
                 guard !self.isAwaitingTailPosition else { return }
                 self.positionAtTail()
             }
@@ -1250,23 +1328,26 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 self.pendingHeightMessageIDs.removeAll()
                 guard !rows.isEmpty else { return }
                 let readingAnchor = self.beginReadingPositionRestoration()
+                let shouldFollowLayoutChange = readingAnchor == nil
+                    && self.followingTail
+                    && self.hasPositionedInitially
+                if shouldFollowLayoutChange {
+                    self.prepareForTailMotion()
+                }
                 self.applyRowHeightChangesWithoutAnimation(rows, in: tableView)
                 self.adjustTopSpacerForShortContent()
                 self.finishReadingPositionRestoration(
                     readingAnchor,
                     event: "row-height-anchor-restored"
                 )
-                // Appends already have one coalesced tail move pending. Only
-                // genuine later resizes, such as an async preview, reposition
-                // from the height path.
+                // Merge append measurements into their pending arrival move;
+                // genuine later resizes, such as an async preview, get the
+                // same bounded motion as an independent layout change.
                 // A restored reader position still wins if its new geometry
                 // happens to classify it as being at the tail.
-                if readingAnchor == nil, self.followingTail {
-                    if self.isAwaitingTailPosition {
-                        self.restorePendingTailStartOrigin()
-                    } else {
-                        self.positionAtTail()
-                    }
+                if shouldFollowLayoutChange {
+                    self.restorePendingTailStartOrigin()
+                    self.scheduleTailPosition(includesLayoutChange: true)
                 }
 #if DEBUG
                 self.parent.onGeometryChange?("row-height-changed", self.geometry())

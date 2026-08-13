@@ -2802,18 +2802,47 @@ struct IRCModelsAndPolicyTests {
         #expect(cache.webURLs(for: message) == [URL(string: "https://after.example")!])
     }
 
-    @Test("Transcript scrolling animates at most once per throttle interval")
-    func throttlesTranscriptAnimations() {
-        let previous = Date(timeIntervalSince1970: 1_000)
+    @Test("Transcript tail motion stays smooth for ordinary batches and bounded for floods")
+    func adaptsTranscriptTailMotion() throws {
+        let singleMessage = try #require(IRCTranscriptScrollPolicy.tailMotion(
+            kind: .messageArrival,
+            distance: 31,
+            viewportHeight: 879,
+            allowsAnimation: true
+        ))
+        let busyBatch = try #require(IRCTranscriptScrollPolicy.tailMotion(
+            kind: .messageArrival,
+            distance: 186,
+            viewportHeight: 879,
+            allowsAnimation: true
+        ))
+        let previewGrowth = try #require(IRCTranscriptScrollPolicy.tailMotion(
+            kind: .layoutChange,
+            distance: 194,
+            viewportHeight: 879,
+            allowsAnimation: true
+        ))
 
-        #expect(!IRCTranscriptScrollPolicy.shouldAnimate(
-            lastAnimatedScroll: previous,
-            now: previous.addingTimeInterval(IRCTranscriptScrollPolicy.minimumAnimatedScrollInterval - 0.01)
-        ))
-        #expect(IRCTranscriptScrollPolicy.shouldAnimate(
-            lastAnimatedScroll: previous,
-            now: previous.addingTimeInterval(IRCTranscriptScrollPolicy.minimumAnimatedScrollInterval + 0.01)
-        ))
+        #expect(singleMessage.duration >= IRCTranscriptScrollPolicy.minimumAnimationDuration)
+        #expect(busyBatch.duration >= singleMessage.duration)
+        #expect(busyBatch.duration <= IRCTranscriptScrollPolicy.maximumAnimationDuration)
+        #expect(previewGrowth.duration <= IRCTranscriptScrollPolicy.maximumAnimationDuration)
+        #expect(
+            IRCTranscriptUpdatePolicy.burstPublicationInterval
+                >= IRCTranscriptScrollPolicy.coalescingDelay + .milliseconds(220)
+        )
+        #expect(IRCTranscriptScrollPolicy.tailMotion(
+            kind: .messageArrival,
+            distance: 900,
+            viewportHeight: 879,
+            allowsAnimation: true
+        ) == nil)
+        #expect(IRCTranscriptScrollPolicy.tailMotion(
+            kind: .messageArrival,
+            distance: 31,
+            viewportHeight: 879,
+            allowsAnimation: false
+        ) == nil)
     }
 
     @Test("Conversation replacement discards inherited momentum until a direct scroll")
@@ -4724,6 +4753,29 @@ struct IRCModelsAndPolicyTests {
             visibleBounds: tailUpdate.geometry.visibleBounds,
             contentBounds: tailUpdate.geometry.contentBounds,
             contentIsFlipped: tailUpdate.geometry.contentIsFlipped,
+            tolerance: 1
+        ))
+
+        // A second publication inside the former animation-throttle window
+        // must still move smoothly. System/channel-event rows share this path
+        // with ordinary chat rows instead of producing a periodic snap.
+        tailUpdates.removeAll()
+        messages.append(IRCMessage(
+            sender: "•",
+            text: "tester joined the channel",
+            isSystem: true,
+            channelEventKind: .join,
+            channelMemberCount: 20
+        ))
+        hostingController.rootView = rootView()
+
+        try await Self.waitUntil { !tailUpdates.isEmpty }
+        let consecutiveUpdate = try #require(tailUpdates.last)
+        #expect(consecutiveUpdate.animated)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: consecutiveUpdate.geometry.visibleBounds,
+            contentBounds: consecutiveUpdate.geometry.contentBounds,
+            contentIsFlipped: consecutiveUpdate.geometry.contentIsFlipped,
             tolerance: 1
         ))
     }
