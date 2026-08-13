@@ -12,6 +12,44 @@ import UniformTypeIdentifiers
 enum IRCRemotePreviewPolicy {
     nonisolated static let maximumURLLength = 4_096
 
+    // These services intentionally redirect to arbitrary external pages. A
+    // cross-host hop is allowed only when it starts on one of these exact
+    // hosts; the destination still has to pass the HTTPS/public-network
+    // checks before it is requested.
+    nonisolated private static let recognizedURLShortenerHosts: Set<String> = [
+        "aka.ms",
+        "amzn.to",
+        "bit.ly",
+        "buff.ly",
+        "g.co",
+        "goo.gl",
+        "lnkd.in",
+        "maps.app.goo.gl",
+        "ow.ly",
+        "t.co",
+        "tinyurl.com"
+    ]
+
+    // First-party short domains that redirect to a different registrable
+    // domain owned by the same service.
+    nonisolated private static let trustedFirstPartyRedirects: [String: Set<String>] = [
+        "apple.co": ["apple.com", "www.apple.com"],
+        "discord.gg": ["discord.com", "www.discord.com"],
+        "fb.me": ["facebook.com", "www.facebook.com"],
+        "instagr.am": ["instagram.com", "www.instagram.com"],
+        "nyti.ms": ["nytimes.com", "www.nytimes.com"],
+        "pin.it": ["pinterest.com", "www.pinterest.com"],
+        "redd.it": ["reddit.com", "www.reddit.com"],
+        "spoti.fi": ["open.spotify.com"],
+        "spotify.link": ["open.spotify.com"],
+        "v.redd.it": ["reddit.com", "www.reddit.com"],
+        "vm.tiktok.com": ["tiktok.com", "www.tiktok.com"],
+        "vt.tiktok.com": ["tiktok.com", "www.tiktok.com"],
+        "wapo.st": ["washingtonpost.com", "www.washingtonpost.com"],
+        "x.com": ["twitter.com", "www.twitter.com"],
+        "youtu.be": ["youtube.com", "www.youtube.com"]
+    ]
+
     nonisolated static func isPermitted(_ url: URL) -> Bool {
         guard url.absoluteString.utf8.count <= maximumURLLength,
               let scheme = url.scheme?.lowercased(),
@@ -112,10 +150,28 @@ enum IRCRemotePreviewPolicy {
               let destinationScheme = destination.scheme?.lowercased(),
               let sourceHost = normalizedHost(for: source),
               let destinationHost = normalizedHost(for: destination),
-              sourceHost == destinationHost else { return false }
+              sourceScheme == "https",
+              destinationScheme == "https" else { return false }
 
-        // Redirects stay on the exact host and HTTPS transport.
-        return sourceScheme == "https" && destinationScheme == "https"
+        if sourceHost == destinationHost || hostsDifferOnlyByWWW(sourceHost, destinationHost) {
+            return true
+        }
+
+        if trustedFirstPartyRedirects[sourceHost]?.contains(destinationHost) == true {
+            return true
+        }
+
+        // URL shorteners may point at any public HTTPS site. This permits only
+        // the hop from the recognized shortener itself; a later cross-host hop
+        // must qualify independently.
+        return recognizedURLShortenerHosts.contains(sourceHost)
+    }
+
+    nonisolated private static func hostsDifferOnlyByWWW(_ lhs: String, _ rhs: String) -> Bool {
+        func removingWWW(from host: String) -> String {
+            host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        }
+        return lhs != rhs && removingWWW(from: lhs) == removingWWW(from: rhs)
     }
 
     nonisolated private static func normalizedHost(for url: URL) -> String? {

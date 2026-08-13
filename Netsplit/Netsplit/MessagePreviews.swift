@@ -366,10 +366,7 @@ struct MessagePreviewStack: View {
                         ForEach(previews) { preview in
                             switch preview {
                             case .link(let url):
-                                IRCLinkPreviewCard(
-                                    url: url,
-                                    onLoad: invalidateRowLayout
-                                )
+                                IRCLinkPreviewCard(url: url)
                             case .image(let url):
                                 IRCImagePreview(
                                     url: url,
@@ -410,13 +407,7 @@ enum IRCLinkPreviewMetadataParser {
 
     static func fetch(url: URL) async throws -> IRCLinkPreviewMetadata {
         if let oEmbedURL = redditOEmbedURL(for: url) {
-            let response = try await IRCPreviewHTTPClient.shared.load(
-                url: oEmbedURL,
-                maximumBytes: maximumOEmbedBytes,
-                acceptHeader: "application/json",
-                acceptsMIMEType: { $0 == "application/json" }
-            )
-            return try parseRedditOEmbed(data: response.data, originalURL: url)
+            return try await fetchRedditOEmbed(oEmbedURL: oEmbedURL, resolvedURL: url)
         }
 
         let response = try await IRCPreviewHTTPClient.shared.load(
@@ -428,11 +419,36 @@ enum IRCLinkPreviewMetadataParser {
                 mimeType == "text/html" || mimeType == "application/xhtml+xml"
             }
         )
+
+        // Reddit media short links resolve through /video/<id> to the full
+        // post permalink. Reddit serves a generic interstitial to preview
+        // clients at that page, so use its public oEmbed metadata once the
+        // redirect chain reveals the permalink.
+        if let oEmbedURL = redditOEmbedURL(for: response.url) {
+            return try await fetchRedditOEmbed(
+                oEmbedURL: oEmbedURL,
+                resolvedURL: response.url
+            )
+        }
+
         return parse(
             data: response.data,
             responseURL: response.url,
             textEncodingName: response.textEncodingName
         )
+    }
+
+    private static func fetchRedditOEmbed(
+        oEmbedURL: URL,
+        resolvedURL: URL
+    ) async throws -> IRCLinkPreviewMetadata {
+        let response = try await IRCPreviewHTTPClient.shared.load(
+            url: oEmbedURL,
+            maximumBytes: maximumOEmbedBytes,
+            acceptHeader: "application/json",
+            acceptsMIMEType: { $0 == "application/json" }
+        )
+        return try parseRedditOEmbed(data: response.data, originalURL: resolvedURL)
     }
 
     static func parse(
@@ -703,9 +719,9 @@ private final class IRCLinkPreviewCache {
 
 private struct IRCLinkPreviewCard: View {
     private static let maximumWidth: CGFloat = 440
+    private static let reservedHeight: CGFloat = 96
 
     let url: URL
-    let onLoad: () -> Void
     @State private var metadata: IRCLinkPreviewMetadata?
     @State private var failureReason: IRCPreviewFailureReason?
     @State private var retryCount = 0
@@ -720,31 +736,28 @@ private struct IRCLinkPreviewCard: View {
                 IRCPreviewFailureView(
                     reason: failureReason,
                     maximumWidth: Self.maximumWidth,
-                    minimumHeight: 72,
+                    minimumHeight: Self.reservedHeight,
                     retry: retry
                 )
+                .frame(height: Self.reservedHeight)
             } else {
                 ProgressView()
                     .controlSize(.small)
-                    .frame(maxWidth: Self.maximumWidth, minHeight: 72)
+                    .frame(
+                        maxWidth: Self.maximumWidth,
+                        minHeight: Self.reservedHeight,
+                        maxHeight: Self.reservedHeight
+                    )
                     .background(cardBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .accessibilityLabel("Loading link preview")
             }
         }
         .task(id: loadID) {
             failureReason = nil
-            let wasCached = IRCLinkPreviewCache.shared.cachedMetadata(for: url) != nil
             do {
                 let loadedMetadata = try await IRCLinkPreviewCache.shared.metadata(for: url)
                 guard !Task.isCancelled else { return }
                 metadata = loadedMetadata
-                if !wasCached {
-                    // The hosting view normally propagates this change on its
-                    // own. Keep a coalesced fallback for automatic-height rows
-                    // where several cards complete during insertion and AppKit
-                    // retains the loading placeholder's shorter proposal.
-                    onLoad()
-                }
             } catch {
                 guard !Task.isCancelled else { return }
                 failureReason = IRCPreviewFailureReason(error: error)
@@ -783,7 +796,7 @@ private struct IRCLinkPreviewCard: View {
                     Text(summary)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(1)
                         .multilineTextAlignment(.leading)
                 } else {
                     Text(displayURL(for: metadata))
@@ -796,8 +809,8 @@ private struct IRCLinkPreviewCard: View {
             .padding(12)
             .frame(
                 maxWidth: Self.maximumWidth,
-                minHeight: 82,
-                maxHeight: 128,
+                minHeight: Self.reservedHeight,
+                maxHeight: Self.reservedHeight,
                 alignment: .leading
             )
             .contentShape(Rectangle())

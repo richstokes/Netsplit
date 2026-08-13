@@ -2351,7 +2351,7 @@ struct IRCModelsAndPolicyTests {
         #expect(!IRCRemotePreviewPolicy.isPermitted(URL(string: "http://example.com/image.png")!))
     }
 
-    @Test("Preview redirects remain on-host and never downgrade HTTPS")
+    @Test("Preview redirects allow safe canonical hops and never downgrade HTTPS")
     func validatesPreviewRedirects() {
         #expect(!IRCRemotePreviewPolicy.permitsRedirect(
             from: URL(string: "http://example.com/article")!,
@@ -2360,6 +2360,14 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCRemotePreviewPolicy.permitsRedirect(
             from: URL(string: "https://example.com/old")!,
             to: URL(string: "https://example.com/new")!
+        ))
+        #expect(IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://example.com/article")!,
+            to: URL(string: "https://www.example.com/article")!
+        ))
+        #expect(IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://www.example.com/article")!,
+            to: URL(string: "https://example.com/article")!
         ))
         #expect(!IRCRemotePreviewPolicy.permitsRedirect(
             from: URL(string: "https://example.com/article")!,
@@ -2375,7 +2383,51 @@ struct IRCModelsAndPolicyTests {
         ))
         #expect(!IRCRemotePreviewPolicy.permitsRedirect(
             from: URL(string: "https://youtu.be/dQw4w9WgXcQ")!,
-            to: URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ")!
+            to: URL(string: "http://www.youtube.com/watch?v=dQw4w9WgXcQ")!
+        ))
+    }
+
+    @Test("Preview redirects recognize common short links")
+    func validatesTrustedPreviewRedirectors() {
+        for (source, destination) in [
+            ("https://v.redd.it/coekpuzu6beh1", "https://www.reddit.com/video/coekpuzu6beh1"),
+            ("https://redd.it/1v1awfh", "https://www.reddit.com/comments/1v1awfh"),
+            ("https://youtu.be/dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            ("https://apple.co/example", "https://www.apple.com/example"),
+            ("https://discord.gg/example", "https://discord.com/invite/example"),
+            ("https://spoti.fi/example", "https://open.spotify.com/track/example"),
+            ("https://vm.tiktok.com/example", "https://www.tiktok.com/@creator/video/123"),
+            ("https://amzn.to/example", "https://www.amazon.com/example"),
+            ("https://maps.app.goo.gl/example", "https://www.google.com/maps/place/example"),
+            ("https://t.co/example", "https://example.com/article"),
+            ("https://bit.ly/example", "https://example.com/article"),
+            ("https://tinyurl.com/example", "https://example.com/article")
+        ] {
+            #expect(IRCRemotePreviewPolicy.permitsRedirect(
+                from: URL(string: source)!,
+                to: URL(string: destination)!
+            ))
+        }
+
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://v.redd.it/coekpuzu6beh1")!,
+            to: URL(string: "https://example.com/video/coekpuzu6beh1")!
+        ))
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://malicious-t.co.example/short")!,
+            to: URL(string: "https://example.com/article")!
+        ))
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://t.co/localhost")!,
+            to: URL(string: "https://127.0.0.1/admin")!
+        ))
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://t.co/insecure")!,
+            to: URL(string: "http://example.com/article")!
+        ))
+        #expect(!IRCRemotePreviewPolicy.permitsRedirect(
+            from: URL(string: "https://example.com/first")!,
+            to: URL(string: "https://unrelated.example/second")!
         ))
     }
 
