@@ -15,8 +15,29 @@ struct IRCTranscriptTableGeometry {
 }
 
 struct IRCTranscriptRowLayoutInvalidation: Equatable {
-    let messageID: UUID
+    let messageIDs: Set<UUID>
     let revision: UInt64
+    let skipsReloadWhenRowsAlreadySettled: Bool
+
+    init(
+        messageID: UUID,
+        revision: UInt64,
+        skipsReloadWhenRowsAlreadySettled: Bool = false
+    ) {
+        messageIDs = [messageID]
+        self.revision = revision
+        self.skipsReloadWhenRowsAlreadySettled = skipsReloadWhenRowsAlreadySettled
+    }
+
+    init(
+        messageIDs: Set<UUID>,
+        revision: UInt64,
+        skipsReloadWhenRowsAlreadySettled: Bool
+    ) {
+        self.messageIDs = messageIDs
+        self.revision = revision
+        self.skipsReloadWhenRowsAlreadySettled = skipsReloadWhenRowsAlreadySettled
+    }
 }
 
 /// A view-based AppKit table that realizes only visible transcript rows while
@@ -300,16 +321,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         func detach() {
             attachmentGeneration &+= 1
-            pendingTailWorkItem?.cancel()
-            pendingTailWorkItem = nil
-            pendingTailMotionRequest = nil
-            tailPositionGeneration &+= 1
-            if isTailPositionAnimationInFlight {
-                scrollView?.stopAnimatedContentScrollAtCurrentOrigin()
-            }
-            isAwaitingTailPosition = false
-            isTailPositionAnimationInFlight = false
-            pendingTailStartOrigin = nil
+            cancelTailPositioning()
             isRestoringReadingPosition = false
             pendingHeightMessageIDs.removeAll()
             initiallyVerifiedMessageIDs.removeAll()
@@ -411,13 +423,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             // Invalidate work queued for the outgoing conversation without
             // detaching the observers or native view hierarchy.
             attachmentGeneration &+= 1
-            pendingTailWorkItem?.cancel()
-            pendingTailWorkItem = nil
-            pendingTailMotionRequest = nil
-            tailPositionGeneration &+= 1
-            if isTailPositionAnimationInFlight {
-                scrollView.stopAnimatedContentScrollAtCurrentOrigin()
-            }
+            cancelTailPositioning()
             // The native scroll view is intentionally retained across
             // conversations. A trackpad gesture can therefore keep sending
             // momentum events after the sidebar selection has changed and
@@ -442,9 +448,6 @@ struct IRCTranscriptTable: NSViewRepresentable {
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
             viewportHeightReconciliationScheduled = false
-            isAwaitingTailPosition = false
-            isTailPositionAnimationInFlight = false
-            pendingTailStartOrigin = nil
             isRestoringReadingPosition = false
             hasPendingPositionReport = false
             pendingFollowingTailReport = nil
@@ -712,10 +715,20 @@ struct IRCTranscriptTable: NSViewRepresentable {
             _ invalidation: IRCTranscriptRowLayoutInvalidation,
             in tableView: NSTableView
         ) {
-            guard messages.contains(where: { $0.id == invalidation.messageID }) else {
+            let affectedRows = messageRows(for: invalidation.messageIDs)
+            guard !affectedRows.isEmpty else { return }
+            guard needsApplying(invalidation) else { return }
+            if invalidation.skipsReloadWhenRowsAlreadySettled,
+               haveRowsSettled(affectedRows, in: tableView) {
+                recordApplied(invalidation)
+#if DEBUG
+                parent.onGeometryChange?(
+                    "row-layout-reload-skipped-settled count=\(affectedRows.count)",
+                    geometry()
+                )
+#endif
                 return
             }
-            guard needsApplying(invalidation) else { return }
             // Preview-load notifications are coalesced per conversation, so
             // the final signal can represent several rows changing height.
             // Discard every estimate for that conversation before the full
@@ -742,10 +755,54 @@ struct IRCTranscriptTable: NSViewRepresentable {
             }
 #if DEBUG
             parent.onGeometryChange?(
-                "row-layout-reloaded message=\(String(invalidation.messageID.uuidString.prefix(8)))",
+                "row-layout-reloaded count=\(affectedRows.count)",
                 geometry()
             )
 #endif
+        }
+
+        private func messageRows(for messageIDs: Set<UUID>) -> [UUID: Int] {
+            var rowsByMessageID: [UUID: Int] = [:]
+            rowsByMessageID.reserveCapacity(min(messageIDs.count, messages.count))
+            for (messageIndex, message) in messages.enumerated()
+            where messageIDs.contains(message.id) {
+                rowsByMessageID[message.id] = messageIndex + 1
+                if rowsByMessageID.count == messageIDs.count {
+                    break
+                }
+            }
+            return rowsByMessageID
+        }
+
+        /// A preview-load signal is a safety net after the hosting view has had
+        /// time to publish its intrinsic-size change. Avoid rebuilding the
+        /// table when AppKit already adopted every affected height; otherwise
+        /// retain the known-correct full reload used for stale automatic rows.
+        private func haveRowsSettled(
+            _ rowsByMessageID: [UUID: Int],
+            in tableView: NSTableView
+        ) -> Bool {
+            for (messageID, row) in rowsByMessageID {
+                guard let hostingView = hostingView(at: row, in: tableView),
+                      hostingView.hasHostedContent,
+                      hostingView.representedMessageID == messageID else {
+                    return false
+                }
+                hostingView.layoutSubtreeIfNeeded()
+                let proposedHeight = hostingView.fittingSize.height
+                let currentHeight = max(
+                    0,
+                    tableView.rect(ofRow: row).height
+                        - tableView.intercellSpacing.height
+                )
+                guard proposedHeight.isFinite,
+                      proposedHeight > 0,
+                      abs(currentHeight - proposedHeight) <= 0.5 else {
+                    return false
+                }
+                cacheRowHeight(proposedHeight, for: messageID)
+            }
+            return true
         }
 
         private func applyMessageUpdate(
@@ -990,18 +1047,21 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #if DEBUG
             parent.onGeometryChange?("tail-position-animation-started", geometry())
 #endif
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = animationDuration
-                context.timingFunction = CAMediaTimingFunction(
-                    controlPoints: 0.22,
-                    0.75,
-                    0.28,
-                    1
-                )
-                clipView.animator().setBoundsOrigin(targetOrigin)
-            } completionHandler: { [weak scrollView, weak clipView] in
-                guard let scrollView, let clipView else { return }
-                scrollView.reflectScrolledClipView(clipView)
+            scrollView.animateContentScroll(
+                to: targetOrigin,
+                duration: animationDuration,
+                timingCurve: IRCTranscriptScrollPolicy.tailAnimationTimingCurve
+            ) { [weak self, weak scrollView] metrics in
+                guard let scrollView else { return }
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+#if DEBUG
+                if let self {
+                    self.parent.onGeometryChange?(
+                        "tail-display-animation-finished frames=\(metrics.frameCount) requestedFPS=\(metrics.requestedFramesPerSecond) observedFPS=\(String(format: "%.1f", metrics.observedFramesPerSecond)) maxGapMS=\(String(format: "%.1f", metrics.longestFrameInterval * 1_000)) timeout=\(metrics.completedByTimeout)",
+                        self.geometry()
+                    )
+                }
+#endif
                 completion?(true)
             }
         }
@@ -1054,25 +1114,28 @@ struct IRCTranscriptTable: NSViewRepresentable {
             } else {
                 cancellationPhase = "settling"
             }
-            pendingTailWorkItem?.cancel()
-            pendingTailWorkItem = nil
-            pendingTailMotionRequest = nil
-            // Invalidate the completion before stopping the AppKit animation:
-            // a zero-duration replacement may deliver that completion while
-            // this method is still unwinding.
-            tailPositionGeneration &+= 1
-            isAwaitingTailPosition = false
-            pendingTailStartOrigin = nil
-            if isTailPositionAnimationInFlight {
-                scrollView?.stopAnimatedContentScrollAtCurrentOrigin()
-            }
-            isTailPositionAnimationInFlight = false
+            // Invalidate completion bookkeeping before stopping the display
+            // link so the cancelled move cannot publish a stale tail result.
+            cancelTailPositioning()
 #if DEBUG
             parent.onGeometryChange?(
                 "tail-position-cancelled source=\(source) phase=\(cancellationPhase)",
                 geometry()
             )
 #endif
+        }
+
+        private func cancelTailPositioning() {
+            pendingTailWorkItem?.cancel()
+            pendingTailWorkItem = nil
+            pendingTailMotionRequest = nil
+            tailPositionGeneration &+= 1
+            if isTailPositionAnimationInFlight {
+                scrollView?.stopAnimatedContentScrollAtCurrentOrigin()
+            }
+            isAwaitingTailPosition = false
+            isTailPositionAnimationInFlight = false
+            pendingTailStartOrigin = nil
         }
 
         /// AppKit posts bounds changes from inside scrolling and layout. Keep
@@ -1144,6 +1207,14 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 defer { self.hasPendingWidthRefresh = false }
                 guard let tableView = self.tableView else { return }
                 let wasFollowingTail = self.followingTail
+                // A tail animation targets the document height measured when
+                // it began. Rewrapping the transcript can replace that height
+                // wholesale; stop the obsolete motion before reloading so it
+                // cannot overwrite the exact post-resize tail position on its
+                // next display-link callback.
+                if wasFollowingTail, self.isAwaitingTailPosition {
+                    self.cancelTailPositioning()
+                }
                 let readingAnchor = self.beginReadingPositionRestoration()
                 // NSTableView retains automatic-height proposals across an
                 // in-place hosted-root update. Rebuild the virtualized rows
@@ -1726,7 +1797,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         private func applyPendingRowLayoutInvalidation(to messages: [IRCMessage]) {
             guard let invalidation = rowLayoutInvalidation,
-                  messages.contains(where: { $0.id == invalidation.messageID }),
+                  !invalidation.messageIDs.isDisjoint(
+                    with: Set(messages.lazy.map(\.id))
+                  ),
                   needsApplying(invalidation) else { return }
             removeCurrentRowHeightCache()
             recordApplied(invalidation)
@@ -1863,20 +1936,42 @@ final class TranscriptScrollView: NSScrollView {
     private var lastReportedViewportWidth: CGFloat = 0
     private var lastReportedViewportHeight: CGFloat = 0
     private var momentumPolicy = IRCTranscriptScrollMomentumPolicy()
+    private var contentScrollAnimator: TranscriptDisplayLinkScrollAnimator?
+
+    func animateContentScroll(
+        to targetOrigin: NSPoint,
+        duration: TimeInterval,
+        timingCurve: IRCCubicBezierTimingCurve,
+        completion: @escaping (TranscriptScrollAnimationMetrics) -> Void
+    ) {
+        contentScrollAnimator?.cancel()
+        let animator = TranscriptDisplayLinkScrollAnimator(
+            scrollView: self,
+            targetOrigin: targetOrigin,
+            duration: duration,
+            timingCurve: timingCurve
+        )
+        contentScrollAnimator = animator
+        animator.start { [weak self, weak animator] metrics in
+            guard let self, self.contentScrollAnimator === animator else { return }
+            self.contentScrollAnimator = nil
+            completion(metrics)
+        }
+    }
 
     func discardMomentumUntilNextDirectScroll() {
         momentumPolicy.discardMomentumUntilNextDirectScroll()
     }
 
-    /// Give a newly started user gesture immediate ownership of the clip
-    /// view. AppKit otherwise continues an already-running bounds animation
-    /// after the coordinator has cancelled its completion bookkeeping.
+    /// Give a newly started user gesture immediate ownership of the clip view.
+    /// The current display-link position is already the model-view position,
+    /// so cancellation can stop there without reconstructing presentation
+    /// layer state.
     func stopAnimatedContentScrollAtCurrentOrigin() {
+        contentScrollAnimator?.cancel()
+        contentScrollAnimator = nil
         let currentOrigin = contentView.bounds.origin
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            contentView.animator().setBoundsOrigin(currentOrigin)
-        }
+        contentView.setBoundsOrigin(currentOrigin)
         reflectScrolledClipView(contentView)
     }
 
@@ -1901,6 +1996,179 @@ final class TranscriptScrollView: NSScrollView {
         ) else { return }
         onUserScroll?()
         super.scrollWheel(with: event)
+    }
+}
+
+struct TranscriptScrollAnimationMetrics: Equatable {
+    let frameCount: Int
+    let requestedFramesPerSecond: Int
+    let observedFramesPerSecond: Double
+    let longestFrameInterval: TimeInterval
+    let completedByTimeout: Bool
+}
+
+/// Drives transcript tail movement from the view's display link rather than
+/// AppKit's generic animator proxy. This follows a ProMotion window between
+/// screens and requests every available refresh while keeping NSTableView's
+/// model bounds current for row virtualization and mid-animation retargeting.
+@MainActor
+private final class TranscriptDisplayLinkScrollAnimator: NSObject {
+    private weak var scrollView: TranscriptScrollView?
+    private let startOrigin: NSPoint
+    private let targetOrigin: NSPoint
+    private let duration: TimeInterval
+    private let timingCurve: IRCCubicBezierTimingCurve
+    private let requestedFramesPerSecond: Int
+    private var displayLink: CADisplayLink?
+    private var timeoutWorkItem: DispatchWorkItem?
+    private var completion: ((TranscriptScrollAnimationMetrics) -> Void)?
+    private var startTimestamp: CFTimeInterval = 0
+    private var firstFrameTimestamp: CFTimeInterval?
+    private var previousFrameTimestamp: CFTimeInterval?
+    private var lastFrameTimestamp: CFTimeInterval?
+    private var frameCount = 0
+    private var longestFrameInterval: TimeInterval = 0
+
+    init(
+        scrollView: TranscriptScrollView,
+        targetOrigin: NSPoint,
+        duration: TimeInterval,
+        timingCurve: IRCCubicBezierTimingCurve
+    ) {
+        self.scrollView = scrollView
+        startOrigin = scrollView.contentView.bounds.origin
+        self.targetOrigin = targetOrigin
+        self.duration = max(duration, 0.001)
+        self.timingCurve = timingCurve
+        requestedFramesPerSecond = max(
+            1,
+            scrollView.window?.screen?.maximumFramesPerSecond
+                ?? NSScreen.main?.maximumFramesPerSecond
+                ?? 60
+        )
+    }
+
+    func start(
+        completion: @escaping (TranscriptScrollAnimationMetrics) -> Void
+    ) {
+        guard let scrollView else { return }
+        self.completion = completion
+        startTimestamp = CACurrentMediaTime()
+
+        let displayLink = scrollView.displayLink(
+            target: self,
+            selector: #selector(displayLinkDidFire(_:))
+        )
+        let maximumFrameRate = Float(requestedFramesPerSecond)
+        displayLink.preferredFrameRateRange = CAFrameRateRange(
+            minimum: min(60, maximumFrameRate),
+            maximum: maximumFrameRate,
+            preferred: maximumFrameRate
+        )
+        self.displayLink = displayLink
+        displayLink.add(to: .main, forMode: .common)
+
+        // NSView display links intentionally pause while their view is hidden
+        // or detached. Ensure a background/minimized transcript cannot remain
+        // indefinitely in the coordinator's in-flight animation state.
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
+            self?.finish(completedByTimeout: true)
+        }
+        self.timeoutWorkItem = timeoutWorkItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + duration + 0.1,
+            execute: timeoutWorkItem
+        )
+    }
+
+    func cancel() {
+        completion = nil
+        invalidateScheduling()
+    }
+
+    @objc private func displayLinkDidFire(_ displayLink: CADisplayLink) {
+        guard let scrollView else {
+            cancel()
+            return
+        }
+        let timestamp = displayLink.targetTimestamp
+        frameCount += 1
+        firstFrameTimestamp = firstFrameTimestamp ?? timestamp
+        if let previousFrameTimestamp {
+            longestFrameInterval = max(
+                longestFrameInterval,
+                timestamp - previousFrameTimestamp
+            )
+        }
+        previousFrameTimestamp = timestamp
+        lastFrameTimestamp = timestamp
+
+        let linearProgress = CGFloat(
+            min(1, max(0, (timestamp - startTimestamp) / duration))
+        )
+        let easedProgress = timingCurve.value(at: linearProgress)
+        let origin = NSPoint(
+            x: startOrigin.x + (targetOrigin.x - startOrigin.x) * easedProgress,
+            y: startOrigin.y + (targetOrigin.y - startOrigin.y) * easedProgress
+        )
+        let clipView = scrollView.contentView
+        let constrainedOrigin = clipView.constrainBoundsRect(NSRect(
+            origin: origin,
+            size: clipView.bounds.size
+        )).origin
+        clipView.setBoundsOrigin(constrainedOrigin)
+        scrollView.reflectScrolledClipView(clipView)
+
+        if linearProgress >= 1 {
+            finish(completedByTimeout: false)
+        }
+    }
+
+    private func finish(completedByTimeout: Bool) {
+        guard let completion else {
+            invalidateScheduling()
+            return
+        }
+        if let scrollView {
+            let clipView = scrollView.contentView
+            let constrainedOrigin = clipView.constrainBoundsRect(NSRect(
+                origin: targetOrigin,
+                size: clipView.bounds.size
+            )).origin
+            clipView.setBoundsOrigin(constrainedOrigin)
+            scrollView.reflectScrolledClipView(clipView)
+        }
+        self.completion = nil
+        invalidateScheduling()
+
+        let observedFramesPerSecond: Double
+        if frameCount > 1,
+           let firstFrameTimestamp,
+           let lastFrameTimestamp,
+           lastFrameTimestamp > firstFrameTimestamp {
+            observedFramesPerSecond = Double(frameCount - 1)
+                / (lastFrameTimestamp - firstFrameTimestamp)
+        } else {
+            observedFramesPerSecond = 0
+        }
+        completion(TranscriptScrollAnimationMetrics(
+            frameCount: frameCount,
+            requestedFramesPerSecond: requestedFramesPerSecond,
+            observedFramesPerSecond: observedFramesPerSecond,
+            longestFrameInterval: longestFrameInterval,
+            completedByTimeout: completedByTimeout
+        ))
+    }
+
+    private func invalidateScheduling() {
+        timeoutWorkItem?.cancel()
+        timeoutWorkItem = nil
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    deinit {
+        displayLink?.invalidate()
     }
 }
 

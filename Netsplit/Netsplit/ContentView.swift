@@ -1823,8 +1823,9 @@ private struct ConversationTranscript: View {
         let previewLayoutInvalidation: IRCTranscriptRowLayoutInvalidation? =
             previewExpansion.latestLayoutChange(for: selection).map { change in
                 IRCTranscriptRowLayoutInvalidation(
-                    messageID: change.messageID,
-                    revision: change.revision
+                    messageIDs: change.messageIDs,
+                    revision: change.revision,
+                    skipsReloadWhenRowsAlreadySettled: change.isPreviewLoadFallback
                 )
             }
 #if DEBUG

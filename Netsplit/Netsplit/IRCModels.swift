@@ -1298,6 +1298,54 @@ struct IRCTranscriptTailMotion: Equatable {
     let duration: TimeInterval
 }
 
+struct IRCCubicBezierTimingCurve: Equatable {
+    let firstControlPoint: CGPoint
+    let secondControlPoint: CGPoint
+
+    /// Resolves the curve's y value for a linear time progress. Cubic Bézier
+    /// timing curves encode time on the x axis, so evaluating y directly with
+    /// the same parameter would subtly change the requested easing.
+    func value(at progress: CGFloat) -> CGFloat {
+        let clampedProgress = min(1, max(0, progress))
+        guard clampedProgress > 0 else { return 0 }
+        guard clampedProgress < 1 else { return 1 }
+
+        var lowerBound: CGFloat = 0
+        var upperBound: CGFloat = 1
+        // Twelve bisection steps resolve time to substantially less than a
+        // device pixel over the transcript's short animation distances.
+        for _ in 0..<12 {
+            let parameter = (lowerBound + upperBound) / 2
+            if cubicCoordinate(
+                parameter,
+                firstControl: firstControlPoint.x,
+                secondControl: secondControlPoint.x
+            ) < clampedProgress {
+                lowerBound = parameter
+            } else {
+                upperBound = parameter
+            }
+        }
+        let parameter = (lowerBound + upperBound) / 2
+        return cubicCoordinate(
+            parameter,
+            firstControl: firstControlPoint.y,
+            secondControl: secondControlPoint.y
+        )
+    }
+
+    private func cubicCoordinate(
+        _ parameter: CGFloat,
+        firstControl: CGFloat,
+        secondControl: CGFloat
+    ) -> CGFloat {
+        let inverse = 1 - parameter
+        return 3 * inverse * inverse * parameter * firstControl
+            + 3 * inverse * parameter * parameter * secondControl
+            + parameter * parameter * parameter
+    }
+}
+
 enum IRCTranscriptScrollPolicy {
     static let coalescingDelay: Duration = .milliseconds(60)
     static let minimumAnimationDuration: TimeInterval = 0.20
@@ -1305,6 +1353,10 @@ enum IRCTranscriptScrollPolicy {
     static let maximumAnimatedViewportFraction: CGFloat = 0.85
     static let minimumMaximumAnimatedDistance: CGFloat = 320
     static let tailTolerance: CGFloat = 24
+    static let tailAnimationTimingCurve = IRCCubicBezierTimingCurve(
+        firstControlPoint: CGPoint(x: 0.22, y: 0.75),
+        secondControlPoint: CGPoint(x: 0.28, y: 1)
+    )
 
     /// Small and ordinary batched arrivals receive the same polished motion.
     /// A true flood can add more than a viewport at once; sweeping through all

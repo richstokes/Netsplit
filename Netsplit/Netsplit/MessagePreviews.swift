@@ -109,8 +109,9 @@ enum IRCPreviewFailureReason: Equatable {
 
 struct IRCMessagePreviewLayoutChange: Equatable {
     let selection: SidebarItem
-    let messageID: UUID
+    let messageIDs: Set<UUID>
     let revision: UInt64
+    let isPreviewLoadFallback: Bool
 }
 
 /// A small, deterministic memory cache for preview state that must survive a
@@ -174,7 +175,8 @@ struct IRCPreviewMemoryCache<Key: Hashable, Value> {
 
 final class IRCMessagePreviewExpansionStore: ObservableObject {
     private struct PendingPreviewLayoutInvalidation {
-        let messageID: UUID
+        let generation: UInt64
+        let messageIDs: Set<UUID>
         let workItem: DispatchWorkItem
     }
 
@@ -189,6 +191,7 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
         SidebarItem: PendingPreviewLayoutInvalidation
     ] = [:]
     private var nextLayoutRevision: UInt64 = 0
+    private var nextPendingInvalidationGeneration: UInt64 = 0
 
     func isExpanded(for messageID: UUID, in selection: SidebarItem) -> Bool {
         !(collapsedMessageIDsBySelection[selection]?.contains(messageID) ?? false)
@@ -223,11 +226,25 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
 
     func invalidateLayout(for messageID: UUID, in selection: SidebarItem) {
         cancelPendingPreviewLayoutInvalidation(in: selection)
+        publishLayoutInvalidation(
+            for: [messageID],
+            in: selection,
+            isPreviewLoadFallback: false
+        )
+    }
+
+    private func publishLayoutInvalidation(
+        for messageIDs: Set<UUID>,
+        in selection: SidebarItem,
+        isPreviewLoadFallback: Bool
+    ) {
+        guard !messageIDs.isEmpty else { return }
         nextLayoutRevision &+= 1
         let change = IRCMessagePreviewLayoutChange(
             selection: selection,
-            messageID: messageID,
-            revision: nextLayoutRevision
+            messageIDs: messageIDs,
+            revision: nextLayoutRevision,
+            isPreviewLoadFallback: isPreviewLoadFallback
         )
         latestLayoutChangesBySelection[selection] = change
         latestLayoutChange = change
@@ -237,26 +254,49 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
         latestLayoutChangesBySelection[selection]
     }
 
-    /// Image preview resources in a newly realized transcript commonly
-    /// complete in a short burst. AppKit needs a full native-table measurement
-    /// to accept their new automatic heights, so collapse that burst into one
-    /// refresh.
+    /// Preview resources in a newly realized transcript commonly complete in
+    /// a short burst. AppKit normally adopts their intrinsic-size changes, but
+    /// keeps a stale automatic height in some multi-preview rows. Collapse the
+    /// burst into one fallback refresh. The transcript skips that refresh when
+    /// every affected row has already settled, avoiding a redundant rebuild.
     /// Disclosure changes continue to use invalidateLayout directly and stay
     /// immediate.
     func schedulePreviewLayoutInvalidation(
         for messageID: UUID,
         in selection: SidebarItem
     ) {
+        let accumulatedMessageIDs = pendingPreviewLayoutInvalidations[selection]?
+            .messageIDs.union([messageID]) ?? [messageID]
+        schedulePreviewLayoutInvalidation(
+            for: accumulatedMessageIDs,
+            in: selection
+        )
+    }
+
+    private func schedulePreviewLayoutInvalidation(
+        for messageIDs: Set<UUID>,
+        in selection: SidebarItem
+    ) {
+        guard !messageIDs.isEmpty else { return }
         cancelPendingPreviewLayoutInvalidation(in: selection)
+        nextPendingInvalidationGeneration &+= 1
+        let generation = nextPendingInvalidationGeneration
         let workItem = DispatchWorkItem { [weak self] in
             guard let self,
-                  self.pendingPreviewLayoutInvalidations[selection]?.messageID == messageID
+                  self.pendingPreviewLayoutInvalidations[selection]?.generation == generation,
+                  let pending = self.pendingPreviewLayoutInvalidations.removeValue(
+                    forKey: selection
+                  )
             else { return }
-            self.pendingPreviewLayoutInvalidations.removeValue(forKey: selection)
-            self.invalidateLayout(for: messageID, in: selection)
+            self.publishLayoutInvalidation(
+                for: pending.messageIDs,
+                in: selection,
+                isPreviewLoadFallback: true
+            )
         }
         pendingPreviewLayoutInvalidations[selection] = PendingPreviewLayoutInvalidation(
-            messageID: messageID,
+            generation: generation,
+            messageIDs: messageIDs,
             workItem: workItem
         )
         DispatchQueue.main.asyncAfter(
@@ -270,9 +310,18 @@ final class IRCMessagePreviewExpansionStore: ObservableObject {
         if collapsedMessageIDsBySelection[selection]?.isEmpty == true {
             collapsedMessageIDsBySelection.removeValue(forKey: selection)
         }
-        if let pending = pendingPreviewLayoutInvalidations[selection],
-           !messageIDs.contains(pending.messageID) {
-            cancelPendingPreviewLayoutInvalidation(in: selection)
+        if let pending = pendingPreviewLayoutInvalidations[selection] {
+            let retainedPendingMessageIDs = pending.messageIDs.intersection(messageIDs)
+            if retainedPendingMessageIDs != pending.messageIDs {
+                if retainedPendingMessageIDs.isEmpty {
+                    cancelPendingPreviewLayoutInvalidation(in: selection)
+                } else {
+                    schedulePreviewLayoutInvalidation(
+                        for: retainedPendingMessageIDs,
+                        in: selection
+                    )
+                }
+            }
         }
     }
 
@@ -317,7 +366,10 @@ struct MessagePreviewStack: View {
                         ForEach(previews) { preview in
                             switch preview {
                             case .link(let url):
-                                IRCLinkPreviewCard(url: url)
+                                IRCLinkPreviewCard(
+                                    url: url,
+                                    onLoad: invalidateRowLayout
+                                )
                             case .image(let url):
                                 IRCImagePreview(
                                     url: url,
@@ -653,6 +705,7 @@ private struct IRCLinkPreviewCard: View {
     private static let maximumWidth: CGFloat = 440
 
     let url: URL
+    let onLoad: () -> Void
     @State private var metadata: IRCLinkPreviewMetadata?
     @State private var failureReason: IRCPreviewFailureReason?
     @State private var retryCount = 0
@@ -680,13 +733,18 @@ private struct IRCLinkPreviewCard: View {
         }
         .task(id: loadID) {
             failureReason = nil
+            let wasCached = IRCLinkPreviewCache.shared.cachedMetadata(for: url) != nil
             do {
                 let loadedMetadata = try await IRCLinkPreviewCache.shared.metadata(for: url)
                 guard !Task.isCancelled else { return }
-                // The hosting view propagates this intrinsic-size change to
-                // its table row. A separate delayed reload would resize the
-                // same link card a second time.
                 metadata = loadedMetadata
+                if !wasCached {
+                    // The hosting view normally propagates this change on its
+                    // own. Keep a coalesced fallback for automatic-height rows
+                    // where several cards complete during insertion and AppKit
+                    // retains the loading placeholder's shorter proposal.
+                    onLoad()
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 failureReason = IRCPreviewFailureReason(error: error)

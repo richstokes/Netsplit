@@ -1858,7 +1858,8 @@ struct IRCModelsAndPolicyTests {
         let firstChange = try #require(expansion.latestLayoutChange)
 
         #expect(firstChange.selection == selection)
-        #expect(firstChange.messageID == messageID)
+        #expect(firstChange.messageIDs == [messageID])
+        #expect(!firstChange.isPreviewLoadFallback)
         #expect(expansion.isExpanded(for: messageID, in: selection))
 
         expansion.invalidateLayout(for: messageID, in: selection)
@@ -1882,13 +1883,16 @@ struct IRCModelsAndPolicyTests {
         expansion.invalidateLayout(for: secondMessageID, in: secondSelection)
 
         #expect(expansion.latestLayoutChange(for: firstSelection) == firstChange)
-        #expect(expansion.latestLayoutChange(for: secondSelection)?.messageID == secondMessageID)
+        #expect(
+            expansion.latestLayoutChange(for: secondSelection)?.messageIDs
+                == [secondMessageID]
+        )
         #expect(expansion.latestLayoutChange?.selection == secondSelection)
     }
 
-    @Test("A burst of loaded image previews produces one transcript layout refresh")
+    @Test("A burst of loaded previews produces one transcript layout fallback")
     @MainActor
-    func coalescesImagePreviewLoadLayoutInvalidations() async throws {
+    func coalescesPreviewLoadLayoutInvalidations() async throws {
         let selection = SidebarItem.channel(UUID())
         let messageIDs = (0..<20).map { _ in UUID() }
         let expansion = IRCMessagePreviewExpansionStore()
@@ -1906,8 +1910,36 @@ struct IRCModelsAndPolicyTests {
         }
         let change = try #require(expansion.latestLayoutChange)
         #expect(change.selection == selection)
-        #expect(change.messageID == messageIDs.last)
+        #expect(change.messageIDs == Set(messageIDs))
         #expect(change.revision == 1)
+        #expect(change.isPreviewLoadFallback)
+    }
+
+    @Test("Pruning messages preserves pending preview fallbacks for retained rows")
+    @MainActor
+    func prunesPendingPreviewLayoutInvalidations() async throws {
+        let selection = SidebarItem.channel(UUID())
+        let retainedMessageIDs: Set<UUID> = [UUID(), UUID()]
+        let prunedMessageID = UUID()
+        let expansion = IRCMessagePreviewExpansionStore()
+
+        for messageID in retainedMessageIDs.union([prunedMessageID]) {
+            expansion.schedulePreviewLayoutInvalidation(
+                for: messageID,
+                in: selection
+            )
+        }
+        expansion.retainMessages(
+            withIDs: retainedMessageIDs,
+            in: selection
+        )
+
+        try await Self.waitUntil(timeout: .seconds(1)) {
+            expansion.latestLayoutChange != nil
+        }
+        let change = try #require(expansion.latestLayoutChange)
+        #expect(change.messageIDs == retainedMessageIDs)
+        #expect(change.isPreviewLoadFallback)
     }
 
     @Test("Preview cache keeps the newest visible resources under its cost limit")
@@ -1979,8 +2011,9 @@ struct IRCModelsAndPolicyTests {
         func rootView() -> AnyView {
             let rowLayoutInvalidation = expansion.latestLayoutChange.map {
                 IRCTranscriptRowLayoutInvalidation(
-                    messageID: $0.messageID,
-                    revision: $0.revision
+                    messageIDs: $0.messageIDs,
+                    revision: $0.revision,
+                    skipsReloadWhenRowsAlreadySettled: $0.isPreviewLoadFallback
                 )
             }
             let preview: AnyView = if isLoaded {
@@ -2057,6 +2090,93 @@ struct IRCModelsAndPolicyTests {
             tableView.rect(ofRow: 1).height > placeholderHeight + 150
         }
         #expect(tableView.rect(ofRow: 1).height > placeholderHeight + 150)
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    @Test("A settled preview fallback does not rebuild its native row")
+    @MainActor
+    func skipsRedundantPreviewFallbackReload() async throws {
+        let message = IRCMessage(sender: "tester", text: "Settled preview")
+        let selection = SidebarItem.channel(UUID())
+        var rowLayoutInvalidation: IRCTranscriptRowLayoutInvalidation?
+        var didPositionInitially = false
+        var geometryEvents: [String] = []
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: selection,
+                    messages: [message],
+                    estimatedRowHeight: 24,
+                    rowSpacing: 0,
+                    renderConfiguration: "settled-preview-fallback-test",
+                    rowLayoutInvalidation: rowLayoutInvalidation,
+                    makeRow: { _ in
+                        AnyView(Color.clear.frame(height: 96))
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { _, _ in },
+                    onGeometryChange: { event, _ in
+                        geometryEvents.append(event)
+                    }
+                )
+                .frame(width: 600, height: 500)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { didPositionInitially }
+        let tableView = try #require(
+            Self.view(
+                withIdentifier: "IRCTranscriptTable",
+                in: hostingController.view
+            ) as? NSTableView
+        )
+        let originalCell = try #require(
+            tableView.view(atColumn: 0, row: 1, makeIfNecessary: false)
+        )
+        geometryEvents.removeAll()
+
+        rowLayoutInvalidation = IRCTranscriptRowLayoutInvalidation(
+            messageIDs: [message.id],
+            revision: 1,
+            skipsReloadWhenRowsAlreadySettled: true
+        )
+        hostingController.rootView = rootView()
+
+        try await Self.waitUntil {
+            geometryEvents.contains {
+                $0.hasPrefix("row-layout-reload-skipped-settled")
+            }
+        }
+        let retainedCell = try #require(
+            tableView.view(atColumn: 0, row: 1, makeIfNecessary: false)
+        )
+
+        #expect(retainedCell === originalCell)
+        #expect(!geometryEvents.contains {
+            $0.hasPrefix("row-layout-reloaded count=")
+        })
 
         hostingController.rootView = AnyView(EmptyView())
         hostingController.view.layoutSubtreeIfNeeded()
@@ -2843,6 +2963,21 @@ struct IRCModelsAndPolicyTests {
             viewportHeight: 879,
             allowsAnimation: false
         ) == nil)
+    }
+
+    @Test("Transcript tail easing is bounded and monotonic")
+    func resolvesTranscriptTailTimingCurve() {
+        let curve = IRCTranscriptScrollPolicy.tailAnimationTimingCurve
+        let samples = stride(from: CGFloat(0), through: 1, by: 0.025).map {
+            curve.value(at: $0)
+        }
+
+        #expect(curve.value(at: -1) == 0)
+        #expect(curve.value(at: 2) == 1)
+        #expect(samples.first == 0)
+        #expect(samples.last == 1)
+        #expect(zip(samples, samples.dropFirst()).allSatisfy(<=))
+        #expect(samples.allSatisfy { (0...1).contains($0) })
     }
 
     @Test("Conversation replacement discards inherited momentum until a direct scroll")
@@ -5201,7 +5336,7 @@ struct IRCModelsAndPolicyTests {
         messages.append(previewMessage)
         hostingController.rootView = rootView()
 
-        // Load after the coalesced append has begun its 120 ms animation,
+        // Load after the coalesced append has begun its 200 ms animation,
         // matching a fast cached preview completing during that movement.
         try await Task.sleep(for: .milliseconds(100))
         previewIsLoaded = true
@@ -6009,8 +6144,9 @@ private struct PreviewExpansionHeightTestTranscript: View {
             expansion.latestLayoutChange.flatMap { change in
             guard change.selection == selection else { return nil }
             return IRCTranscriptRowLayoutInvalidation(
-                messageID: change.messageID,
-                revision: change.revision
+                messageIDs: change.messageIDs,
+                revision: change.revision,
+                skipsReloadWhenRowsAlreadySettled: change.isPreviewLoadFallback
             )
         }
         IRCTranscriptTable(
