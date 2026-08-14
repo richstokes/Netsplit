@@ -4480,13 +4480,27 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
-    @Test("Native transcript does not reuse hosted cells across conversations")
+    @Test("Native transcript does not reuse hosted cells across attachments")
     @MainActor
-    func isolatesNativeTranscriptCellsByConversation() async throws {
+    func isolatesNativeTranscriptCellsByAttachment() async throws {
+        let tallPreviewMarker = "tall preview"
+        let regularRowHeight: CGFloat = 24
+        let tallPreviewRowHeight: CGFloat = 280
+        func rowHeight(for message: IRCMessage) -> CGFloat {
+            message.text.contains(tallPreviewMarker)
+                ? tallPreviewRowHeight
+                : regularRowHeight
+        }
+
         let firstIdentity = SidebarItem.channel(UUID())
         let secondIdentity = SidebarItem.channel(UUID())
-        let firstMessages = (0..<100).map {
-            IRCMessage(sender: "first", text: "First conversation message \($0)")
+        var firstMessages = (0..<100).map { index in
+            IRCMessage(
+                sender: "first",
+                text: index == 99
+                    ? "First conversation \(tallPreviewMarker) row"
+                    : "First conversation message \(index)"
+            )
         }
         let secondMessages = (0..<100).map {
             IRCMessage(sender: "second", text: "Second conversation message \($0)")
@@ -4508,8 +4522,8 @@ struct IRCModelsAndPolicyTests {
                             Text(message.text)
                                 .frame(
                                     maxWidth: .infinity,
-                                    minHeight: message.sender == "first" ? 72 : 24,
-                                    maxHeight: message.sender == "first" ? 72 : 24,
+                                    minHeight: rowHeight(for: message),
+                                    maxHeight: rowHeight(for: message),
                                     alignment: .leading
                                 )
                         )
@@ -4548,26 +4562,26 @@ struct IRCModelsAndPolicyTests {
             ) as? NSTableView
         )
 
-        func visibleHostingViewIDs() -> Set<ObjectIdentifier> {
+        func visibleHostingViews() -> [NSView] {
             let visibleRows = tableView.rows(in: tableView.visibleRect)
             guard visibleRows.location != NSNotFound else { return [] }
-            return Set(
-                (visibleRows.location..<NSMaxRange(visibleRows)).compactMap { row in
-                    guard let cell = tableView.view(
-                        atColumn: 0,
-                        row: row,
-                        makeIfNecessary: false
-                    ),
-                    let hostingView = Self.view(
-                        withIdentifier: "IRCTranscriptHostedRow",
-                        in: cell
-                    ) else { return nil }
-                    return ObjectIdentifier(hostingView)
-                }
-            )
+            return (visibleRows.location..<NSMaxRange(visibleRows)).compactMap { row in
+                guard let cell = tableView.view(
+                    atColumn: 0,
+                    row: row,
+                    makeIfNecessary: false
+                ) else { return nil }
+                return Self.view(
+                    withIdentifier: "IRCTranscriptHostedRow",
+                    in: cell
+                )
+            }
         }
 
-        let firstHostingViewIDs = visibleHostingViewIDs()
+        // Retain the views while comparing identity; otherwise a freshly
+        // allocated view can legitimately reuse a deallocated view's address.
+        let firstHostingViews = visibleHostingViews()
+        let firstHostingViewIDs = Set(firstHostingViews.map(ObjectIdentifier.init))
         #expect(!firstHostingViewIDs.isEmpty)
 
         contentIdentity = secondIdentity
@@ -4575,11 +4589,49 @@ struct IRCModelsAndPolicyTests {
         hostingController.rootView = rootView()
         hostingController.view.layoutSubtreeIfNeeded()
         try await Self.waitUntil {
-            initialPositionCount == 2 && !visibleHostingViewIDs().isEmpty
+            initialPositionCount == 2 && !visibleHostingViews().isEmpty
         }
 
-        let secondHostingViewIDs = visibleHostingViewIDs()
+        let secondHostingViews = visibleHostingViews()
+        let secondHostingViewIDs = Set(secondHostingViews.map(ObjectIdentifier.init))
         #expect(firstHostingViewIDs.isDisjoint(with: secondHostingViewIDs))
+
+        firstMessages.append(contentsOf: (100..<112).map {
+            IRCMessage(sender: "first", text: "First conversation message \($0)")
+        })
+        contentIdentity = firstIdentity
+        messages = firstMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil {
+            initialPositionCount == 3 && !visibleHostingViews().isEmpty
+        }
+
+        // A revisit is a new row-mapping lifecycle even though the content
+        // identity matches. Reusing a hosting view from the previous visit can
+        // feed its old frame back into SwiftUI's intrinsic-height proposal,
+        // allowing a tall preview row to become blank space around a short
+        // message. Height estimates remain cached separately by message ID.
+        let revisitedFirstHostingViews = visibleHostingViews()
+        let revisitedFirstHostingViewIDs = Set(
+            revisitedFirstHostingViews.map(ObjectIdentifier.init)
+        )
+        #expect(firstHostingViewIDs.isDisjoint(with: revisitedFirstHostingViewIDs))
+        #expect(secondHostingViewIDs.isDisjoint(with: revisitedFirstHostingViewIDs))
+
+        let revisitedVisibleRows = tableView.rows(in: tableView.visibleRect)
+        let revisitedMessageRows = revisitedVisibleRows.location == NSNotFound
+            ? []
+            : (revisitedVisibleRows.location..<NSMaxRange(revisitedVisibleRows)).filter {
+                $0 > 0 && $0 <= firstMessages.count
+            }
+        #expect(!revisitedMessageRows.isEmpty)
+        for row in revisitedMessageRows {
+            let message = firstMessages[row - 1]
+            #expect(
+                abs(tableView.rect(ofRow: row).height - rowHeight(for: message)) <= 0.5
+            )
+        }
 
         hostingController.rootView = AnyView(EmptyView())
         hostingController.view.layoutSubtreeIfNeeded()

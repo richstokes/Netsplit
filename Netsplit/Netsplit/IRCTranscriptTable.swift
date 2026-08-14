@@ -249,7 +249,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var pendingFollowingTailReport: (Bool, IRCTranscriptTableGeometry)?
 #if DEBUG
         private var pendingDebugGeometryWorkItem: DispatchWorkItem?
-        private var crossConversationCellsDiscarded = 0
+        private var staleAttachmentCellsDiscarded = 0
         private var pendingRowHeightCacheSwitchSnapshot: RowHeightCacheSwitchSnapshot?
 #endif
         private var hasPendingWidthRefresh = false
@@ -332,7 +332,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
             pendingDebugGeometryWorkItem = nil
-            crossConversationCellsDiscarded = 0
+            staleAttachmentCellsDiscarded = 0
             pendingRowHeightCacheSwitchSnapshot = nil
 #endif
             hasPendingPositionReport = false
@@ -434,7 +434,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #if DEBUG
             pendingDebugGeometryWorkItem?.cancel()
             pendingDebugGeometryWorkItem = nil
-            crossConversationCellsDiscarded = 0
+            staleAttachmentCellsDiscarded = 0
             pendingRowHeightCacheSwitchSnapshot = nil
 #endif
 
@@ -521,18 +521,25 @@ struct IRCTranscriptTable: NSViewRepresentable {
             ) as? TranscriptMessageCellView
             let cell: TranscriptMessageCellView
             if let reusableCell,
-               reusableCell.canReuse(for: contentIdentity) {
+               reusableCell.canReuse(
+                   for: contentIdentity,
+                   attachmentGeneration: attachmentGeneration
+               ) {
                 cell = reusableCell
             } else {
-                // Row-height measurements are scoped per conversation, so
-                // the hosted AppKit view must use the same boundary. Directly
-                // retargeting a cell from another conversation can briefly
-                // expose its outgoing SwiftUI intrinsic height before the new
-                // root settles, leaving an incorrect automatic row height.
+                // A conversation replacement establishes a fresh mapping
+                // between row indexes, messages, and hosted views. Reusing a
+                // cell from an earlier attachment can feed its old frame back
+                // into SwiftUI's intrinsic-height proposal. A tall preview can
+                // then become blank space around an unrelated short message,
+                // even when revisiting the same conversation. Continue normal
+                // virtualization reuse within this attachment, but begin each
+                // replacement with a neutral hosting graph. Message-keyed
+                // height estimates remain in the separate conversation cache.
                 if let reusableCell {
                     reusableCell.releaseHostedContent()
 #if DEBUG
-                    crossConversationCellsDiscarded += 1
+                    staleAttachmentCellsDiscarded += 1
 #endif
                 }
                 cell = TranscriptMessageCellView()
@@ -541,7 +548,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     self?.scheduleHeightInvalidation(for: messageID)
                 }
             }
-            cell.assignReuseScope(contentIdentity)
+            cell.assignReuseScope(
+                contentIdentity,
+                attachmentGeneration: attachmentGeneration
+            )
             let cancelledPendingRelease = cell.hostingView.setHostedContent(
                 sizedRow(message, width: currentContentWidth(in: tableView)),
                 for: message.id
@@ -689,9 +699,9 @@ struct IRCTranscriptTable: NSViewRepresentable {
                         geometry
                     )
                 }
-                if self.crossConversationCellsDiscarded > 0 {
+                if self.staleAttachmentCellsDiscarded > 0 {
                     self.parent.onGeometryChange?(
-                        "cross-conversation-cells-discarded count=\(self.crossConversationCellsDiscarded)",
+                        "stale-attachment-cells-discarded count=\(self.staleAttachmentCellsDiscarded)",
                         geometry
                     )
                 }
@@ -2249,9 +2259,13 @@ final class IntrinsicInvalidatingHostingView: NSHostingView<AnyView> {
 }
 
 private final class TranscriptMessageCellView: NSTableCellView {
+    private struct ReuseScope: Equatable {
+        let contentIdentity: SidebarItem?
+        let attachmentGeneration: Int
+    }
+
     let hostingView: IntrinsicInvalidatingHostingView
-    private var representedContentIdentity: SidebarItem?
-    private var hasRepresentedContentIdentity = false
+    private var representedReuseScope: ReuseScope?
 
     override init(frame frameRect: NSRect) {
         hostingView = IntrinsicInvalidatingHostingView(rootView: AnyView(EmptyView()))
@@ -2272,14 +2286,24 @@ private final class TranscriptMessageCellView: NSTableCellView {
         self.init(frame: .zero)
     }
 
-    func canReuse(for contentIdentity: SidebarItem?) -> Bool {
-        hasRepresentedContentIdentity
-            && representedContentIdentity == contentIdentity
+    func canReuse(
+        for contentIdentity: SidebarItem?,
+        attachmentGeneration: Int
+    ) -> Bool {
+        representedReuseScope == ReuseScope(
+            contentIdentity: contentIdentity,
+            attachmentGeneration: attachmentGeneration
+        )
     }
 
-    func assignReuseScope(_ contentIdentity: SidebarItem?) {
-        representedContentIdentity = contentIdentity
-        hasRepresentedContentIdentity = true
+    func assignReuseScope(
+        _ contentIdentity: SidebarItem?,
+        attachmentGeneration: Int
+    ) {
+        representedReuseScope = ReuseScope(
+            contentIdentity: contentIdentity,
+            attachmentGeneration: attachmentGeneration
+        )
     }
 
     // Deliberately keep the existing root through prepareForReuse so viewFor
