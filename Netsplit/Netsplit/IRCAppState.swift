@@ -224,7 +224,11 @@ final class IRCAppState: ObservableObject {
     private var pendingClientVersionRequestIDs: [String: UUID] = [:]
     private var pendingUserPings: [String: PendingUserPing] = [:]
     private var pendingCTCPRequests: [String: PendingCTCPRequest] = [:]
+    private var ctcpResponseRateLimiter = IRCCTCPResponseRateLimiter()
     private var queuedDCCFileOffers: [IRCDCCFileOffer] = []
+    private var dccFileOfferExpirationTasks: [UUID: DispatchWorkItem] = [:]
+    private var dccOfferRateLimiter = IRCDCCOfferRateLimiter()
+    private var dccResourceBudget = IRCDCCResourceBudget()
     private var activeDCCFileReceivers: [UUID: IRCDCCFileReceiver] = [:]
     private var terminalServerErrors: [UUID: String] = [:]
     private var pendingOutgoingEchoes: [UUID: [PendingOutgoingEcho]] = [:]
@@ -254,7 +258,7 @@ final class IRCAppState: ObservableObject {
     private let channelBanListRequestTimeout: TimeInterval = 15
     private let maskBanWhoRequestTimeout: TimeInterval = 10
     private let maximumTrackedIncomingBatchesPerServer = 256
-    private let maximumQueuedDCCFileOffers = 20
+    private let maximumQueuedDCCFileOffers = IRCDCCOfferRateLimiter.globalLimit
     private let favoriteJoinInterval: TimeInterval = 0.45
     private let autoConnectStagger: TimeInterval = 2
     private let onConnectCommandInterval: TimeInterval = 0.5
@@ -741,12 +745,26 @@ final class IRCAppState: ObservableObject {
     }
 
     @discardableResult
-    func acceptDCCFileOffer(_ offer: IRCDCCFileOffer) -> Bool {
+    func acceptDCCFileOffer(
+        _ offer: IRCDCCFileOffer,
+        authorizingRestrictedEndpoint: Bool = false
+    ) -> Bool {
         guard receivesDCCFiles,
               pendingDCCFileOffer?.id == offer.id else {
             resolveDCCFileOffer(offer)
             return false
         }
+        guard !offer.isExpired() else {
+            resolveDCCFileOffer(offer)
+            return false
+        }
+        let endpointAssessment = offer.endpointSecurityAssessment
+        guard !endpointAssessment.isProhibited else {
+            resolveDCCFileOffer(offer)
+            return false
+        }
+        guard !endpointAssessment.requiresExplicitConsent
+                || authorizingRestrictedEndpoint else { return false }
         guard activeDCCFileReceivers[offer.id] == nil else {
             resolveDCCFileOffer(offer)
             return true
@@ -784,15 +802,35 @@ final class IRCAppState: ObservableObject {
             route = .direct
         }
 
+        let downloadDirectory = IRCDCCStoragePolicy.downloadsDirectory()
+        let reservation = dccResourceBudget.reserve(
+            offerID: offer.id,
+            byteCount: offer.request.size,
+            availableCapacity: IRCDCCStoragePolicy.availableCapacity(in: downloadDirectory)
+        )
+        if case .failure(let error) = reservation {
+            appendSystem(
+                "Could not receive \(offer.request.filename): \(error.localizedDescription)",
+                for: .server(profile.id)
+            )
+            resolveDCCFileOffer(offer)
+            return false
+        }
+
         let receiver = IRCDCCFileReceiver(
             offer: offer,
             progress: { [weak self] progress in
                 guard let self, self.activeDCCFileReceivers[offer.id] != nil else { return }
+                self.dccResourceBudget.recordProgress(
+                    offerID: offer.id,
+                    receivedByteCount: progress.receivedByteCount
+                )
                 self.dccFileTransferStore.updateProgress(progress, for: offer.id)
             },
             completion: { [weak self] result in
                 guard let self else { return }
                 self.activeDCCFileReceivers.removeValue(forKey: offer.id)
+                self.dccResourceBudget.release(offerID: offer.id)
                 switch result {
                 case .success(let destination):
                     self.dccFileTransferStore.finish(.completed(destination), offerID: offer.id)
@@ -839,6 +877,7 @@ final class IRCAppState: ObservableObject {
         guard let receiver = activeDCCFileReceivers[transfer.id],
               receiver.cancel(onCleanup: { [weak self] in
                   self?.activeDCCFileReceivers.removeValue(forKey: transfer.id)
+                  self?.dccResourceBudget.release(offerID: transfer.id)
               }) else { return }
         dccFileTransferStore.finish(.canceled, offerID: transfer.id)
         appendSystem(
@@ -856,10 +895,14 @@ final class IRCAppState: ObservableObject {
     func ignoreDCCFileOfferSender(_ offer: IRCDCCFileOffer) {
         guard pendingDCCFileOffer?.id == offer.id,
               activeDCCFileReceivers[offer.id] == nil else { return }
-        queuedDCCFileOffers.removeAll {
+        let ignoredQueuedOfferIDs = Set(queuedDCCFileOffers.compactMap {
             $0.serverID == offer.serverID
                 && identifiersEqual($0.sender, offer.sender, serverID: offer.serverID)
-        }
+                ? $0.id
+                : nil
+        })
+        queuedDCCFileOffers.removeAll { ignoredQueuedOfferIDs.contains($0.id) }
+        ignoredQueuedOfferIDs.forEach(cancelDCCFileOfferExpiration)
         ignore(offer.sender, from: .server(offer.serverID))
         resolveDCCFileOffer(offer)
     }
@@ -923,38 +966,125 @@ final class IRCAppState: ObservableObject {
 
     private func enqueueDCCFileOffer(_ offer: IRCDCCFileOffer) {
         guard receivesDCCFiles else { return }
+        let now = Date.now
+        pruneExpiredDCCFileOffers(at: now)
+        let caseMapping = features(for: offer.serverID).caseMapping
+        let existingOffers = [pendingDCCFileOffer].compactMap { $0 }
+            + queuedDCCFileOffers
+            + activeDCCFileReceivers.values.map(\.offer)
+        guard !existingOffers.contains(where: {
+            offer.hasSameTransferIdentity(
+                as: $0,
+                normalizedSender: caseMapping.normalize
+            )
+        }) else { return }
+        guard dccOfferRateLimiter.shouldAllow(
+            serverID: offer.serverID,
+            normalizedSender: caseMapping.normalize(offer.sender),
+            at: now
+        ) else { return }
+
         if pendingDCCFileOffer == nil {
             pendingDCCFileOffer = offer
         } else if queuedDCCFileOffers.count < maximumQueuedDCCFileOffers {
             queuedDCCFileOffers.append(offer)
+        } else {
+            return
         }
+        scheduleDCCFileOfferExpiration(offer)
     }
 
     private func resolveDCCFileOffer(_ offer: IRCDCCFileOffer) {
         guard pendingDCCFileOffer?.id == offer.id else { return }
         pendingDCCFileOffer = nil
+        cancelDCCFileOfferExpiration(offer.id)
     }
 
     private func presentNextDCCFileOfferIfNeeded() {
+        pruneExpiredDCCFileOffers()
         guard receivesDCCFiles, pendingDCCFileOffer == nil,
               !queuedDCCFileOffers.isEmpty else { return }
         pendingDCCFileOffer = queuedDCCFileOffers.removeFirst()
     }
 
+    private func removePendingDCCFileOffers(for serverID: UUID) {
+        let removedPendingOffer = pendingDCCFileOffer?.serverID == serverID
+        var removedOfferIDs = Set(queuedDCCFileOffers.compactMap {
+            $0.serverID == serverID ? $0.id : nil
+        })
+        if removedPendingOffer, let pendingOfferID = pendingDCCFileOffer?.id {
+            removedOfferIDs.insert(pendingOfferID)
+        }
+        if removedPendingOffer { pendingDCCFileOffer = nil }
+        queuedDCCFileOffers.removeAll { $0.serverID == serverID }
+        removedOfferIDs.forEach(cancelDCCFileOfferExpiration)
+        if removedPendingOffer {
+            DispatchQueue.main.async { [weak self] in
+                self?.presentNextDCCFileOfferIfNeeded()
+            }
+        }
+    }
+
     private func stopAllDCCFileSharingActivity(cleanupGroup: DispatchGroup? = nil) {
         pendingDCCFileOffer = nil
         queuedDCCFileOffers.removeAll()
+        dccFileOfferExpirationTasks.values.forEach { $0.cancel() }
+        dccFileOfferExpirationTasks.removeAll()
+        dccOfferRateLimiter = IRCDCCOfferRateLimiter()
         activeDCCFileReceivers.values.forEach { receiver in
+            let offerID = receiver.offer.id
             if let cleanupGroup {
                 cleanupGroup.enter()
-                _ = receiver.cancel { cleanupGroup.leave() }
+                _ = receiver.cancel { [weak self] in
+                    self?.dccResourceBudget.release(offerID: offerID)
+                    cleanupGroup.leave()
+                }
             } else {
-                receiver.cancel()
+                receiver.cancel { [weak self] in
+                    self?.dccResourceBudget.release(offerID: offerID)
+                }
             }
         }
         activeDCCFileReceivers.removeAll()
         dccFileTransferStore.removeAll()
         dccFileTransferCount = 0
+    }
+
+    private func scheduleDCCFileOfferExpiration(_ offer: IRCDCCFileOffer) {
+        cancelDCCFileOfferExpiration(offer.id)
+        let delay = max(0, IRCDCCFileOffer.lifetime - Date.now.timeIntervalSince(offer.receivedAt))
+        let expiration = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.dccFileOfferExpirationTasks.removeValue(forKey: offer.id)
+            let wasPending = self.pendingDCCFileOffer?.id == offer.id
+            if wasPending { self.pendingDCCFileOffer = nil }
+            self.queuedDCCFileOffers.removeAll { $0.id == offer.id }
+            if wasPending {
+                DispatchQueue.main.async { [weak self] in
+                    self?.presentNextDCCFileOfferIfNeeded()
+                }
+            }
+        }
+        dccFileOfferExpirationTasks[offer.id] = expiration
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: expiration)
+    }
+
+    private func pruneExpiredDCCFileOffers(at date: Date = .now) {
+        if pendingDCCFileOffer?.isExpired(at: date) == true {
+            if let offerID = pendingDCCFileOffer?.id {
+                cancelDCCFileOfferExpiration(offerID)
+            }
+            pendingDCCFileOffer = nil
+        }
+        let expiredQueuedOfferIDs = Set(queuedDCCFileOffers.compactMap {
+            $0.isExpired(at: date) ? $0.id : nil
+        })
+        queuedDCCFileOffers.removeAll { expiredQueuedOfferIDs.contains($0.id) }
+        expiredQueuedOfferIDs.forEach(cancelDCCFileOfferExpiration)
+    }
+
+    private func cancelDCCFileOfferExpiration(_ offerID: UUID) {
+        dccFileOfferExpirationTasks.removeValue(forKey: offerID)?.cancel()
     }
 
     private func removeStaleDCCPartialFiles() {
@@ -3998,25 +4128,40 @@ final class IRCAppState: ObservableObject {
             // A bare VERSION is a CTCP request. Reply privately with concise
             // client information; never send it back into a channel.
             if command.count == 1 {
-                guard canReplyToRequest else { return false }
+                guard canReplyToCTCPRequest(
+                    from: sender,
+                    target: target,
+                    profile: profile,
+                    canReplyToRequest: canReplyToRequest
+                ) else { return true }
                 connections[profile.id]?.send(command: "NOTICE \(sender) :\u{01}VERSION \(IRCClientVersion.ctcpReply)\u{01}")
                 appendSystem("\(sender) requested Netsplit's version.", for: .server(profile.id))
             } else {
+                guard !canReplyToRequest,
+                      isDirectCTCPTarget(target, profile: profile) else { return true }
                 let version = command[1]
                 let key = ctcpRequestKey(serverID: profile.id, nickname: sender)
-                let destination = pendingClientVersionDestinations.removeValue(forKey: key) ?? .server(profile.id)
-                pendingClientVersionRequestIDs.removeValue(forKey: key)
+                let destination = pendingClientVersionDestinations.removeValue(forKey: key)
+                let requestID = pendingClientVersionRequestIDs.removeValue(forKey: key)
+                guard let destination, requestID != nil else { return true }
                 appendSystem("Version reply from \(sender): \(version)", for: destination)
             }
         case "PING":
             guard command.count == 2, !command[1].isEmpty else { return true }
             let token = command[1]
             if canReplyToRequest {
+                guard canReplyToCTCPRequest(
+                    from: sender,
+                    target: target,
+                    profile: profile,
+                    canReplyToRequest: canReplyToRequest
+                ) else { return true }
                 connections[profile.id]?.send(
                     command: "NOTICE \(sender) :\(IRCCTCPPing.payload(token: token))"
                 )
                 appendSystem("\(sender) pinged you.", for: .server(profile.id))
             } else {
+                guard isDirectCTCPTarget(target, profile: profile) else { return true }
                 let key = ctcpRequestKey(serverID: profile.id, nickname: sender)
                 guard let pending = pendingUserPings[key], pending.token == token else { return true }
                 pendingUserPings.removeValue(forKey: key)
@@ -4029,7 +4174,12 @@ final class IRCAppState: ObservableObject {
         case "TIME", "CLIENTINFO":
             guard let ctcpCommand = IRCCTCPCommand(rawValue: name) else { return false }
             if command.count == 1 {
-                guard canReplyToRequest else { return false }
+                guard canReplyToCTCPRequest(
+                    from: sender,
+                    target: target,
+                    profile: profile,
+                    canReplyToRequest: canReplyToRequest
+                ) else { return true }
                 let reply: String
                 switch ctcpCommand {
                 case .time:
@@ -4044,13 +4194,15 @@ final class IRCAppState: ObservableObject {
                 )
                 appendSystem("\(sender) requested Netsplit's CTCP \(ctcpCommand.label.lowercased()).", for: .server(profile.id))
             } else {
+                guard !canReplyToRequest,
+                      isDirectCTCPTarget(target, profile: profile) else { return true }
                 let key = ctcpRequestKey(
                     serverID: profile.id,
                     nickname: sender,
                     command: ctcpCommand
                 )
-                let destination = pendingCTCPRequests.removeValue(forKey: key)?.destination
-                    ?? .server(profile.id)
+                guard let destination = pendingCTCPRequests.removeValue(forKey: key)?.destination
+                else { return true }
                 appendSystem(
                     "CTCP \(ctcpCommand.label) reply from \(sender): \(command[1])",
                     for: destination
@@ -4060,6 +4212,33 @@ final class IRCAppState: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func canReplyToCTCPRequest(
+        from sender: String,
+        target: String,
+        profile: ServerProfile,
+        canReplyToRequest: Bool
+    ) -> Bool {
+        let caseMapping = features(for: profile.id).caseMapping
+        guard IRCCTCPRequestPolicy.isDirectRequest(
+            target: target,
+            localNickname: nickname(for: profile),
+            caseMapping: caseMapping,
+            canReplyToRequest: canReplyToRequest
+        ) else { return false }
+        return ctcpResponseRateLimiter.shouldAllow(
+            serverID: profile.id,
+            normalizedSender: caseMapping.normalize(sender)
+        )
+    }
+
+    private func isDirectCTCPTarget(_ target: String, profile: ServerProfile) -> Bool {
+        IRCCTCPRequestPolicy.isDirectTarget(
+            target,
+            localNickname: nickname(for: profile),
+            caseMapping: features(for: profile.id).caseMapping
+        )
     }
 
     private func ctcpRequestKey(serverID: UUID, nickname: String) -> String {
@@ -4225,6 +4404,7 @@ final class IRCAppState: ObservableObject {
 
     private func prepareChannelsForDisconnectedSession(for serverID: UUID) {
         resetPendingRequests(for: serverID)
+        removePendingDCCFileOffers(for: serverID)
         let retainedChannels = channels.filter { $0.serverID == serverID }
         guard !retainedChannels.isEmpty || pendingJoins.values.contains(where: { $0.serverID == serverID }) else { return }
         for channel in retainedChannels {
@@ -4304,6 +4484,7 @@ final class IRCAppState: ObservableObject {
         pendingClientVersionRequestIDs = pendingClientVersionRequestIDs.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingUserPings = pendingUserPings.filter { !$0.key.hasPrefix(keyPrefix) }
         pendingCTCPRequests = pendingCTCPRequests.filter { !$0.key.hasPrefix(keyPrefix) }
+        ctcpResponseRateLimiter.remove(serverID: serverID)
         finalizePendingOutgoingEchoes(for: serverID)
         recentSelfTargetedConfirmations.removeValue(forKey: serverID)
         incomingBatchesByServer.removeValue(forKey: serverID)

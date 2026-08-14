@@ -212,6 +212,77 @@ struct IRCFramingAndCommandTests {
         ))
     }
 
+    @Test("Only direct PRIVMSG CTCP requests may receive automatic replies")
+    func gatesAutomaticCTCPRepliesToDirectMessages() {
+        #expect(IRCCTCPRequestPolicy.isDirectRequest(
+            target: "DBR",
+            localNickname: "dbr",
+            caseMapping: .rfc1459,
+            canReplyToRequest: true
+        ))
+        #expect(!IRCCTCPRequestPolicy.isDirectRequest(
+            target: "#swift",
+            localNickname: "dbr",
+            caseMapping: .rfc1459,
+            canReplyToRequest: true
+        ))
+        #expect(!IRCCTCPRequestPolicy.isDirectRequest(
+            target: "dbr",
+            localNickname: "dbr",
+            caseMapping: .rfc1459,
+            canReplyToRequest: false
+        ))
+        #expect(IRCCTCPRequestPolicy.isDirectTarget(
+            "DBR",
+            localNickname: "dbr",
+            caseMapping: .rfc1459
+        ))
+    }
+
+    @Test("Automatic CTCP responses are limited per sender and per server")
+    func rateLimitsAutomaticCTCPReplies() {
+        let serverID = UUID()
+        let start = Date(timeIntervalSince1970: 1_000)
+        var limiter = IRCCTCPResponseRateLimiter()
+
+        for index in 0..<IRCCTCPResponseRateLimiter.perSenderLimit {
+            let allowed = limiter.shouldAllow(
+                serverID: serverID,
+                normalizedSender: "alice",
+                at: start.addingTimeInterval(Double(index))
+            )
+            #expect(allowed)
+        }
+        let senderOverflowAllowed = limiter.shouldAllow(
+            serverID: serverID,
+            normalizedSender: "alice",
+            at: start.addingTimeInterval(3)
+        )
+        #expect(!senderOverflowAllowed)
+
+        var serverLimiter = IRCCTCPResponseRateLimiter()
+        for index in 0..<IRCCTCPResponseRateLimiter.perServerLimit {
+            let allowed = serverLimiter.shouldAllow(
+                serverID: serverID,
+                normalizedSender: "sender-\(index)",
+                at: start
+            )
+            #expect(allowed)
+        }
+        let serverOverflowAllowed = serverLimiter.shouldAllow(
+            serverID: serverID,
+            normalizedSender: "overflow",
+            at: start
+        )
+        #expect(!serverOverflowAllowed)
+        let allowedAfterWindow = serverLimiter.shouldAllow(
+            serverID: serverID,
+            normalizedSender: "alice",
+            at: start.addingTimeInterval(IRCCTCPResponseRateLimiter.observationWindow)
+        )
+        #expect(allowedAfterWindow)
+    }
+
     @Test("Removes CR/LF command injection and enforces the IRC byte limit")
     func sanitizesAndBoundsCommands() {
         let sanitized = IRCTextFraming.sanitizedSingleLine("PRIVMSG #swift :hello\r\nOPER attacker")

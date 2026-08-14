@@ -65,6 +65,9 @@ struct IRCModelsAndPolicyTests {
         #expect(pendingOffer.sender == sender)
         #expect(pendingOffer.request.filename == "photo.jpg")
         #expect(!pendingOffer.routesThroughSSH)
+        #expect(pendingOffer.endpointSecurityAssessment.requiresExplicitConsent)
+        #expect(!state.acceptDCCFileOffer(pendingOffer))
+        #expect(state.pendingDCCFileOffer?.id == pendingOffer.id)
 
         let staleOffer = IRCDCCFileOffer(
             serverID: pendingOffer.serverID,

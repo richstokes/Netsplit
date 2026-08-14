@@ -63,6 +63,25 @@ struct DCCFileTransferTests {
         #expect(request.hostname == "dcc.example.org")
     }
 
+    @Test("Classifies DCC endpoints before consent")
+    func classifiesEndpointRisk() {
+        #expect(IRCDCCEndpointPolicy.assessment(for: "8.8.8.8") == .publicInternet)
+        #expect(IRCDCCEndpointPolicy.assessment(for: "127.0.0.1")
+            == .requiresExplicitConsent(.privateOrLocalAddress))
+        #expect(IRCDCCEndpointPolicy.assessment(for: "169.254.169.254")
+            == .requiresExplicitConsent(.privateOrLocalAddress))
+        #expect(IRCDCCEndpointPolicy.assessment(for: "::ffff:127.0.0.1")
+            == .requiresExplicitConsent(.privateOrLocalAddress))
+        #expect(IRCDCCEndpointPolicy.assessment(for: "dcc.example.org")
+            == .requiresExplicitConsent(.hostname))
+        #expect(IRCDCCEndpointPolicy.assessment(for: "192.88.99.1")
+            == .requiresExplicitConsent(.specialUseAddress))
+        #expect(IRCDCCEndpointPolicy.assessment(for: "2002::1")
+            == .requiresExplicitConsent(.specialUseAddress))
+        #expect(IRCDCCEndpointPolicy.assessment(for: "0.0.0.0") == .prohibited)
+        #expect(IRCDCCEndpointPolicy.assessment(for: "ff02::1") == .prohibited)
+    }
+
     @Test("Rejects passive, unbounded, and malformed offers")
     func rejectsUnsupportedSends() {
         let invalidPayloads = [
@@ -75,7 +94,10 @@ struct DCCFileTransferTests {
             "DCC SEND file.txt -invalid.example 5000 10",
             "DCC GET file.txt 127.0.0.1 5000 10",
             "DCC SEND file.txt 127.0.0.1 65536 10",
-            "DCC SEND file.txt 127.0.0.1 5000 ten"
+            "DCC SEND file.txt 127.0.0.1 5000 ten",
+            "DCC SEND file.txt 0.0.0.0 5000 10",
+            "DCC SEND file.txt 224.0.0.1 5000 10",
+            "DCC SEND file.txt 127.0.0.1 5000 \(IRCDCCResourcePolicy.maximumSingleTransferBytes + 1)"
         ]
 
         for payload in invalidPayloads {
@@ -151,7 +173,138 @@ struct DCCFileTransferTests {
     func checksAvailableStorage() {
         #expect(IRCDCCStoragePolicy.hasCapacity(for: 42, availableCapacity: 42))
         #expect(!IRCDCCStoragePolicy.hasCapacity(for: 43, availableCapacity: 42))
-        #expect(IRCDCCStoragePolicy.hasCapacity(for: UInt64.max, availableCapacity: nil))
+        #expect(!IRCDCCStoragePolicy.hasCapacity(for: UInt64.max, availableCapacity: nil))
+        #expect(!IRCDCCStoragePolicy.hasCapacity(
+            for: 42,
+            reservedByteCount: 50,
+            availableCapacity: 100,
+            minimumRemainingCapacity: 10
+        ))
+    }
+
+    @Test("Reserves aggregate storage and bounds concurrent transfers")
+    func reservesTransferResources() throws {
+        var budget = IRCDCCResourceBudget()
+        let ampleCapacity = Int64(IRCDCCResourcePolicy.minimumRemainingCapacity + 10_000)
+        let offerIDs = (0..<IRCDCCResourcePolicy.maximumConcurrentTransfers).map { _ in UUID() }
+
+        for offerID in offerIDs {
+            try budget.reserve(
+                offerID: offerID,
+                byteCount: 1_000,
+                availableCapacity: ampleCapacity
+            ).get()
+        }
+        let concurrentResult = budget.reserve(
+            offerID: UUID(),
+            byteCount: 1,
+            availableCapacity: ampleCapacity
+        )
+        if case .failure(let error) = concurrentResult {
+            #expect(error == .tooManyConcurrentTransfers)
+        } else {
+            Issue.record("Expected the concurrent-transfer limit to reject the reservation")
+        }
+
+        budget.release(offerID: offerIDs[0])
+        try budget.reserve(
+            offerID: UUID(),
+            byteCount: 1_000,
+            availableCapacity: ampleCapacity
+        ).get()
+
+        var unknownCapacityBudget = IRCDCCResourceBudget()
+        let unknownCapacityResult = unknownCapacityBudget.reserve(
+            offerID: UUID(),
+            byteCount: 1,
+            availableCapacity: nil
+        )
+        if case .failure(let error) = unknownCapacityResult {
+            #expect(error == .insufficientDiskSpace)
+        } else {
+            Issue.record("Expected an unknown capacity to fail closed")
+        }
+    }
+
+    @Test("Storage reservations release bytes as transfers make progress")
+    func updatesRemainingTransferReservation() throws {
+        var budget = IRCDCCResourceBudget()
+        let firstOfferID = UUID()
+        let minimumCapacity = IRCDCCResourcePolicy.minimumRemainingCapacity
+
+        try budget.reserve(
+            offerID: firstOfferID,
+            byteCount: 40,
+            availableCapacity: Int64(minimumCapacity + 80)
+        ).get()
+        budget.recordProgress(offerID: firstOfferID, receivedByteCount: 30)
+
+        #expect(budget.reservedByteCount == 10)
+        try budget.reserve(
+            offerID: UUID(),
+            byteCount: 30,
+            availableCapacity: Int64(minimumCapacity + 50)
+        ).get()
+    }
+
+    @Test("Rate-limits and expires incoming DCC offers")
+    func rateLimitsAndExpiresOffers() {
+        let serverID = UUID()
+        let start = Date(timeIntervalSince1970: 1_000)
+        var limiter = IRCDCCOfferRateLimiter()
+        for index in 0..<IRCDCCOfferRateLimiter.perSenderLimit {
+            let allowed = limiter.shouldAllow(
+                serverID: serverID,
+                normalizedSender: "alice",
+                at: start.addingTimeInterval(Double(index))
+            )
+            #expect(allowed)
+        }
+        let overflowAllowed = limiter.shouldAllow(
+            serverID: serverID,
+            normalizedSender: "alice",
+            at: start.addingTimeInterval(2)
+        )
+        #expect(!overflowAllowed)
+        let allowedAfterWindow = limiter.shouldAllow(
+            serverID: serverID,
+            normalizedSender: "alice",
+            at: start.addingTimeInterval(IRCDCCOfferRateLimiter.observationWindow)
+        )
+        #expect(allowedAfterWindow)
+
+        let offer = IRCDCCFileOffer(
+            serverID: serverID,
+            networkName: "Test",
+            sender: "Alice",
+            request: IRCDCCSendRequest(
+                filename: "file.bin",
+                hostname: "8.8.8.8",
+                port: 5_000,
+                size: 42,
+                token: nil
+            ),
+            routesThroughSSH: false,
+            receivedAt: start
+        )
+        #expect(!offer.isExpired(at: start.addingTimeInterval(IRCDCCFileOffer.lifetime - 1)))
+        #expect(offer.isExpired(at: start.addingTimeInterval(IRCDCCFileOffer.lifetime)))
+    }
+
+    @Test("Terminates sustained trickle transfers after the grace period")
+    func detectsTrickleTransfers() {
+        #expect(!IRCDCCTransferLivenessPolicy.isBelowMinimumSustainedRate(
+            elapsed: .seconds(119),
+            bytesPerSecond: 1
+        ))
+        #expect(IRCDCCTransferLivenessPolicy.isBelowMinimumSustainedRate(
+            elapsed: .seconds(120),
+            bytesPerSecond: 1
+        ))
+        #expect(!IRCDCCTransferLivenessPolicy.isBelowMinimumSustainedRate(
+            elapsed: .seconds(120),
+            bytesPerSecond: IRCDCCResourcePolicy.minimumSustainedBytesPerSecond
+        ))
     }
 
     @Test("Models connecting and bounded transfer progress")
@@ -553,6 +706,65 @@ struct DCCFileTransferTests {
         #expect(try fileManager.contentsOfDirectory(atPath: directory.path).isEmpty)
     }
 
+    @Test("Receiver enforces an absolute transfer duration and removes its partial file")
+    @MainActor
+    func maximumDurationRemovesPartialFile() async throws {
+        let fileManager = FileManager.default
+        let directory = try makeTemporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let transport = DCCFakeSSHTransport(events: [])
+        let offer = makeOffer(port: 5_000, size: 1_024)
+
+        let (result, _) = await runReceiver(
+            offer: offer,
+            directory: directory,
+            connectionTimeout: 1,
+            inactivityTimeout: 1,
+            maximumTransferDuration: 0.05,
+            route: .ssh(makeSSHConfiguration()),
+            sshTransportFactory: { transport }
+        )
+
+        switch result {
+        case .failure(IRCDCCTransferError.maximumDurationExceeded):
+            break
+        default:
+            Issue.record("Expected an absolute DCC duration limit, got \(result)")
+        }
+        #expect(try fileManager.contentsOfDirectory(atPath: directory.path).isEmpty)
+    }
+
+    @Test("Receiver terminates a sustained trickle and removes its partial file")
+    @MainActor
+    func lowSpeedTransferRemovesPartialFile() async throws {
+        let fileManager = FileManager.default
+        let directory = try makeTemporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let transport = DCCFakeSSHTransport(events: [.data(Data([0x01]))])
+        let offer = makeOffer(port: 5_000, size: 1_024)
+
+        let (result, _) = await runReceiver(
+            offer: offer,
+            directory: directory,
+            connectionTimeout: 2,
+            inactivityTimeout: 2,
+            maximumTransferDuration: 5,
+            lowSpeedGraceDuration: 0.01,
+            minimumSustainedBytesPerSecond: 1_024,
+            route: .ssh(makeSSHConfiguration()),
+            sshTransportFactory: { transport }
+        )
+
+        switch result {
+        case .failure(IRCDCCTransferError.transferTooSlow):
+            break
+        default:
+            Issue.record("Expected the DCC low-speed limit, got \(result)")
+        }
+        #expect(transport.didClose)
+        #expect(try fileManager.contentsOfDirectory(atPath: directory.path).isEmpty)
+    }
+
     @Test("Canceling an SSH receiver closes its transport and awaits file cleanup")
     @MainActor
     func cancelsSSHTransferAndAwaitsCleanup() async throws {
@@ -657,6 +869,9 @@ struct DCCFileTransferTests {
         directory: URL,
         connectionTimeout: TimeInterval = 2,
         inactivityTimeout: TimeInterval = 2,
+        maximumTransferDuration: TimeInterval = IRCDCCResourcePolicy.maximumTransferDuration,
+        lowSpeedGraceDuration: TimeInterval = IRCDCCResourcePolicy.lowSpeedGraceDuration,
+        minimumSustainedBytesPerSecond: Double = IRCDCCResourcePolicy.minimumSustainedBytesPerSecond,
         route: IRCDCCFileReceiver.Route = .direct,
         sshTransportFactory: @escaping @MainActor @Sendable () -> any IRCDCCSSHTransport = {
             SSHTunnelConnection()
@@ -670,6 +885,9 @@ struct DCCFileTransferTests {
                 downloadDirectory: directory,
                 connectionTimeout: connectionTimeout,
                 inactivityTimeout: inactivityTimeout,
+                maximumTransferDuration: maximumTransferDuration,
+                lowSpeedGraceDuration: lowSpeedGraceDuration,
+                minimumSustainedBytesPerSecond: minimumSustainedBytesPerSecond,
                 sshTransportFactory: sshTransportFactory,
                 progress: { progressUpdates.append($0) },
                 completion: { result in
@@ -786,9 +1004,15 @@ private nonisolated struct DCCLoopbackServer: @unchecked Sendable {
                 )
             }
         }
-        guard bindResult == 0, Darwin.listen(listeningSocket, 1) == 0 else {
+        guard bindResult == 0 else {
+            let errorNumber = errno
             Darwin.close(listeningSocket)
-            throw DCCLoopbackServerError("bind/listen")
+            throw DCCLoopbackServerError("bind", errorNumber: errorNumber)
+        }
+        guard Darwin.listen(listeningSocket, 1) == 0 else {
+            let errorNumber = errno
+            Darwin.close(listeningSocket)
+            throw DCCLoopbackServerError("listen", errorNumber: errorNumber)
         }
 
         var boundAddress = sockaddr_in()

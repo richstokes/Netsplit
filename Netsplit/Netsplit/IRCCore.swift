@@ -1047,6 +1047,77 @@ enum IRCCTCPEchoPolicy {
   }
 }
 
+enum IRCCTCPRequestPolicy {
+  static func isDirectTarget(
+    _ target: String,
+    localNickname: String,
+    caseMapping: IRCCaseMapping
+  ) -> Bool {
+    caseMapping.normalize(target) == caseMapping.normalize(localNickname)
+  }
+
+  static func isDirectRequest(
+    target: String,
+    localNickname: String,
+    caseMapping: IRCCaseMapping,
+    canReplyToRequest: Bool
+  ) -> Bool {
+    canReplyToRequest
+      && isDirectTarget(target, localNickname: localNickname, caseMapping: caseMapping)
+  }
+}
+
+/// Bounds automatic CTCP responses independently from ordinary chat traffic.
+/// The per-sender limit prevents a single peer from reflecting requests through
+/// the client, while the server-wide limit remains effective when an attacker
+/// rotates nicknames.
+struct IRCCTCPResponseRateLimiter {
+  static let perSenderLimit = 3
+  static let perServerLimit = 12
+  static let observationWindow: TimeInterval = 10
+
+  private var datesBySender: [String: [Date]] = [:]
+  private var datesByServer: [UUID: [Date]] = [:]
+
+  mutating func shouldAllow(
+    serverID: UUID,
+    normalizedSender: String,
+    at date: Date = .now
+  ) -> Bool {
+    prune(at: date)
+    let senderKey = "\(serverID.uuidString)|\(normalizedSender)"
+    guard datesBySender[senderKey, default: []].count < Self.perSenderLimit,
+      datesByServer[serverID, default: []].count < Self.perServerLimit
+    else { return false }
+
+    datesBySender[senderKey, default: []].append(date)
+    datesByServer[serverID, default: []].append(date)
+    return true
+  }
+
+  mutating func remove(serverID: UUID) {
+    let prefix = serverID.uuidString + "|"
+    datesBySender = datesBySender.filter { !$0.key.hasPrefix(prefix) }
+    datesByServer.removeValue(forKey: serverID)
+  }
+
+  private mutating func prune(at date: Date) {
+    datesBySender = datesBySender.compactMapValues { dates in
+      let retained = dates.filter { isCurrent($0, at: date) }
+      return retained.isEmpty ? nil : retained
+    }
+    datesByServer = datesByServer.compactMapValues { dates in
+      let retained = dates.filter { isCurrent($0, at: date) }
+      return retained.isEmpty ? nil : retained
+    }
+  }
+
+  private func isCurrent(_ eventDate: Date, at date: Date) -> Bool {
+    let age = date.timeIntervalSince(eventDate)
+    return age >= 0 && age < Self.observationWindow
+  }
+}
+
 enum IRCSASL {
   static func canUsePlain(advertisedMechanisms: Set<String>?) -> Bool {
     advertisedMechanisms?.contains("PLAIN") ?? true

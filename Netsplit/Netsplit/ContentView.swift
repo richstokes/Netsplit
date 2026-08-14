@@ -202,8 +202,11 @@ struct ContentView: View {
         ) { offer in
             DCCFileOfferView(
                 offer: offer,
-                accept: {
-                    guard state.acceptDCCFileOffer(offer) else { return }
+                accept: { authorizingRestrictedEndpoint in
+                    guard state.acceptDCCFileOffer(
+                        offer,
+                        authorizingRestrictedEndpoint: authorizingRestrictedEndpoint
+                    ) else { return }
                     openWindow(id: DCCFileTransferWindow.sceneID)
                 },
                 cancel: { state.cancelDCCFileOffer(offer) },
@@ -300,9 +303,10 @@ private struct DCCFileOfferPresentationWindowReader: NSViewRepresentable {
 
 private struct DCCFileOfferView: View {
     let offer: IRCDCCFileOffer
-    let accept: () -> Void
+    let accept: (Bool) -> Void
     let cancel: () -> Void
     let ignoreUser: () -> Void
+    @State private var showsRestrictedEndpointConfirmation = false
 
     private var formattedSize: String {
         formattedByteCount(offer.request.size)
@@ -310,7 +314,11 @@ private struct DCCFileOfferView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            offerView
+            if showsRestrictedEndpointConfirmation {
+                restrictedEndpointConfirmation
+            } else {
+                offerView
+            }
         }
         .padding(24)
         .frame(width: 500)
@@ -361,9 +369,81 @@ private struct DCCFileOfferView: View {
                 Spacer()
                 Button("Cancel", role: .cancel, action: cancel)
                     .keyboardShortcut(.cancelAction)
-                Button("Accept", action: accept)
-                    .keyboardShortcut(.defaultAction)
+                Button("Accept") {
+                    if offer.endpointSecurityAssessment.requiresExplicitConsent {
+                        showsRestrictedEndpointConfirmation = true
+                    } else {
+                        accept(false)
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
             }
+        }
+    }
+
+    private var restrictedEndpointConfirmation: some View {
+        Group {
+            HStack(spacing: 12) {
+                Image(systemName: "network.badge.shield.half.filled")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.orange)
+                Text("Allow access to this endpoint?")
+                    .font(.title2.weight(.semibold))
+            }
+
+            Text(restrictedEndpointWarning)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+                detailRow("Endpoint", offer.endpointLabel)
+                detailRow(
+                    "Connection from",
+                    offer.routesThroughSSH ? "The configured SSH server" : "This Mac"
+                )
+                detailRow("File", offer.request.filename)
+                detailRow("Claimed sender", offer.sender)
+            }
+
+            Label(
+                "Continue only if you recognize both the sender and endpoint. IRC nicknames and DCC endpoints are not authenticated by DCC.",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Button("Back") {
+                    showsRestrictedEndpointConfirmation = false
+                }
+                Spacer()
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Connect & Download", role: .destructive) {
+                    accept(true)
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    private var restrictedEndpointWarning: String {
+        switch offer.endpointSecurityAssessment {
+        case .publicInternet:
+            return "This endpoint uses a public internet address."
+        case .prohibited:
+            return "This endpoint is not valid for a DCC file transfer."
+        case .requiresExplicitConsent(.hostname):
+            return offer.routesThroughSSH
+                ? "The sender supplied a hostname. The SSH server will resolve it, and it could lead to a private service reachable from that server."
+                : "The sender supplied a hostname. It could resolve to a private service reachable from this Mac."
+        case .requiresExplicitConsent(.privateOrLocalAddress):
+            return offer.routesThroughSSH
+                ? "This address is private or local to the SSH server's network. Continuing lets this offer make a connection from that server."
+                : "This address is private or local to this Mac's network. Continuing lets this offer make a connection from this Mac."
+        case .requiresExplicitConsent(.specialUseAddress):
+            return "This is a special-use network address rather than an ordinary public DCC endpoint."
         }
     }
 

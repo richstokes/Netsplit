@@ -24,6 +24,117 @@ struct IRCDCCSendRequest: Equatable {
     let token: String?
 }
 
+enum IRCDCCResourcePolicy {
+    nonisolated static let maximumConcurrentTransfers = 3
+    nonisolated static let maximumSingleTransferBytes: UInt64 = 50 * 1_024 * 1_024 * 1_024
+    nonisolated static let maximumReservedBytes: UInt64 = 100 * 1_024 * 1_024 * 1_024
+    nonisolated static let minimumRemainingCapacity: UInt64 = 512 * 1_024 * 1_024
+    nonisolated static let maximumTransferDuration: TimeInterval = 24 * 60 * 60
+    nonisolated static let lowSpeedGraceDuration: TimeInterval = 2 * 60
+    nonisolated static let minimumSustainedBytesPerSecond: Double = 1_024
+    nonisolated static let sustainedRateWindow: Duration = .seconds(60)
+}
+
+enum IRCDCCRestrictedEndpointKind: Equatable {
+    case privateOrLocalAddress
+    case hostname
+    case specialUseAddress
+}
+
+enum IRCDCCEndpointSecurityAssessment: Equatable {
+    case publicInternet
+    case requiresExplicitConsent(IRCDCCRestrictedEndpointKind)
+    case prohibited
+
+    var requiresExplicitConsent: Bool {
+        if case .requiresExplicitConsent = self { return true }
+        return false
+    }
+
+    var isProhibited: Bool {
+        self == .prohibited
+    }
+}
+
+enum IRCDCCEndpointPolicy {
+    static func assessment(for hostname: String) -> IRCDCCEndpointSecurityAssessment {
+        if let address = IPv4Address(hostname) {
+            return assessment(forIPv4Bytes: Array(address.rawValue))
+        }
+        if let address = IPv6Address(hostname) {
+            return assessment(forIPv6Bytes: Array(address.rawValue))
+        }
+
+        // DNS resolution for a direct transfer happens below this policy, and
+        // tunneled DCC hostnames are resolved by the SSH server. Treat every
+        // hostname as elevated so a DNS answer cannot silently turn ordinary
+        // file consent into access to either machine's private network.
+        return .requiresExplicitConsent(.hostname)
+    }
+
+    private static func assessment(forIPv4Bytes bytes: [UInt8])
+        -> IRCDCCEndpointSecurityAssessment
+    {
+        guard bytes.count == 4 else { return .prohibited }
+        let first = bytes[0]
+        let second = bytes[1]
+
+        if first == 0 || first >= 224 || bytes == [255, 255, 255, 255] {
+            return .prohibited
+        }
+        if first == 10
+            || first == 127
+            || (first == 100 && (64...127).contains(second))
+            || (first == 169 && second == 254)
+            || (first == 172 && (16...31).contains(second))
+            || (first == 192 && second == 168)
+        {
+            return .requiresExplicitConsent(.privateOrLocalAddress)
+        }
+        if (first == 192 && second == 0)
+            || (first == 192 && second == 88 && bytes[2] == 99)
+            || (first == 198 && (18...19).contains(second))
+            || (first == 198 && second == 51 && bytes[2] == 100)
+            || (first == 203 && second == 0 && bytes[2] == 113)
+        {
+            return .requiresExplicitConsent(.specialUseAddress)
+        }
+        return .publicInternet
+    }
+
+    private static func assessment(forIPv6Bytes bytes: [UInt8])
+        -> IRCDCCEndpointSecurityAssessment
+    {
+        guard bytes.count == 16 else { return .prohibited }
+        if bytes.allSatisfy({ $0 == 0 }) || bytes[0] == 0xff {
+            return .prohibited
+        }
+        if bytes.dropLast().allSatisfy({ $0 == 0 }), bytes.last == 1 {
+            return .requiresExplicitConsent(.privateOrLocalAddress)
+        }
+        if bytes.prefix(10).allSatisfy({ $0 == 0 }), bytes[10] == 0xff, bytes[11] == 0xff {
+            return assessment(forIPv4Bytes: Array(bytes.suffix(4)))
+        }
+        if (bytes[0] & 0xfe) == 0xfc || (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) {
+            return .requiresExplicitConsent(.privateOrLocalAddress)
+        }
+        if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] <= 0x01)
+            || (bytes[0] == 0x20 && bytes[1] == 0x01
+                && bytes[2] == 0x0d && bytes[3] == 0xb8)
+            || (bytes[0] == 0x20 && bytes[1] == 0x02)
+            || (bytes[0] == 0x3f && (bytes[1] & 0xf0) == 0xf0)
+        {
+            return .requiresExplicitConsent(.specialUseAddress)
+        }
+        // Publicly routed IPv6 unicast currently occupies 2000::/3. Keep new
+        // or special-use ranges behind explicit consent until classified.
+        guard (bytes[0] & 0xe0) == 0x20 else {
+            return .requiresExplicitConsent(.specialUseAddress)
+        }
+        return .publicInternet
+    }
+}
+
 enum IRCDCCSendParser {
     /// Parses the complete CTCP payload, without the surrounding \u{01} bytes.
     /// This pass supports active DCC SEND. Reverse/passive offers use port zero
@@ -35,13 +146,15 @@ enum IRCDCCSendParser {
               fields[1].caseInsensitiveCompare("SEND") == .orderedSame,
               let filename = IRCDCCFilename.sanitized(fields[2]),
               let hostname = hostname(from: fields[3]),
+              !IRCDCCEndpointPolicy.assessment(for: hostname).isProhibited,
               let portValue = UInt16(fields[4]),
               portValue > 0 else { return nil }
 
         // The file size is mandatory here. Besides being part of the common
         // DCC SEND form, it lets Netsplit reject overlong transfers instead of
         // accepting an unbounded stream from another user.
-        guard let size = UInt64(fields[5]) else { return nil }
+        guard let size = UInt64(fields[5]),
+              size <= IRCDCCResourcePolicy.maximumSingleTransferBytes else { return nil }
 
         return IRCDCCSendRequest(
             filename: filename,
@@ -221,12 +334,15 @@ enum IRCDCCFilename {
 }
 
 struct IRCDCCFileOffer: Identifiable, Equatable {
+    static let lifetime: TimeInterval = 2 * 60
+
     let id: UUID
     let serverID: UUID
     let networkName: String
     let sender: String
     let request: IRCDCCSendRequest
     let routesThroughSSH: Bool
+    let receivedAt: Date
 
     init(
         id: UUID = UUID(),
@@ -234,7 +350,8 @@ struct IRCDCCFileOffer: Identifiable, Equatable {
         networkName: String,
         sender: String,
         request: IRCDCCSendRequest,
-        routesThroughSSH: Bool
+        routesThroughSSH: Bool,
+        receivedAt: Date = .now
     ) {
         self.id = id
         self.serverID = serverID
@@ -242,11 +359,149 @@ struct IRCDCCFileOffer: Identifiable, Equatable {
         self.sender = sender
         self.request = request
         self.routesThroughSSH = routesThroughSSH
+        self.receivedAt = receivedAt
     }
 
     var endpointLabel: String {
         let hostname = request.hostname.contains(":") ? "[\(request.hostname)]" : request.hostname
         return "\(hostname):\(request.port)"
+    }
+
+    var endpointSecurityAssessment: IRCDCCEndpointSecurityAssessment {
+        IRCDCCEndpointPolicy.assessment(for: request.hostname)
+    }
+
+    func isExpired(at date: Date = .now) -> Bool {
+        let age = date.timeIntervalSince(receivedAt)
+        return age < 0 || age >= Self.lifetime
+    }
+
+    func hasSameTransferIdentity(as other: Self, normalizedSender: (String) -> String) -> Bool {
+        serverID == other.serverID
+            && normalizedSender(sender) == normalizedSender(other.sender)
+            && request == other.request
+    }
+}
+
+/// Limits offers before they can become sheets. The server and global bounds
+/// continue to hold if an abusive peer rotates nicknames.
+struct IRCDCCOfferRateLimiter {
+    static let perSenderLimit = 2
+    static let perServerLimit = 6
+    static let globalLimit = 8
+    static let observationWindow: TimeInterval = 5 * 60
+
+    private var datesBySender: [String: [Date]] = [:]
+    private var datesByServer: [UUID: [Date]] = [:]
+    private var globalDates: [Date] = []
+
+    mutating func shouldAllow(
+        serverID: UUID,
+        normalizedSender: String,
+        at date: Date = .now
+    ) -> Bool {
+        prune(at: date)
+        let senderKey = "\(serverID.uuidString)|\(normalizedSender)"
+        guard datesBySender[senderKey, default: []].count < Self.perSenderLimit,
+              datesByServer[serverID, default: []].count < Self.perServerLimit,
+              globalDates.count < Self.globalLimit else { return false }
+        datesBySender[senderKey, default: []].append(date)
+        datesByServer[serverID, default: []].append(date)
+        globalDates.append(date)
+        return true
+    }
+
+    private mutating func prune(at date: Date) {
+        datesBySender = datesBySender.compactMapValues { retained($0, at: date) }
+        datesByServer = datesByServer.compactMapValues { retained($0, at: date) }
+        globalDates = retained(globalDates, at: date) ?? []
+    }
+
+    private func retained(_ dates: [Date], at date: Date) -> [Date]? {
+        let retained = dates.filter {
+            let age = date.timeIntervalSince($0)
+            return age >= 0 && age < Self.observationWindow
+        }
+        return retained.isEmpty ? nil : retained
+    }
+}
+
+enum IRCDCCResourceReservationError: LocalizedError, Equatable {
+    case tooManyConcurrentTransfers
+    case fileTooLarge
+    case aggregateLimitExceeded
+    case insufficientDiskSpace
+
+    var errorDescription: String? {
+        switch self {
+        case .tooManyConcurrentTransfers:
+            "Only \(IRCDCCResourcePolicy.maximumConcurrentTransfers) file transfers can run at once."
+        case .fileTooLarge:
+            "The offered file exceeds Netsplit's per-transfer size limit."
+        case .aggregateLimitExceeded:
+            "The total size of active file transfers exceeds Netsplit's safety limit."
+        case .insufficientDiskSpace:
+            "There is not enough available storage to reserve space for this transfer."
+        }
+    }
+}
+
+struct IRCDCCResourceBudget {
+    private struct Reservation {
+        let totalByteCount: UInt64
+        var receivedByteCount: UInt64 = 0
+
+        var remainingByteCount: UInt64 {
+            totalByteCount - receivedByteCount
+        }
+    }
+
+    private var reservations: [UUID: Reservation] = [:]
+
+    var reservedByteCount: UInt64 {
+        reservations.values.reduce(0) { $0 + $1.remainingByteCount }
+    }
+
+    mutating func reserve(
+        offerID: UUID,
+        byteCount: UInt64,
+        availableCapacity: Int64?
+    ) -> Result<Void, IRCDCCResourceReservationError> {
+        if reservations[offerID] != nil { return .success(()) }
+        guard reservations.count < IRCDCCResourcePolicy.maximumConcurrentTransfers else {
+            return .failure(.tooManyConcurrentTransfers)
+        }
+        guard byteCount <= IRCDCCResourcePolicy.maximumSingleTransferBytes else {
+            return .failure(.fileTooLarge)
+        }
+        let alreadyReserved = reservedByteCount
+        guard byteCount <= UInt64.max - alreadyReserved,
+              alreadyReserved + byteCount <= IRCDCCResourcePolicy.maximumReservedBytes else {
+            return .failure(.aggregateLimitExceeded)
+        }
+        guard IRCDCCStoragePolicy.hasCapacity(
+            for: byteCount,
+            reservedByteCount: alreadyReserved,
+            availableCapacity: availableCapacity,
+            minimumRemainingCapacity: IRCDCCResourcePolicy.minimumRemainingCapacity
+        ) else {
+            return .failure(.insufficientDiskSpace)
+        }
+        reservations[offerID] = Reservation(totalByteCount: byteCount)
+        return .success(())
+    }
+
+    mutating func recordProgress(offerID: UUID, receivedByteCount: UInt64) {
+        guard var reservation = reservations[offerID] else { return }
+        reservation.receivedByteCount = min(
+            reservation.totalByteCount,
+            max(reservation.receivedByteCount, receivedByteCount)
+        )
+        reservations[offerID] = reservation
+    }
+
+    mutating func release(offerID: UUID) {
+        reservations.removeValue(forKey: offerID)
     }
 }
 
@@ -273,9 +528,37 @@ enum IRCDCCDownloadedFilePolicy {
 }
 
 enum IRCDCCStoragePolicy {
-    nonisolated static func hasCapacity(for fileSize: UInt64, availableCapacity: Int64?) -> Bool {
-        guard let availableCapacity, availableCapacity >= 0 else { return true }
-        return fileSize <= UInt64(availableCapacity)
+    nonisolated static func hasCapacity(
+        for fileSize: UInt64,
+        reservedByteCount: UInt64 = 0,
+        availableCapacity: Int64?,
+        minimumRemainingCapacity: UInt64 = 0
+    ) -> Bool {
+        guard let availableCapacity, availableCapacity >= 0 else { return false }
+        guard fileSize <= UInt64.max - reservedByteCount else { return false }
+        let requiredByteCount = reservedByteCount + fileSize
+        guard requiredByteCount <= UInt64.max - minimumRemainingCapacity else { return false }
+        return requiredByteCount + minimumRemainingCapacity <= UInt64(availableCapacity)
+    }
+
+    nonisolated static func downloadsDirectory(fileManager: FileManager = .default) -> URL {
+        fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(
+                "Downloads",
+                isDirectory: true
+            )
+    }
+
+    nonisolated static func availableCapacity(in directory: URL) -> Int64? {
+        let fileManager = FileManager.default
+        var candidate = directory
+        while !fileManager.fileExists(atPath: candidate.path),
+              candidate.path != candidate.deletingLastPathComponent().path {
+            candidate.deleteLastPathComponent()
+        }
+        return try? candidate.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ).volumeAvailableCapacityForImportantUsage
     }
 }
 
@@ -301,7 +584,9 @@ actor IRCDCCFileSink {
     func prepare() throws {
         guard fileHandle == nil, temporaryURL == nil else { return }
         let fileManager = FileManager.default
-        let directory = directoryOverride ?? Self.downloadsDirectory(fileManager: fileManager)
+        let directory = directoryOverride ?? IRCDCCStoragePolicy.downloadsDirectory(
+            fileManager: fileManager
+        )
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
@@ -309,12 +594,11 @@ actor IRCDCCFileSink {
         }
         Self.removeStalePartialFiles(in: directory, fileManager: fileManager)
 
-        let availableCapacity = try? directory.resourceValues(
-            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
-        ).volumeAvailableCapacityForImportantUsage
+        let availableCapacity = IRCDCCStoragePolicy.availableCapacity(in: directory)
         guard IRCDCCStoragePolicy.hasCapacity(
             for: expectedByteCount,
-            availableCapacity: availableCapacity
+            availableCapacity: availableCapacity,
+            minimumRemainingCapacity: IRCDCCResourcePolicy.minimumRemainingCapacity
         ) else {
             throw IRCDCCTransferError.insufficientDiskSpace
         }
@@ -414,7 +698,9 @@ actor IRCDCCFileSink {
         now: Date = .now,
         fileManager: FileManager = .default
     ) {
-        let directory = directory ?? downloadsDirectory(fileManager: fileManager)
+        let directory = directory ?? IRCDCCStoragePolicy.downloadsDirectory(
+            fileManager: fileManager
+        )
         let resourceKeys: Set<URLResourceKey> = [.contentModificationDateKey, .isRegularFileKey]
         guard let contents = try? fileManager.contentsOfDirectory(
             at: directory,
@@ -434,13 +720,6 @@ actor IRCDCCFileSink {
         }
     }
 
-    private nonisolated static func downloadsDirectory(fileManager: FileManager) -> URL {
-        fileManager.urls(for: .downloadsDirectory, in: .userDomainMask).first
-            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(
-                "Downloads",
-                isDirectory: true
-            )
-    }
 }
 
 struct IRCDCCTransferProgress: Equatable {
@@ -600,6 +879,20 @@ struct IRCDCCTransferRateEstimator {
     }
 }
 
+enum IRCDCCTransferLivenessPolicy {
+    static func isBelowMinimumSustainedRate(
+        elapsed: Duration,
+        bytesPerSecond: Double?,
+        graceDuration: TimeInterval = IRCDCCResourcePolicy.lowSpeedGraceDuration,
+        minimumBytesPerSecond: Double = IRCDCCResourcePolicy.minimumSustainedBytesPerSecond
+    ) -> Bool {
+        guard elapsed >= .seconds(max(0, graceDuration)),
+              let bytesPerSecond,
+              bytesPerSecond.isFinite else { return false }
+        return bytesPerSecond < max(0, minimumBytesPerSecond)
+    }
+}
+
 enum IRCDCCTransferError: LocalizedError {
     case couldNotCreateDownloadsDirectory
     case couldNotCreateTemporaryFile
@@ -609,6 +902,8 @@ enum IRCDCCTransferError: LocalizedError {
     case receivedTooMuchData
     case incomplete(expected: UInt64, received: UInt64)
     case timedOut
+    case transferTooSlow
+    case maximumDurationExceeded
     case connectionClosed
 
     var errorDescription: String? {
@@ -629,6 +924,10 @@ enum IRCDCCTransferError: LocalizedError {
             "The sender closed the connection after \(received) of \(expected) bytes."
         case .timedOut:
             "The sender stopped responding."
+        case .transferTooSlow:
+            "The sender did not maintain the minimum transfer speed."
+        case .maximumDurationExceeded:
+            "The transfer exceeded the maximum allowed duration."
         case .connectionClosed:
             "The file-transfer connection closed unexpectedly."
         }
@@ -678,6 +977,9 @@ final class IRCDCCFileReceiver {
     private let sshTransportFactory: @MainActor @Sendable () -> any IRCDCCSSHTransport
     private let connectionTimeout: TimeInterval
     private let inactivityTimeout: TimeInterval
+    private let maximumTransferDuration: TimeInterval
+    private let lowSpeedGraceDuration: TimeInterval
+    private let minimumSustainedBytesPerSecond: Double
     private var directConnection: NWConnection?
     private var sshConnection: (any IRCDCCSSHTransport)?
     private var fileOperationTask: Task<Void, Never>?
@@ -689,7 +991,11 @@ final class IRCDCCFileReceiver {
     private var speedRefresh: DispatchWorkItem?
     private var receivingStartedAt: ContinuousClock.Instant?
     private var rateEstimator = IRCDCCTransferRateEstimator()
+    private var sustainedRateEstimator = IRCDCCTransferRateEstimator(
+        window: IRCDCCResourcePolicy.sustainedRateWindow
+    )
     private var timeoutTimer: DispatchSourceTimer?
+    private var absoluteTimeoutTimer: DispatchSourceTimer?
     private var didStart = false
     private var didFinish = false
     private var didComplete = false
@@ -703,6 +1009,9 @@ final class IRCDCCFileReceiver {
         downloadDirectory: URL? = nil,
         connectionTimeout: TimeInterval = IRCDCCFileReceiver.defaultConnectionTimeout,
         inactivityTimeout: TimeInterval = IRCDCCFileReceiver.defaultInactivityTimeout,
+        maximumTransferDuration: TimeInterval = IRCDCCResourcePolicy.maximumTransferDuration,
+        lowSpeedGraceDuration: TimeInterval = IRCDCCResourcePolicy.lowSpeedGraceDuration,
+        minimumSustainedBytesPerSecond: Double = IRCDCCResourcePolicy.minimumSustainedBytesPerSecond,
         sshTransportFactory: @escaping @MainActor @Sendable () -> any IRCDCCSSHTransport = {
             SSHTunnelConnection()
         },
@@ -717,6 +1026,9 @@ final class IRCDCCFileReceiver {
         )
         self.connectionTimeout = max(0.01, connectionTimeout)
         self.inactivityTimeout = max(0.01, inactivityTimeout)
+        self.maximumTransferDuration = max(0.01, maximumTransferDuration)
+        self.lowSpeedGraceDuration = max(0, lowSpeedGraceDuration)
+        self.minimumSustainedBytesPerSecond = max(0, minimumSustainedBytesPerSecond)
         self.sshTransportFactory = sshTransportFactory
         self.progress = progress
         self.completion = completion
@@ -726,6 +1038,7 @@ final class IRCDCCFileReceiver {
         guard !didStart, !didFinish else { return }
         didStart = true
         scheduleTimeout(after: connectionTimeout)
+        scheduleAbsoluteTimeout()
         let fileSink = self.fileSink
         fileOperationTask = Task { [weak self] in
             do {
@@ -960,6 +1273,7 @@ final class IRCDCCFileReceiver {
                 self.fileOperationTask = nil
                 self.receivedByteCount += UInt64(data.count)
                 self.reportReceivingProgress()
+                guard !self.didFinish else { return }
                 self.scheduleTimeout(after: self.inactivityTimeout)
                 let acknowledgedByteCount = self.receivedByteCount
 
@@ -1039,10 +1353,25 @@ final class IRCDCCFileReceiver {
         lastProgressReport = now
         let speed: Double?
         if let receivingStartedAt {
+            let elapsed = receivingStartedAt.duration(to: now)
             speed = rateEstimator.record(
                 byteCount: receivedByteCount,
-                elapsed: receivingStartedAt.duration(to: now)
+                elapsed: elapsed
             )
+            let sustainedSpeed = sustainedRateEstimator.record(
+                byteCount: receivedByteCount,
+                elapsed: elapsed
+            )
+            if receivedByteCount < offer.request.size,
+               IRCDCCTransferLivenessPolicy.isBelowMinimumSustainedRate(
+                elapsed: elapsed,
+                bytesPerSecond: sustainedSpeed,
+                graceDuration: lowSpeedGraceDuration,
+                minimumBytesPerSecond: minimumSustainedBytesPerSecond
+               ) {
+                fail(IRCDCCTransferError.transferTooSlow)
+                return
+            }
         } else {
             speed = nil
         }
@@ -1118,6 +1447,20 @@ final class IRCDCCFileReceiver {
         timer.schedule(deadline: .now() + max(0.01, duration), leeway: .milliseconds(100))
     }
 
+    private func scheduleAbsoluteTimeout() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.setEventHandler { [weak self] in
+            guard let self, !self.didFinish else { return }
+            self.fail(IRCDCCTransferError.maximumDurationExceeded)
+        }
+        timer.schedule(
+            deadline: .now() + maximumTransferDuration,
+            leeway: .milliseconds(100)
+        )
+        timer.resume()
+        absoluteTimeoutTimer = timer
+    }
+
     private func succeed() {
         guard !didFinish else { return }
         didFinish = true
@@ -1173,5 +1516,8 @@ final class IRCDCCFileReceiver {
         timeoutTimer?.setEventHandler {}
         timeoutTimer?.cancel()
         timeoutTimer = nil
+        absoluteTimeoutTimer?.setEventHandler {}
+        absoluteTimeoutTimer?.cancel()
+        absoluteTimeoutTimer = nil
     }
 }
