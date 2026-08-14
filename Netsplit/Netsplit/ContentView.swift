@@ -39,10 +39,12 @@ extension EnvironmentValues {
 
 struct ContentView: View {
     @ObservedObject var state: IRCAppState
+    @Environment(\.openWindow) private var openWindow
     @State private var showAddServer = false
     @State private var editingProfile: ServerProfile?
     @State private var ignoresProfile: ServerProfile?
     @State private var banListChannel: Conversation?
+    @State private var dccFileOfferPresentationHostID = UUID()
     @StateObject private var previewExpansion = IRCMessagePreviewExpansionStore()
     @FocusState private var workspaceFocus: IRCWorkspaceFocus?
 
@@ -51,6 +53,22 @@ struct ContentView: View {
         guard let selection = state.selection else { return false }
         if case .channel = selection { return true }
         return false
+    }
+
+    private var presentedDCCFileOffer: Binding<IRCDCCFileOffer?> {
+        Binding(
+            get: {
+                guard state.dccFileOfferPresentationHostID == dccFileOfferPresentationHostID else {
+                    return nil
+                }
+                return state.pendingDCCFileOffer
+            },
+            set: { _ in
+                // Offer actions resolve the shared item explicitly. Ignoring
+                // presentation-driven writes keeps an unresolved offer alive if
+                // its host window closes and another main window must take over.
+            }
+        )
     }
 
     var body: some View {
@@ -136,6 +154,21 @@ struct ContentView: View {
         }
         .ircWorkspaceTheme()
         .environment(\.ircTextMetrics, textMetrics)
+        .background {
+            DCCFileOfferPresentationWindowReader(
+                didAttach: { isMainWindow in
+                    state.registerDCCFileOfferPresentationHost(
+                        dccFileOfferPresentationHostID,
+                        preferAsActive: isMainWindow
+                    )
+                },
+                didDetach: {
+                    state.unregisterDCCFileOfferPresentationHost(
+                        dccFileOfferPresentationHostID
+                    )
+                }
+            )
+        }
         .sheet(isPresented: $showAddServer) {
             ServerProfileEditor(state: state)
         }
@@ -163,6 +196,20 @@ struct ContentView: View {
                 cancel: { state.cancelIRCURLConnection(confirmation) }
             )
         }
+        .sheet(
+            item: presentedDCCFileOffer,
+            onDismiss: { state.dccFileOfferSheetDidDismiss() }
+        ) { offer in
+            DCCFileOfferView(
+                offer: offer,
+                accept: {
+                    guard state.acceptDCCFileOffer(offer) else { return }
+                    openWindow(id: DCCFileTransferWindow.sceneID)
+                },
+                cancel: { state.cancelDCCFileOffer(offer) },
+                ignoreUser: { state.ignoreDCCFileOfferSender(offer) }
+            )
+        }
         .alert(item: $state.keychainAccessIssue) { issue in
             Alert(
                 title: Text(issue.title),
@@ -183,6 +230,160 @@ struct ContentView: View {
                    state.selection != selection { return }
                 workspaceFocus = request.target
             }
+        }
+    }
+}
+
+private struct DCCFileOfferPresentationWindowReader: NSViewRepresentable {
+    let didAttach: (Bool) -> Void
+    let didDetach: () -> Void
+
+    func makeNSView(context: Context) -> WindowObservationView {
+        WindowObservationView(didAttach: didAttach, didDetach: didDetach)
+    }
+
+    func updateNSView(_ nsView: WindowObservationView, context: Context) {
+        nsView.didAttach = didAttach
+        nsView.didDetach = didDetach
+    }
+
+    final class WindowObservationView: NSView {
+        var didAttach: (Bool) -> Void
+        var didDetach: () -> Void
+        private var observedWindow: NSWindow?
+        private var didBecomeMainObserver: NSObjectProtocol?
+
+        init(didAttach: @escaping (Bool) -> Void, didDetach: @escaping () -> Void) {
+            self.didAttach = didAttach
+            self.didDetach = didDetach
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        deinit {
+            let wasAttached = observedWindow != nil
+            stopObservingWindow()
+            if wasAttached { didDetach() }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window !== observedWindow else { return }
+            if observedWindow != nil { didDetach() }
+            stopObservingWindow()
+            guard let window else { return }
+
+            observedWindow = window
+            didBecomeMainObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeMainNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.didAttach(true)
+            }
+            didAttach(window.isMainWindow)
+        }
+
+        private func stopObservingWindow() {
+            if let didBecomeMainObserver {
+                NotificationCenter.default.removeObserver(didBecomeMainObserver)
+                self.didBecomeMainObserver = nil
+            }
+            observedWindow = nil
+        }
+    }
+}
+
+private struct DCCFileOfferView: View {
+    let offer: IRCDCCFileOffer
+    let accept: () -> Void
+    let cancel: () -> Void
+    let ignoreUser: () -> Void
+
+    private var formattedSize: String {
+        formattedByteCount(offer.request.size)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            offerView
+        }
+        .padding(24)
+        .frame(width: 500)
+        .interactiveDismissDisabled()
+    }
+
+    private var offerView: some View {
+        Group {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.down.doc.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Color.accentColor)
+                Text("Accept file from \(offer.sender)?")
+                    .font(.title2.weight(.semibold))
+            }
+
+            Text("Only accept files you expected. DCC senders choose the filename and network endpoint, and DCC does not provide end-to-end encryption.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+                detailRow("File", offer.request.filename)
+                detailRow("Size", formattedSize)
+                detailRow("From", offer.sender)
+                detailRow("Network", offer.networkName)
+                detailRow("Endpoint", offer.endpointLabel)
+                detailRow(
+                    "Connection",
+                    offer.routesThroughSSH
+                        ? "Through this network’s SSH tunnel"
+                        : "Direct peer connection"
+                )
+                detailRow("Save to", "Downloads/\(offer.request.filename)")
+            }
+
+            if !offer.routesThroughSSH {
+                Label(
+                    "A direct DCC connection can reveal your IP address to the sender.",
+                    systemImage: "exclamationmark.shield"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
+            HStack {
+                Button("Ignore User", role: .destructive, action: ignoreUser)
+                    .help("Ignore messages, notices, and future file offers from \(offer.sender) on \(offer.networkName)")
+                Spacer()
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Accept", action: accept)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    private func formattedByteCount(_ byteCount: UInt64) -> String {
+        guard byteCount <= UInt64(Int64.max) else {
+            return "\(byteCount.formatted()) bytes"
+        }
+        return ByteCountFormatter.string(
+            fromByteCount: Int64(byteCount),
+            countStyle: .file
+        )
+    }
+
+    @ViewBuilder
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .textSelection(.enabled)
         }
     }
 }

@@ -412,12 +412,26 @@ struct NetsplitApp: App {
                 Divider()
                 Button("Actual Size") { state.resetTranscriptFontSize() }
                     .keyboardShortcut("0", modifiers: [.command])
+                if state.receivesDCCFiles {
+                    Divider()
+                    OpenDCCFileTransfersWindowButton()
+                        .disabled(state.dccFileTransferCount == 0)
+                }
             }
         }
         Window("About Netsplit", id: AppSceneID.aboutWindow) {
             AboutView()
         }
         .windowResizability(.contentSize)
+        .defaultPosition(.center)
+        Window("File Transfers", id: DCCFileTransferWindow.sceneID) {
+            DCCFileTransferWindowView(
+                transferStore: state.dccFileTransferStore,
+                cancel: { state.cancelDCCFileTransfer($0) },
+                dismiss: { state.dismissDCCFileTransfer($0) }
+            )
+                .ircApplicationAppearance(state.applicationAppearance)
+        }
         .defaultPosition(.center)
         Settings {
             SettingsView(state: state)
@@ -463,6 +477,16 @@ private struct OpenAboutWindowButton: View {
     var body: some View {
         Button("About Netsplit") {
             openWindow(id: AppSceneID.aboutWindow)
+        }
+    }
+}
+
+private struct OpenDCCFileTransfersWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Show File Transfers") {
+            openWindow(id: DCCFileTransferWindow.sceneID)
         }
     }
 }

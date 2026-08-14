@@ -106,6 +106,19 @@ final class IRCAppState: ObservableObject {
             )
         }
     }
+    @Published var receivesDCCFiles: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                receivesDCCFiles,
+                forKey: IRCDCCPreferences.receivesFilesKey
+            )
+            if receivesDCCFiles {
+                removeStaleDCCPartialFiles()
+            } else {
+                stopAllDCCFileSharingActivity()
+            }
+        }
+    }
     @Published var mentionNotificationsEnabled: Bool {
         didSet {
             UserDefaults.standard.set(mentionNotificationsEnabled, forKey: "mentionNotificationsEnabled")
@@ -170,6 +183,10 @@ final class IRCAppState: ObservableObject {
     @Published private var channelBanListErrors: [UUID: String] = [:]
     @Published var keychainAccessIssue: KeychainAccessIssue?
     @Published var pendingIRCURLConnectionConfirmation: IRCURLConnectionConfirmation?
+    @Published var pendingDCCFileOffer: IRCDCCFileOffer?
+    @Published private(set) var dccFileOfferPresentationHostID: UUID?
+    @Published private(set) var dccFileTransferCount = 0
+    let dccFileTransferStore = IRCDCCFileTransferStore()
 
     private var conversations: [UUID: [IRCMessage]] = [:]
     private var channelJoinInstants: [UUID: ContinuousClock.Instant] = [:]
@@ -207,6 +224,8 @@ final class IRCAppState: ObservableObject {
     private var pendingClientVersionRequestIDs: [String: UUID] = [:]
     private var pendingUserPings: [String: PendingUserPing] = [:]
     private var pendingCTCPRequests: [String: PendingCTCPRequest] = [:]
+    private var queuedDCCFileOffers: [IRCDCCFileOffer] = []
+    private var activeDCCFileReceivers: [UUID: IRCDCCFileReceiver] = [:]
     private var terminalServerErrors: [UUID: String] = [:]
     private var pendingOutgoingEchoes: [UUID: [PendingOutgoingEcho]] = [:]
     private var recentSelfTargetedConfirmations: [UUID: [IRCRecentSelfTargetedConfirmation]] = [:]
@@ -235,6 +254,7 @@ final class IRCAppState: ObservableObject {
     private let channelBanListRequestTimeout: TimeInterval = 15
     private let maskBanWhoRequestTimeout: TimeInterval = 10
     private let maximumTrackedIncomingBatchesPerServer = 256
+    private let maximumQueuedDCCFileOffers = 20
     private let favoriteJoinInterval: TimeInterval = 0.45
     private let autoConnectStagger: TimeInterval = 2
     private let onConnectCommandInterval: TimeInterval = 0.5
@@ -287,6 +307,7 @@ final class IRCAppState: ObservableObject {
         reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
         showsCTCPCommandsInUserMenu = defaults.object(forKey: "showsCTCPCommandsInUserMenu") as? Bool ?? false
+        receivesDCCFiles = IRCDCCPreferences.receivesFiles(in: defaults)
         mentionNotificationsEnabled = defaults.object(forKey: "mentionNotificationsEnabled") as? Bool ?? false
         directMessageNotificationsEnabled = defaults.object(forKey: "directMessageNotificationsEnabled") as? Bool ?? false
         applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
@@ -310,6 +331,7 @@ final class IRCAppState: ObservableObject {
             || profiles.contains(where: { $0.mentionNotificationsOverride == true }) {
             requestNotificationAuthorization()
         }
+        if receivesDCCFiles { removeStaleDCCPartialFiles() }
     }
 
     var activeProfiles: [ServerProfile] {
@@ -718,6 +740,144 @@ final class IRCAppState: ObservableObject {
         setIgnore(nickname, ignored: false, from: item)
     }
 
+    @discardableResult
+    func acceptDCCFileOffer(_ offer: IRCDCCFileOffer) -> Bool {
+        guard receivesDCCFiles,
+              pendingDCCFileOffer?.id == offer.id else {
+            resolveDCCFileOffer(offer)
+            return false
+        }
+        guard activeDCCFileReceivers[offer.id] == nil else {
+            resolveDCCFileOffer(offer)
+            return true
+        }
+        guard let profile = profiles.first(where: { $0.id == offer.serverID }) else {
+            resolveDCCFileOffer(offer)
+            return false
+        }
+
+        let route: IRCDCCFileReceiver.Route
+        if offer.routesThroughSSH {
+            guard let sshHostname = profile.sshHostname?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sshHostname.isEmpty,
+                  let sshUsername = profile.sshUsername?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sshUsername.isEmpty else {
+                appendSystem(
+                    "Could not receive \(offer.request.filename): the SSH tunnel profile is incomplete.",
+                    for: .server(profile.id)
+                )
+                resolveDCCFileOffer(offer)
+                return false
+            }
+            route = .ssh(SSHTunnelConfiguration(
+                sshHostname: sshHostname,
+                sshPort: Int(profile.sshPort ?? 22),
+                sshUsername: sshUsername,
+                sshPassword: sshPassword(for: profile),
+                sshPrivateKey: sshPrivateKey(for: profile),
+                trustedHostKey: profile.sshTrustedHostKey,
+                targetHostname: offer.request.hostname,
+                targetPort: Int(offer.request.port),
+                useTLS: false
+            ))
+        } else {
+            route = .direct
+        }
+
+        let receiver = IRCDCCFileReceiver(
+            offer: offer,
+            progress: { [weak self] progress in
+                guard let self, self.activeDCCFileReceivers[offer.id] != nil else { return }
+                self.dccFileTransferStore.updateProgress(progress, for: offer.id)
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                self.activeDCCFileReceivers.removeValue(forKey: offer.id)
+                switch result {
+                case .success(let destination):
+                    self.dccFileTransferStore.finish(.completed(destination), offerID: offer.id)
+                    self.appendSystem(
+                        "Received \(offer.request.filename) from \(offer.sender). Saved it to Downloads as \(destination.lastPathComponent).",
+                        for: .server(offer.serverID)
+                    )
+                case .failure(let error):
+                    self.dccFileTransferStore.finish(
+                        .failed(error.localizedDescription),
+                        offerID: offer.id
+                    )
+                    self.appendSystem(
+                        "Could not receive \(offer.request.filename) from \(offer.sender): \(error.localizedDescription)",
+                        for: .server(offer.serverID)
+                    )
+                }
+                self.dccFileTransferCount = self.dccFileTransferStore.count
+            }
+        )
+        activeDCCFileReceivers[offer.id] = receiver
+        dccFileTransferStore.insert(IRCDCCFileTransferPresentation(
+            offer: offer,
+            progress: .connecting(totalByteCount: offer.request.size)
+        ))
+        dccFileTransferCount = dccFileTransferStore.count
+        appendSystem(
+            "Receiving \(offer.request.filename) from \(offer.sender)\(offer.routesThroughSSH ? " through the SSH tunnel" : "")…",
+            for: .server(offer.serverID)
+        )
+        receiver.start(route: route) { [weak self] key in
+            self?.rememberDCCSSHHostKey(key, for: offer.serverID)
+        }
+        resolveDCCFileOffer(offer)
+        return true
+    }
+
+    func cancelDCCFileOffer(_ offer: IRCDCCFileOffer) {
+        guard pendingDCCFileOffer?.id == offer.id else { return }
+        resolveDCCFileOffer(offer)
+    }
+
+    func cancelDCCFileTransfer(_ transfer: IRCDCCFileTransferPresentation) {
+        guard let receiver = activeDCCFileReceivers[transfer.id],
+              receiver.cancel(onCleanup: { [weak self] in
+                  self?.activeDCCFileReceivers.removeValue(forKey: transfer.id)
+              }) else { return }
+        dccFileTransferStore.finish(.canceled, offerID: transfer.id)
+        appendSystem(
+            "Canceled the file transfer of \(transfer.offer.request.filename) from \(transfer.offer.sender).",
+            for: .server(transfer.offer.serverID)
+        )
+    }
+
+    func dismissDCCFileTransfer(_ transfer: IRCDCCFileTransferPresentation) {
+        guard activeDCCFileReceivers[transfer.id] == nil else { return }
+        dccFileTransferStore.remove(offerID: transfer.id)
+        dccFileTransferCount = dccFileTransferStore.count
+    }
+
+    func ignoreDCCFileOfferSender(_ offer: IRCDCCFileOffer) {
+        guard pendingDCCFileOffer?.id == offer.id,
+              activeDCCFileReceivers[offer.id] == nil else { return }
+        queuedDCCFileOffers.removeAll {
+            $0.serverID == offer.serverID
+                && identifiersEqual($0.sender, offer.sender, serverID: offer.serverID)
+        }
+        ignore(offer.sender, from: .server(offer.serverID))
+        resolveDCCFileOffer(offer)
+    }
+
+    func dccFileOfferSheetDidDismiss() {
+        presentNextDCCFileOfferIfNeeded()
+    }
+
+    func registerDCCFileOfferPresentationHost(_ hostID: UUID, preferAsActive: Bool) {
+        guard preferAsActive || dccFileOfferPresentationHostID == nil else { return }
+        dccFileOfferPresentationHostID = hostID
+    }
+
+    func unregisterDCCFileOfferPresentationHost(_ hostID: UUID) {
+        guard dccFileOfferPresentationHostID == hostID else { return }
+        dccFileOfferPresentationHostID = nil
+    }
+
     func removeAllIgnores(for profile: ServerProfile) {
         guard let profileIndex = profiles.firstIndex(where: { $0.id == profile.id }),
               profiles[profileIndex].ignoredNicknames?.isEmpty == false else { return }
@@ -759,6 +919,60 @@ final class IRCAppState: ObservableObject {
 
     private func isIgnored(_ nickname: String, on profile: ServerProfile) -> Bool {
         ignoreSnapshot(for: profile).contains(nickname)
+    }
+
+    private func enqueueDCCFileOffer(_ offer: IRCDCCFileOffer) {
+        guard receivesDCCFiles else { return }
+        if pendingDCCFileOffer == nil {
+            pendingDCCFileOffer = offer
+        } else if queuedDCCFileOffers.count < maximumQueuedDCCFileOffers {
+            queuedDCCFileOffers.append(offer)
+        }
+    }
+
+    private func resolveDCCFileOffer(_ offer: IRCDCCFileOffer) {
+        guard pendingDCCFileOffer?.id == offer.id else { return }
+        pendingDCCFileOffer = nil
+    }
+
+    private func presentNextDCCFileOfferIfNeeded() {
+        guard receivesDCCFiles, pendingDCCFileOffer == nil,
+              !queuedDCCFileOffers.isEmpty else { return }
+        pendingDCCFileOffer = queuedDCCFileOffers.removeFirst()
+    }
+
+    private func stopAllDCCFileSharingActivity(cleanupGroup: DispatchGroup? = nil) {
+        pendingDCCFileOffer = nil
+        queuedDCCFileOffers.removeAll()
+        activeDCCFileReceivers.values.forEach { receiver in
+            if let cleanupGroup {
+                cleanupGroup.enter()
+                _ = receiver.cancel { cleanupGroup.leave() }
+            } else {
+                receiver.cancel()
+            }
+        }
+        activeDCCFileReceivers.removeAll()
+        dccFileTransferStore.removeAll()
+        dccFileTransferCount = 0
+    }
+
+    private func removeStaleDCCPartialFiles() {
+        guard !NetsplitLaunchEnvironment.currentProcessIsInTestMode else { return }
+        Task.detached(priority: .utility) {
+            IRCDCCFileSink.removeStalePartialFiles()
+        }
+    }
+
+    private func rememberDCCSSHHostKey(_ key: String, for serverID: UUID) {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == serverID }),
+              profiles[profileIndex].sshTrustedHostKey == nil else { return }
+        profiles[profileIndex].sshTrustedHostKey = key
+        saveProfiles()
+        appendSystem(
+            "Saved the SSH host identity for future connections.",
+            for: .server(serverID)
+        )
     }
 
     func isMuted(_ conversation: Conversation) -> Bool {
@@ -1160,13 +1374,11 @@ final class IRCAppState: ObservableObject {
     /// guaranteed quickly so quitting the app is never held up by a network
     /// problem, while active connections still get a real IRC QUIT command.
     func quitAllConnections(completion: @escaping () -> Void) {
+        let group = DispatchGroup()
+        stopAllDCCFileSharingActivity(cleanupGroup: group)
         pendingLaunchConnectionIDs.removeAll()
         let activeConnections = Array(connections.values)
         let inFlightQuitIDs = Array(disconnectingConnections.keys)
-        guard !activeConnections.isEmpty || !inFlightQuitIDs.isEmpty else {
-            completion()
-            return
-        }
 
         cancelAllScheduledReconnects()
         systemSleepState = IRCSystemSleepStateMachine()
@@ -1181,7 +1393,6 @@ final class IRCAppState: ObservableObject {
         connectionStatuses.removeAll()
         terminalServerErrors.removeAll()
 
-        let group = DispatchGroup()
         for quitID in inFlightQuitIDs {
             group.enter()
             disconnectCompletionWaiters[quitID, default: []].append {
@@ -3764,6 +3975,25 @@ final class IRCAppState: ObservableObject {
                     notifyDirectMessage: !isSelfEcho
                 )
             }
+        case "DCC":
+            // DCC is fully dormant until the global opt-in is enabled. Still
+            // consume its CTCP envelope so raw file-sharing control text does
+            // not appear as a normal chat message while the feature is off.
+            guard receivesDCCFiles else { return true }
+            guard canReplyToRequest,
+                  identifiersEqual(
+                    target,
+                    nickname(for: profile),
+                    serverID: profile.id
+                  ),
+                  let request = IRCDCCSendParser.request(from: payload) else { return true }
+            enqueueDCCFileOffer(IRCDCCFileOffer(
+                serverID: profile.id,
+                networkName: profile.name,
+                sender: sender,
+                request: request,
+                routesThroughSSH: profile.useSSHTunnel == true
+            ))
         case "VERSION":
             // A bare VERSION is a CTCP request. Reply privately with concise
             // client information; never send it back into a channel.

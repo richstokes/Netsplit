@@ -1140,6 +1140,12 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("File Sharing") {
+                Toggle("Receive files with DCC", isOn: $state.receivesDCCFiles)
+                Text("Off by default. When enabled, Netsplit asks before each file transfer and saves accepted files to Downloads without overwriting existing files. DCC is unencrypted and a direct transfer can reveal your IP address. Networks configured to use an SSH tunnel route accepted DCC connections through that tunnel too.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding(16)

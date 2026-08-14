@@ -29,6 +29,85 @@ struct IRCModelsAndPolicyTests {
         #expect(state.activeProfiles.isEmpty)
     }
 
+    @Test("DCC offers stay dormant until the global opt-in is enabled")
+    @MainActor
+    func gatesDCCOffersBehindGlobalSetting() throws {
+        let defaults = UserDefaults.standard
+        let key = IRCDCCPreferences.receivesFilesKey
+        let previousValue = defaults.object(forKey: key)
+        defaults.removeObject(forKey: key)
+        defer {
+            if let previousValue {
+                defaults.set(previousValue, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        let localNickname = configuredNickname(in: state, for: profile)
+        let sender = "DCC\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+        let offer = try #require(IRCWireMessage(
+            line: ":\(sender)!user@example.org PRIVMSG \(localNickname) :\u{01}DCC SEND photo.jpg 2130706433 5000 42\u{01}"
+        ))
+
+        #expect(!state.receivesDCCFiles)
+        var directProfile = profile
+        directProfile.useSSHTunnel = false
+        state.handle(offer, profile: directProfile)
+        #expect(state.pendingDCCFileOffer == nil)
+        #expect(state.directMessages.isEmpty)
+
+        state.receivesDCCFiles = true
+        state.handle(offer, profile: directProfile)
+        let pendingOffer = try #require(state.pendingDCCFileOffer)
+        #expect(pendingOffer.sender == sender)
+        #expect(pendingOffer.request.filename == "photo.jpg")
+        #expect(!pendingOffer.routesThroughSSH)
+
+        let staleOffer = IRCDCCFileOffer(
+            serverID: pendingOffer.serverID,
+            networkName: pendingOffer.networkName,
+            sender: pendingOffer.sender,
+            request: pendingOffer.request,
+            routesThroughSSH: pendingOffer.routesThroughSSH
+        )
+        state.cancelDCCFileOffer(staleOffer)
+        #expect(state.pendingDCCFileOffer?.id == pendingOffer.id)
+
+        state.cancelDCCFileOffer(pendingOffer)
+        var tunneledProfile = profile
+        tunneledProfile.useSSHTunnel = true
+        state.handle(offer, profile: tunneledProfile)
+        #expect(state.pendingDCCFileOffer?.routesThroughSSH == true)
+
+        state.receivesDCCFiles = false
+        #expect(state.pendingDCCFileOffer == nil)
+    }
+
+    @Test("Only the active main window hosts global DCC offers")
+    @MainActor
+    func selectsSingleDCCOfferPresentationHost() {
+        let state = IRCAppState()
+        let first = UUID()
+        let second = UUID()
+
+        state.registerDCCFileOfferPresentationHost(first, preferAsActive: false)
+        #expect(state.dccFileOfferPresentationHostID == first)
+
+        state.registerDCCFileOfferPresentationHost(second, preferAsActive: false)
+        #expect(state.dccFileOfferPresentationHostID == first)
+
+        state.registerDCCFileOfferPresentationHost(second, preferAsActive: true)
+        #expect(state.dccFileOfferPresentationHostID == second)
+
+        state.unregisterDCCFileOfferPresentationHost(first)
+        #expect(state.dccFileOfferPresentationHostID == second)
+        state.unregisterDCCFileOfferPresentationHost(second)
+        #expect(state.dccFileOfferPresentationHostID == nil)
+    }
+
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
         #expect(IRCApplicationAppearance.allCases.count == 17)

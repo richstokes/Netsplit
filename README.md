@@ -29,7 +29,7 @@ Some thoughts/goals I had while making this.
 - No telemetry, no phone-home, no ads, no in-app-purchases, no junk
 - Secure-by-default, where possible. Prefers TLS. Option to easily connect via an SSH tunnel
   - SSH is nice, as many IRC servers reveal the IP address you're connecting from
-- No DCC/filesharing features. I'm just not interested in it, but maybe will add support for it at some point
+- Opt-in, receive-only DCC file sharing, disabled by default
 - Client-side ignoring for people, plus persistent muting for channels and direct messages
 - I _probably_ won't add scripting, it's not something I find useful, and would add a ton of complexity/increased risk of security issues. That said, there is basic "run these commands on connect" support already
 
@@ -46,6 +46,22 @@ RSA-SHA2, so use Ed25519 or password authentication with those servers.
 Netsplit learns the SSH host key on the first connection and pins it to that
 server profile. A changed key is rejected until you explicitly forget the saved
 host identity. IRC TLS, when enabled, remains end-to-end inside the SSH tunnel.
+
+## DCC file receiving
+
+DCC file receiving is disabled by default. Enable **Receive files with DCC** in
+the Safety settings to allow incoming offers. Netsplit presents every offer for
+confirmation with its sender, filename, size, network endpoint, and connection
+route. After acceptance, a separate File Transfers window shows progress,
+current download speed, and an option to cancel without blocking the main chat
+window. Closing the transfer window does not cancel the download. Accepted files
+are saved to Downloads without replacing existing files. They are marked as
+internet downloads so macOS keeps its normal Gatekeeper protections in place.
+
+DCC itself is unencrypted, and a direct transfer can reveal your IP address to
+the sender. When the IRC network profile uses an SSH tunnel, Netsplit routes its
+DCC connections through the same SSH server. This receive-only implementation
+supports active `DCC SEND` offers; passive/reverse offers are not yet supported.
 
 ## On-connect commands
 

@@ -112,10 +112,11 @@ struct SSHTunnelReadinessGate: Equatable {
 }
 
 /// Owns an authenticated SSH connection and one direct-tcpip child channel that
-/// carries the IRC byte stream. No local listening socket is created, which is
-/// important for the App Sandbox and avoids exposing a loopback proxy port.
+/// carries a forwarded byte stream (IRC or an accepted DCC transfer). No local
+/// listening socket is created, which is important for the App Sandbox and
+/// avoids exposing a loopback proxy port.
 @MainActor
-final class SSHTunnelConnection {
+final class SSHTunnelConnection: IRCDCCSSHTransport {
     private var client: SSHClient?
     private var channel: Channel?
     private var connectionTask: Task<Void, Never>?
@@ -124,6 +125,7 @@ final class SSHTunnelConnection {
 
     func connect(
         configuration: SSHTunnelConfiguration,
+        automaticallyReads: Bool = true,
         onReady: @escaping @MainActor () -> Void,
         onData: @escaping @MainActor (Data) -> Void,
         onClose: @escaping @MainActor (Error?) -> Void,
@@ -141,9 +143,11 @@ final class SSHTunnelConnection {
                     try PinnedSSHHostKeyValidator(
                         trustedKey: configuration.trustedHostKey,
                         onFirstSeen: { key in
-                            Task { @MainActor [weak self] in
-                                guard let self, self.generation == generation else { return }
-                                onHostKeyLearned(key)
+                            DispatchQueue.main.async { [weak self] in
+                                MainActor.assumeIsolated {
+                                    guard let self, self.generation == generation else { return }
+                                    onHostKeyLearned(key)
+                                }
                             }
                         }
                     )
@@ -178,24 +182,37 @@ final class SSHTunnelConnection {
                 let owner = self
                 let initializeChannel: @Sendable (Channel) -> EventLoopFuture<Void> = { childChannel in
                     do {
-                        let streamHandler = IRCSSHStreamHandler(
+                        let streamHandler = SSHForwardedStreamHandler(
                             waitsForTLS: configuration.useTLS,
                             onReady: {
-                                Task { @MainActor in
-                                    guard owner.generation == generation else { return }
-                                    owner.streamBecameReady(onReady: onReady)
+                                // These callbacks originate on one NIO event loop.
+                                // Enqueuing them directly on the main queue preserves
+                                // data-before-close ordering; independent Tasks do not.
+                                DispatchQueue.main.async {
+                                    MainActor.assumeIsolated {
+                                        guard owner.generation == generation else { return }
+                                        owner.streamBecameReady(onReady: onReady)
+                                    }
                                 }
                             },
                             onData: { data in
-                                Task { @MainActor in
-                                    guard owner.generation == generation else { return }
-                                    onData(data)
+                                DispatchQueue.main.async {
+                                    MainActor.assumeIsolated {
+                                        guard owner.generation == generation else { return }
+                                        onData(data)
+                                    }
                                 }
                             },
                             onClose: { error in
-                                Task { @MainActor in
-                                    guard owner.generation == generation else { return }
-                                    owner.finish(generation: generation, error: error, onClose: onClose)
+                                DispatchQueue.main.async {
+                                    MainActor.assumeIsolated {
+                                        guard owner.generation == generation else { return }
+                                        owner.finish(
+                                            generation: generation,
+                                            error: error,
+                                            onClose: onClose
+                                        )
+                                    }
                                 }
                             }
                         )
@@ -209,7 +226,10 @@ final class SSHTunnelConnection {
                             try childChannel.pipeline.syncOperations.addHandler(tlsHandler)
                         }
                         try childChannel.pipeline.syncOperations.addHandler(streamHandler)
-                        return childChannel.eventLoop.makeSucceededFuture(())
+                        return childChannel.setOption(
+                            ChannelOptions.autoRead,
+                            value: automaticallyReads
+                        )
                     } catch {
                         return childChannel.eventLoop.makeFailedFuture(error)
                     }
@@ -250,13 +270,23 @@ final class SSHTunnelConnection {
         var buffer = channel.allocator.buffer(capacity: data.count)
         buffer.writeBytes(data)
         channel.writeAndFlush(buffer).whenComplete { result in
-            Task { @MainActor in
-                switch result {
-                case .success: completion(true, nil)
-                case .failure(let error): completion(false, error)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    switch result {
+                    case .success: completion(true, nil)
+                    case .failure(let error): completion(false, error)
+                    }
                 }
             }
         }
+    }
+
+    /// Requests another inbound read when `connect` was configured with
+    /// automatic reads disabled. Calls made before channel readiness are safe
+    /// no-ops; the owner should make its first request from `onReady`.
+    func requestRead() {
+        guard let channel, channel.isActive else { return }
+        channel.read()
     }
 
     func close() {
@@ -420,7 +450,7 @@ nonisolated final class PinnedSSHHostKeyValidator: NIOSSHClientServerAuthenticat
     }
 }
 
-private nonisolated final class IRCSSHStreamHandler: ChannelInboundHandler, @unchecked Sendable {
+private nonisolated final class SSHForwardedStreamHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
 
     private let waitsForTLS: Bool
