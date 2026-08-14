@@ -431,10 +431,7 @@ private struct SidebarView: View {
             }
             Divider()
         }
-        if case .failed = state.status(for: profile) {
-            Button("Retry Now") { state.toggleConnection(for: profile) }
-        }
-        Button("Reconnect", systemImage: "arrow.clockwise") {
+        Button(reconnectActionLabel(for: profile), systemImage: "arrow.clockwise") {
             state.reconnect(profile)
         }
         Button(
@@ -451,6 +448,12 @@ private struct SidebarView: View {
                 Label("Delete Server Profile", systemImage: "trash")
             }
         }
+    }
+
+    private func reconnectActionLabel(for profile: ServerProfile) -> String {
+        if state.isWaitingToReconnect(profile) { return "Retry Now" }
+        if case .failed = state.status(for: profile) { return "Retry Now" }
+        return "Reconnect"
     }
 
     private func channelAccessibilityValue(_ channel: Conversation) -> String {
@@ -695,16 +698,26 @@ private struct ServerRow: View {
         state.unreadInviteCount(for: profile)
     }
 
+    private var statusText: String {
+        if state.isAutomaticReconnectPaused(profile) { return "Reconnect paused" }
+        if state.isWaitingToReconnect(profile) { return "Reconnecting" }
+        return state.status(for: profile).label
+    }
+
+    private var statusTint: Color {
+        state.isAutomaticReconnectPaused(profile) ? .orange : state.status(for: profile).tint
+    }
+
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: state.status(for: profile) == .online ? "circle.inset.filled" : "circle")
                 .font(.system(size: textMetrics.size(12)))
-                .foregroundStyle(state.status(for: profile).tint)
+                .foregroundStyle(statusTint)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(profile.hostname)
                     .font(.system(size: textMetrics.size(15)))
-                Text(state.status(for: profile).label)
+                Text(statusText)
                     .font(.system(size: textMetrics.size(11)))
                     .foregroundStyle(.secondary)
             }
@@ -727,9 +740,9 @@ private struct ServerRow: View {
     }
 
     private var accessibilityValue: String {
-        guard unreadInviteCount > 0 else { return state.status(for: profile).label }
+        guard unreadInviteCount > 0 else { return statusText }
         let invitations = unreadInviteCount == 1 ? "channel invitation" : "channel invitations"
-        return "\(state.status(for: profile).label), \(unreadInviteCount) unread \(invitations)"
+        return "\(statusText), \(unreadInviteCount) unread \(invitations)"
     }
 
     @MainActor
@@ -832,6 +845,7 @@ private struct ServerProfileCard: View {
     @Environment(\.ircThemePalette) private var themePalette
 
     private var statusText: String {
+        if state.isAutomaticReconnectPaused(profile) { return "Reconnect paused" }
         if state.isWaitingToReconnect(profile) { return "Reconnecting" }
         if state.status(for: profile) == .connecting {
             return state.applicationAppearance.connectionPresentation.connectingLabel
@@ -846,7 +860,14 @@ private struct ServerProfileCard: View {
     }
 
     private var statusTint: Color {
-        state.isActive(profile) ? state.status(for: profile).tint : .secondary
+        if state.isAutomaticReconnectPaused(profile) { return .orange }
+        return state.isActive(profile) ? state.status(for: profile).tint : .secondary
+    }
+
+    private var offersRetryNow: Bool {
+        if state.isWaitingToReconnect(profile) { return true }
+        if case .failed = state.status(for: profile) { return true }
+        return false
     }
 
     var body: some View {
@@ -930,11 +951,17 @@ private struct ServerProfileCard: View {
                 Button("Edit…") { editingProfile = profile }
                     .buttonStyle(.bordered)
                 if state.isActive(profile) {
-                    if case .failed = state.status(for: profile) {
-                        Button("Retry") { state.toggleConnection(for: profile) }
+                    if offersRetryNow {
+                        Button("Retry Now") { state.reconnect(profile) }
                             .buttonStyle(.borderedProminent)
-                        Button("Disconnect") { state.disconnect(profile) }
-                            .buttonStyle(.bordered)
+                        Button(
+                            state.isWaitingToReconnect(profile)
+                                ? "Stop Reconnecting"
+                                : "Disconnect"
+                        ) {
+                            state.disconnect(profile)
+                        }
+                        .buttonStyle(.bordered)
                     } else {
                         Button("Disconnect") { state.toggleConnection(for: profile) }
                             .buttonStyle(.bordered)

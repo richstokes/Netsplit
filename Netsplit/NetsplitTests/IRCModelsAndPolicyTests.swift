@@ -1715,6 +1715,65 @@ struct IRCModelsAndPolicyTests {
         #expect(IRCReconnectPolicy.attempt(after: 0, reusingCurrent: true) == 1)
     }
 
+    @Test("Automatic reconnects pause after too many starts in the rate window")
+    func rateLimitsAutomaticReconnectStarts() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var limiter = IRCAutomaticReconnectLimiter()
+
+        for offset in 0..<IRCAutomaticReconnectLimiter.maximumAttempts {
+            let attemptDate = start.addingTimeInterval(Double(offset) * 30)
+            #expect(limiter.nextAllowedAttemptDate(at: attemptDate) == nil)
+            limiter.recordAttempt(at: attemptDate)
+        }
+
+        let mostRecentAttempt = start.addingTimeInterval(
+            Double(IRCAutomaticReconnectLimiter.maximumAttempts - 1) * 30
+        )
+        let expectedResumeDate = start.addingTimeInterval(
+            IRCAutomaticReconnectLimiter.observationWindow
+        )
+        #expect(limiter.recentAttemptDates.count == IRCAutomaticReconnectLimiter.maximumAttempts)
+        #expect(
+            limiter.nextAllowedAttemptDate(at: mostRecentAttempt) == expectedResumeDate
+        )
+    }
+
+    @Test("Reconnect rate history expires when the observation window clears")
+    func expiresAutomaticReconnectRateHistory() {
+        let start = Date(timeIntervalSince1970: 2_000_000)
+        var limiter = IRCAutomaticReconnectLimiter()
+        for offset in 0..<IRCAutomaticReconnectLimiter.maximumAttempts {
+            limiter.recordAttempt(at: start.addingTimeInterval(Double(offset)))
+        }
+        let lastAttempt = start.addingTimeInterval(
+            Double(IRCAutomaticReconnectLimiter.maximumAttempts - 1)
+        )
+        let firstAttemptExpiry = start.addingTimeInterval(
+            IRCAutomaticReconnectLimiter.observationWindow
+        )
+
+        #expect(limiter.nextAllowedAttemptDate(at: lastAttempt) != nil)
+        #expect(
+            limiter.nextAllowedAttemptDate(
+                at: firstAttemptExpiry.addingTimeInterval(-0.001)
+            ) == firstAttemptExpiry
+        )
+        #expect(limiter.nextAllowedAttemptDate(at: firstAttemptExpiry) == nil)
+        #expect(
+            limiter.recentAttemptDates.count
+                == IRCAutomaticReconnectLimiter.maximumAttempts - 1
+        )
+        _ = limiter.nextAllowedAttemptDate(
+            at: lastAttempt.addingTimeInterval(IRCAutomaticReconnectLimiter.observationWindow)
+        )
+        #expect(limiter.recentAttemptDates.isEmpty)
+    }
+
+    @Test("Reconnect backoff requires a stable registration before resetting")
+    func usesStableConnectionIntervalForReconnectReset() {
+        #expect(IRCReconnectPolicy.stableConnectionDuration == 5 * 60)
+    }
+
     @Test("Channel event visibility treats 100 members as busy")
     func filtersBusyChannelEvents() {
         #expect(IRCChannelEventVisibility.alwaysShow.shouldShow(memberCount: 1_000))

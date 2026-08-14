@@ -1010,7 +1010,14 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("Reconnect automatically", isOn: $state.reconnectAutomatically)
-                Text("After an unexpected disconnect, Netsplit retries with increasing delays and slight random variation, capped at one minute.")
+                Text(
+                    "After an unexpected disconnect, Netsplit retries with increasing delays "
+                    + "and slight random variation, capped at one minute. If Netsplit starts "
+                    + "\(IRCAutomaticReconnectLimiter.maximumAttempts) automatic retries for one "
+                    + "server in \(Int(IRCAutomaticReconnectLimiter.observationWindow / 60)) "
+                    + "minutes, further attempts pause until the retry window clears; Retry Now "
+                    + "remains available."
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("Netsplit requests standard IRCv3 capabilities when supported by the server, including server timestamps and message tags.")

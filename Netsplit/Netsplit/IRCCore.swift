@@ -1143,6 +1143,12 @@ enum IRCChannelModeParser {
 }
 
 enum IRCReconnectPolicy {
+  /// A short-lived registration does not prove that the connection has
+  /// stabilised. Keeping the current backoff through this interval prevents a
+  /// sleep/wake or path-loss loop from repeatedly returning to the shortest
+  /// reconnect delay.
+  static let stableConnectionDuration: TimeInterval = 5 * 60
+
   static func attempt(after currentAttempt: Int, reusingCurrent: Bool) -> Int {
     reusingCurrent ? max(currentAttempt, 1) : max(currentAttempt, 0) + 1
   }
@@ -1163,6 +1169,37 @@ enum IRCReconnectPolicy {
     let unit = min(max(randomUnit, 0), 1)
     let lowerBound = min(max(minimumMultiplier, 0), 1)
     return baseDelay * (lowerBound + ((1 - lowerBound) * unit))
+  }
+}
+
+/// A per-server circuit breaker for automatic connection starts. Exponential
+/// backoff handles consecutive failures; this longer-lived history also catches
+/// connections that register successfully but drop again before becoming
+/// stable, such as repeated laptop sleep/wake cycles.
+struct IRCAutomaticReconnectLimiter {
+  static let maximumAttempts = 5
+  static let observationWindow: TimeInterval = 10 * 60
+
+  private(set) var recentAttemptDates: [Date] = []
+
+  mutating func recordAttempt(at date: Date) {
+    prune(at: date)
+    recentAttemptDates.append(date)
+  }
+
+  mutating func nextAllowedAttemptDate(at date: Date) -> Date? {
+    prune(at: date)
+    guard recentAttemptDates.count >= Self.maximumAttempts,
+      let oldestAttempt = recentAttemptDates.min()
+    else { return nil }
+    return oldestAttempt.addingTimeInterval(Self.observationWindow)
+  }
+
+  private mutating func prune(at date: Date) {
+    recentAttemptDates.removeAll { attemptDate in
+      let age = date.timeIntervalSince(attemptDate)
+      return age < 0 || age >= Self.observationWindow
+    }
   }
 }
 

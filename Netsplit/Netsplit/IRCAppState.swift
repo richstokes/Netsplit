@@ -158,6 +158,7 @@ final class IRCAppState: ObservableObject {
     @Published private(set) var channels: [Conversation] = []
     @Published private(set) var directMessages: [Conversation] = []
     @Published private(set) var connectionStatuses: [UUID: ConnectionStatus] = [:]
+    @Published private var automaticReconnectResumeDates: [UUID: Date] = [:]
     @Published private var unreadInviteCountsByServer: [UUID: Int] = [:]
     @Published private var channelTopics: [UUID: String] = [:]
     @Published var isChannelBrowserPresented = false
@@ -217,6 +218,8 @@ final class IRCAppState: ObservableObject {
     private var channelListCompletionDates: [UUID: Date] = [:]
     private var channelListRequestIDs: [UUID: UUID] = [:]
     private var reconnectAttempts: [UUID: Int] = [:]
+    private var automaticReconnectLimiters: [UUID: IRCAutomaticReconnectLimiter] = [:]
+    private var reconnectStabilityGenerations: [UUID: UUID] = [:]
     private var scheduledReconnects: [UUID: ScheduledReconnect] = [:]
     private var pendingLaunchConnectionIDs = Set<UUID>()
     private var registrationNicknameSuffixes: [UUID: Set<Int>] = [:]
@@ -527,6 +530,10 @@ final class IRCAppState: ObservableObject {
     func isWaitingToReconnect(_ profile: ServerProfile) -> Bool {
         scheduledReconnects[profile.id] != nil
             || sleepPausedReconnectReasons[profile.id] != nil
+    }
+
+    func isAutomaticReconnectPaused(_ profile: ServerProfile) -> Bool {
+        automaticReconnectResumeDates[profile.id] != nil
     }
 
     func isActive(_ profile: ServerProfile) -> Bool {
@@ -910,6 +917,10 @@ final class IRCAppState: ObservableObject {
         }
         scheduledReconnects.removeAll()
         for serverID in serverIDsToRestore {
+            // Time spent asleep does not demonstrate a healthy IRC session.
+            // Invalidate the stability timer and restart it after wake for any
+            // session that still needs its reconnect history forgiven.
+            reconnectStabilityGenerations.removeValue(forKey: serverID)
             connections[serverID]?.systemWillSleep()
         }
         Self.connectionLogger.info(
@@ -936,6 +947,9 @@ final class IRCAppState: ObservableObject {
                     reuseCurrentAttempt: true
                 )
             } else if let transport = connections[profile.id] {
+                if registeredServerIDs.contains(profile.id) {
+                    scheduleReconnectStateResetAfterStability(for: profile)
+                }
                 transport.systemDidWake(after: Double(index) * wakeRecoveryStagger)
             } else {
                 // A desired session should normally retain its transport. If a
@@ -1040,6 +1054,9 @@ final class IRCAppState: ObservableObject {
         pendingLaunchConnectionIDs.remove(profile.id)
         guard connections[profile.id] == nil else { return }
         if !isAutomaticRetry { cancelScheduledReconnect(for: profile.id, resetAttempts: true) }
+        // A new transport cannot inherit stability time from the previous
+        // connection, including when this is an automatic retry.
+        reconnectStabilityGenerations.removeValue(forKey: profile.id)
         serverFeatures[profile.id] = .defaults
         sessionIDs[profile.id] = UUID()
         sessionOnConnectCommands[profile.id] = onConnectCommands(for: profile)
@@ -1129,6 +1146,7 @@ final class IRCAppState: ObservableObject {
             selectWithoutRecordingHistory(fallback)
         }
         if oneOffServerIDs.remove(profile.id) != nil {
+            automaticReconnectLimiters.removeValue(forKey: profile.id)
             removeConversations(for: profile.id)
             conversations.removeValue(forKey: profile.id)
             messageUpdateSignals.removeValue(forKey: profile.id)
@@ -1222,6 +1240,7 @@ final class IRCAppState: ObservableObject {
         removeCredential(for: profile, kind: "ssh-password")
         removeCredential(for: profile, kind: "ssh-private-key")
         profiles.removeAll { $0.id == profile.id }
+        automaticReconnectLimiters.removeValue(forKey: profile.id)
         saveProfiles()
     }
 
@@ -2604,7 +2623,11 @@ final class IRCAppState: ObservableObject {
             registeredServerIDs.insert(profile.id)
             registrationNicknameSuffixes.removeValue(forKey: profile.id)
             connectionStatuses[profile.id] = .online
-            cancelScheduledReconnect(for: profile.id, resetAttempts: true)
+            // Registration alone is not enough to call a connection healthy.
+            // Preserve backoff through short-lived sleep/wake and path-loss
+            // cycles, then reset it after a sustained online interval.
+            cancelScheduledReconnect(for: profile.id, resetAttempts: false)
+            scheduleReconnectStateResetAfterStability(for: profile)
             appendSystem(wire.trailing ?? "Connected.", for: .server(profile.id))
             openFavoriteDirectMessages(for: profile.id)
             requestMOTD(
@@ -4765,26 +4788,51 @@ final class IRCAppState: ObservableObject {
             baseDelay: baseDelay,
             randomUnit: Double.random(in: 0...1)
         )
+        let now = Date()
+        let resumeDate = automaticReconnectResumeDate(for: profile.id, at: now)
+        let scheduledDelay: TimeInterval
+        if let resumeDate {
+            scheduledDelay = max(delay, resumeDate.timeIntervalSince(now))
+            automaticReconnectResumeDates[profile.id] = resumeDate
+        } else {
+            scheduledDelay = delay
+            automaticReconnectResumeDates.removeValue(forKey: profile.id)
+        }
         let requestID = UUID()
         scheduledReconnects[profile.id] = ScheduledReconnect(
             requestID: requestID,
             reason: reason
         )
         Self.connectionLogger.info(
-            "Reconnect scheduled server=\(profile.name, privacy: .public) reason=\(reason.rawValue, privacy: .public) attempt=\(attempt, privacy: .public) delay=\(delay, privacy: .public)"
+            "Reconnect scheduled server=\(profile.name, privacy: .public) reason=\(reason.rawValue, privacy: .public) attempt=\(attempt, privacy: .public) delay=\(scheduledDelay, privacy: .public) rateLimited=\(resumeDate != nil, privacy: .public)"
         )
-        appendSystem(
-            "Connection lost. Reconnecting in \(Int(ceil(delay))) seconds (attempt \(attempt))…",
-            for: .server(profile.id)
-        )
+        if let resumeDate {
+            let observationMinutes = Int(IRCAutomaticReconnectLimiter.observationWindow / 60)
+            let resumeTime = resumeDate.formatted(date: .omitted, time: .shortened)
+            let message =
+                "Automatic reconnect paused after \(IRCAutomaticReconnectLimiter.maximumAttempts) "
+                + "attempts in \(observationMinutes) minutes. Netsplit will try again after "
+                + "\(resumeTime), or you can choose Retry Now when the connection is stable."
+            appendSystem(
+                message,
+                for: .server(profile.id)
+            )
+        } else {
+            appendSystem(
+                "Connection lost. Reconnecting in \(Int(ceil(scheduledDelay))) seconds (attempt \(attempt))…",
+                for: .server(profile.id)
+            )
+        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + scheduledDelay) { [weak self] in
             guard let self,
                   self.reconnectAutomatically,
                   self.scheduledReconnects[profile.id]?.requestID == requestID,
                   let activeProfile = self.profiles.first(where: { $0.id == profile.id }),
                   let failedTransport = self.connections.removeValue(forKey: profile.id) else { return }
             self.scheduledReconnects.removeValue(forKey: profile.id)
+            self.automaticReconnectResumeDates.removeValue(forKey: profile.id)
+            self.recordAutomaticReconnectAttempt(for: profile.id, at: Date())
             Self.connectionLogger.info(
                 "Reconnect starting server=\(activeProfile.name, privacy: .public) reason=\(reason.rawValue, privacy: .public) attempt=\(attempt, privacy: .public)"
             )
@@ -4799,16 +4847,65 @@ final class IRCAppState: ObservableObject {
         }
     }
 
+    private func automaticReconnectResumeDate(for serverID: UUID, at date: Date) -> Date? {
+        guard var limiter = automaticReconnectLimiters[serverID] else { return nil }
+        let resumeDate = limiter.nextAllowedAttemptDate(at: date)
+        if limiter.recentAttemptDates.isEmpty {
+            automaticReconnectLimiters.removeValue(forKey: serverID)
+        } else {
+            automaticReconnectLimiters[serverID] = limiter
+        }
+        return resumeDate
+    }
+
+    private func recordAutomaticReconnectAttempt(for serverID: UUID, at date: Date) {
+        var limiter = automaticReconnectLimiters[serverID] ?? IRCAutomaticReconnectLimiter()
+        limiter.recordAttempt(at: date)
+        automaticReconnectLimiters[serverID] = limiter
+    }
+
+    private func scheduleReconnectStateResetAfterStability(for profile: ServerProfile) {
+        let hasReconnectState = reconnectAttempts[profile.id] != nil
+            || automaticReconnectLimiters[profile.id] != nil
+        guard !systemSleepState.isSleeping, hasReconnectState else {
+            reconnectStabilityGenerations.removeValue(forKey: profile.id)
+            return
+        }
+        let generation = UUID()
+        reconnectStabilityGenerations[profile.id] = generation
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + IRCReconnectPolicy.stableConnectionDuration
+        ) { [weak self] in
+            guard let self,
+                  self.reconnectStabilityGenerations[profile.id] == generation else { return }
+            self.reconnectStabilityGenerations.removeValue(forKey: profile.id)
+            guard self.registeredServerIDs.contains(profile.id),
+                  self.connections[profile.id] != nil else { return }
+            self.reconnectAttempts.removeValue(forKey: profile.id)
+            self.automaticReconnectLimiters.removeValue(forKey: profile.id)
+            Self.connectionLogger.info(
+                "Reconnect state reset after stable connection server=\(profile.name, privacy: .public)"
+            )
+        }
+    }
+
     private func cancelScheduledReconnect(for serverID: UUID, resetAttempts: Bool) {
         scheduledReconnects.removeValue(forKey: serverID)
         sleepPausedReconnectReasons.removeValue(forKey: serverID)
-        if resetAttempts { reconnectAttempts.removeValue(forKey: serverID) }
+        automaticReconnectResumeDates.removeValue(forKey: serverID)
+        if resetAttempts {
+            reconnectAttempts.removeValue(forKey: serverID)
+            reconnectStabilityGenerations.removeValue(forKey: serverID)
+        }
     }
 
     private func cancelAllScheduledReconnects() {
         scheduledReconnects.removeAll()
         sleepPausedReconnectReasons.removeAll()
+        automaticReconnectResumeDates.removeAll()
         reconnectAttempts.removeAll()
+        automaticReconnectLimiters.removeAll()
+        reconnectStabilityGenerations.removeAll()
     }
 
     private func appendSystem(_ text: String, for item: SidebarItem) {
