@@ -111,6 +111,37 @@ struct IRCModelsAndPolicyTests {
         #expect(state.dccFileOfferPresentationHostID == nil)
     }
 
+    @Test("Requests a new presentation host when a DCC offer has no window")
+    @MainActor
+    func requestsDCCOfferPresentationHostWhenNeeded() async throws {
+        let state = IRCAppState()
+        let profile = try #require(state.profiles.first)
+        let localNickname = configuredNickname(in: state, for: profile)
+        let sender = "DCC\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+        let offer = try #require(IRCWireMessage(
+            line: ":\(sender)!user@example.org PRIVMSG \(localNickname) :\u{01}DCC SEND photo.jpg 2130706433 5000 42\u{01}"
+        ))
+        var presentationRequestCount = 0
+
+        state.registerDCCFileOfferPresentationRequest {
+            presentationRequestCount += 1
+        }
+        state.receivesDCCFiles = true
+        state.handle(offer, profile: profile)
+        let transientHostID = UUID()
+        state.registerDCCFileOfferPresentationHost(transientHostID, preferAsActive: true)
+        state.unregisterDCCFileOfferPresentationHost(transientHostID)
+        await Task.yield()
+        #expect(presentationRequestCount == 1)
+
+        let hostID = UUID()
+        state.registerDCCFileOfferPresentationHost(hostID, preferAsActive: true)
+        state.cancelDCCFileOffer(try #require(state.pendingDCCFileOffer))
+        state.handle(offer, profile: profile)
+        await Task.yield()
+        #expect(presentationRequestCount == 1)
+    }
+
     @Test("Application themes expose the expected light and dark variants")
     func exposesApplicationThemes() {
         #expect(IRCApplicationAppearance.allCases.count == 17)

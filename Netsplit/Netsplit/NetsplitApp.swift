@@ -9,7 +9,7 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
-private enum AppSceneID {
+enum AppSceneID {
     // SwiftUI uses this identity for persisted window state. Keep it stable.
     static let mainWindow = "main"
     static let aboutWindow = "about"

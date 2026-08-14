@@ -230,6 +230,10 @@ final class IRCAppState: ObservableObject {
     private var dccOfferRateLimiter = IRCDCCOfferRateLimiter()
     private var dccResourceBudget = IRCDCCResourceBudget()
     private var activeDCCFileReceivers: [UUID: IRCDCCFileReceiver] = [:]
+    private var dccFileOfferPresentationRequest: (@MainActor () -> Void)?
+    private var pendingDCCFileOfferPresentationTask: DispatchWorkItem?
+    private var pendingDCCFileOfferPresentationTaskID: UUID?
+    private var isDCCFileOfferPresentationRequested = false
     private var terminalServerErrors: [UUID: String] = [:]
     private var pendingOutgoingEchoes: [UUID: [PendingOutgoingEcho]] = [:]
     private var recentSelfTargetedConfirmations: [UUID: [IRCRecentSelfTargetedConfirmation]] = [:]
@@ -911,14 +915,28 @@ final class IRCAppState: ObservableObject {
         presentNextDCCFileOfferIfNeeded()
     }
 
+    func registerDCCFileOfferPresentationRequest(
+        _ request: @escaping @MainActor () -> Void
+    ) {
+        // Intentionally retain the scene action after its originating window
+        // closes. OpenWindowAction addresses the app scene, not that window.
+        dccFileOfferPresentationRequest = request
+        requestDCCFileOfferPresentationIfNeeded()
+    }
+
     func registerDCCFileOfferPresentationHost(_ hostID: UUID, preferAsActive: Bool) {
         guard preferAsActive || dccFileOfferPresentationHostID == nil else { return }
         dccFileOfferPresentationHostID = hostID
+        isDCCFileOfferPresentationRequested = false
+        pendingDCCFileOfferPresentationTask?.cancel()
+        pendingDCCFileOfferPresentationTask = nil
+        pendingDCCFileOfferPresentationTaskID = nil
     }
 
     func unregisterDCCFileOfferPresentationHost(_ hostID: UUID) {
         guard dccFileOfferPresentationHostID == hostID else { return }
         dccFileOfferPresentationHostID = nil
+        requestDCCFileOfferPresentationIfNeeded()
     }
 
     func removeAllIgnores(for profile: ServerProfile) {
@@ -992,6 +1010,7 @@ final class IRCAppState: ObservableObject {
             return
         }
         scheduleDCCFileOfferExpiration(offer)
+        requestDCCFileOfferPresentationIfNeeded()
     }
 
     private func resolveDCCFileOffer(_ offer: IRCDCCFileOffer) {
@@ -1005,6 +1024,35 @@ final class IRCAppState: ObservableObject {
         guard receivesDCCFiles, pendingDCCFileOffer == nil,
               !queuedDCCFileOffers.isEmpty else { return }
         pendingDCCFileOffer = queuedDCCFileOffers.removeFirst()
+        requestDCCFileOfferPresentationIfNeeded()
+    }
+
+    private func requestDCCFileOfferPresentationIfNeeded() {
+        guard receivesDCCFiles,
+              pendingDCCFileOffer != nil,
+              dccFileOfferPresentationHostID == nil,
+              dccFileOfferPresentationRequest != nil,
+              !isDCCFileOfferPresentationRequested,
+              pendingDCCFileOfferPresentationTask == nil else { return }
+        // Give an existing ContentView one run-loop turn to register itself
+        // before creating a replacement WindowGroup scene.
+        let taskID = UUID()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.pendingDCCFileOfferPresentationTaskID == taskID else { return }
+            let shouldRun = self.pendingDCCFileOfferPresentationTask?.isCancelled == false
+            self.pendingDCCFileOfferPresentationTask = nil
+            self.pendingDCCFileOfferPresentationTaskID = nil
+            guard shouldRun,
+                  self.receivesDCCFiles,
+                  self.pendingDCCFileOffer != nil,
+                  self.dccFileOfferPresentationHostID == nil else { return }
+            self.isDCCFileOfferPresentationRequested = true
+            self.dccFileOfferPresentationRequest?()
+        }
+        pendingDCCFileOfferPresentationTask = task
+        pendingDCCFileOfferPresentationTaskID = taskID
+        DispatchQueue.main.async(execute: task)
     }
 
     private func removePendingDCCFileOffers(for serverID: UUID) {
@@ -1030,6 +1078,10 @@ final class IRCAppState: ObservableObject {
         queuedDCCFileOffers.removeAll()
         dccFileOfferExpirationTasks.values.forEach { $0.cancel() }
         dccFileOfferExpirationTasks.removeAll()
+        pendingDCCFileOfferPresentationTask?.cancel()
+        pendingDCCFileOfferPresentationTask = nil
+        pendingDCCFileOfferPresentationTaskID = nil
+        isDCCFileOfferPresentationRequested = false
         dccOfferRateLimiter = IRCDCCOfferRateLimiter()
         activeDCCFileReceivers.values.forEach { receiver in
             let offerID = receiver.offer.id

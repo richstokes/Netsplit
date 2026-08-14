@@ -154,6 +154,14 @@ struct ContentView: View {
         }
         .ircWorkspaceTheme()
         .environment(\.ircTextMetrics, textMetrics)
+        .onAppear {
+            // Keep this scene action available after the last WindowGroup
+            // instance closes so an incoming DCC offer can create a new host.
+            state.registerDCCFileOfferPresentationRequest {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: AppSceneID.mainWindow)
+            }
+        }
         .background {
             DCCFileOfferPresentationWindowReader(
                 didAttach: { isMainWindow in
