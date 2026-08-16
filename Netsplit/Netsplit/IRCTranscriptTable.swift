@@ -237,7 +237,11 @@ struct IRCTranscriptTable: NSViewRepresentable {
         /// transcript, but must not also constrain the first measurement of a
         /// realized row. Otherwise a stale estimate can become the hosting
         /// view's proposal and then be reported back as its fitting height.
-        private var initiallyResetCachedHeightMessageIDs = Set<UUID>()
+        /// Only heights which existed before a conversation attachment can be
+        /// stale for its new hosting graph. Measurements produced by the
+        /// attachment's hidden layout pass are already authoritative and must
+        /// not be reset back to the estimate on a later verification pass.
+        private var cachedHeightMessageIDsPendingInitialReset = Set<UUID>()
         private var initiallyVerifiedMessageIDs = Set<UUID>()
         private var heightInvalidationScheduled = false
         private var fullHeightRefreshScheduled = false
@@ -329,7 +333,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             cancelTailPositioning()
             isRestoringReadingPosition = false
             pendingHeightMessageIDs.removeAll()
-            initiallyResetCachedHeightMessageIDs.removeAll()
+            cachedHeightMessageIDsPendingInitialReset.removeAll()
             initiallyVerifiedMessageIDs.removeAll()
             initialPositionScheduled = false
             heightInvalidationScheduled = false
@@ -450,7 +454,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             followingTail = true
             topSpacerHeight = Self.topInset
             pendingHeightMessageIDs.removeAll()
-            initiallyResetCachedHeightMessageIDs.removeAll()
+            cachedHeightMessageIDsPendingInitialReset.removeAll()
             initiallyVerifiedMessageIDs.removeAll()
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
@@ -469,6 +473,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             pruneCachedRowHeights(to: newMessages)
             applyPendingRowLayoutInvalidation(to: newMessages)
             touchCurrentRowHeightCache()
+            cachedHeightMessageIDsPendingInitialReset = currentCachedMessageIDs()
 #if DEBUG
             pendingRowHeightCacheSwitchSnapshot = rowHeightCacheSwitchSnapshot(
                 messageCount: newMessages.count
@@ -690,6 +695,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     self.scheduleInitialPosition()
                     return
                 }
+                self.cachedHeightMessageIDsPendingInitialReset.removeAll()
                 self.hasPositionedInitially = true
                 scrollView.alphaValue = 1
                 let geometry = self.geometry()
@@ -1590,16 +1596,19 @@ struct IRCTranscriptTable: NSViewRepresentable {
                         - tableView.intercellSpacing.height
                 )
                 let previousCachedHeight = cachedRowHeight(for: message.id)
-                if let previousCachedHeight,
-                   initiallyResetCachedHeightMessageIDs.insert(message.id).inserted {
+                let wasCachedBeforeAttachment =
+                    cachedHeightMessageIDsPendingInitialReset.remove(message.id) != nil
+                if let previousCachedHeight, wasCachedBeforeAttachment {
                     // Break a possible self-validating measurement loop in
                     // two stages. First make AppKit lay this realized row out
                     // from the clean estimate; the next hidden positioning
                     // pass measures and caches the hosted content at that
-                    // neutral height. This preserves cached geometry for the
-                    // rest of a large transcript while preventing one stale
-                    // visible value from surviving indefinitely as a gap.
+                    // neutral height. Limit this to values captured before the
+                    // attachment: resetting a measurement just produced by an
+                    // earlier hidden pass can leave a newly visible row at the
+                    // estimate and produce either blank space or overlap.
                     removeCachedRowHeight(for: message.id)
+                    initiallyVerifiedMessageIDs.remove(message.id)
                     invalidatedRows.insert(row)
 #if DEBUG
                     resetRows.append(
@@ -1717,6 +1726,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
                   let cache = rowHeightCaches[contentIdentity],
                   rowHeightCacheMatchesCurrentLayout(cache) else { return }
             cache.heightsByMessageID.removeValue(forKey: messageID)
+        }
+
+        private func currentCachedMessageIDs() -> Set<UUID> {
+            guard let contentIdentity,
+                  let cache = rowHeightCaches[contentIdentity],
+                  rowHeightCacheMatchesCurrentLayout(cache) else { return [] }
+            return Set(cache.heightsByMessageID.keys)
         }
 
         private func cacheRealizedRowHeights(in tableView: NSTableView) {

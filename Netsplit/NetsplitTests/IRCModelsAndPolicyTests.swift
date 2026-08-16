@@ -4597,13 +4597,19 @@ struct IRCModelsAndPolicyTests {
     @MainActor
     func isolatesNativeTranscriptCellsAndRemeasuresCachedHeights() async throws {
         let tallPreviewMarker = "tall preview"
+        let inactiveTailMarker = "inactive tail"
         let regularRowHeight: CGFloat = 24
         let tallPreviewRowHeight: CGFloat = 280
+        let inactiveTailRowHeight: CGFloat = 72
         var presentsTallPreview = true
         func rowHeight(for message: IRCMessage) -> CGFloat {
-            message.text.contains(tallPreviewMarker) && presentsTallPreview
-                ? tallPreviewRowHeight
-                : regularRowHeight
+            if message.text.contains(inactiveTailMarker) {
+                return inactiveTailRowHeight
+            }
+            if message.text.contains(tallPreviewMarker), presentsTallPreview {
+                return tallPreviewRowHeight
+            }
+            return regularRowHeight
         }
 
         let firstIdentity = SidebarItem.channel(UUID())
@@ -4616,8 +4622,21 @@ struct IRCModelsAndPolicyTests {
                     : "First conversation message \(index)"
             )
         }
-        let secondMessages = (0..<100).map {
-            IRCMessage(sender: "second", text: "Second conversation message \($0)")
+        let firstMessagesAfterInactiveAppend = firstMessages + (0..<4).map { index in
+            IRCMessage(
+                sender: "first",
+                text: index == 3
+                    ? "Uncached \(inactiveTailMarker) wrapping row"
+                    : "Uncached inactive message \(index)"
+            )
+        }
+        let secondMessages = (0..<100).map { index in
+            IRCMessage(
+                sender: "second",
+                text: index == 99
+                    ? "Second conversation \(tallPreviewMarker) row"
+                    : "Second conversation message \(index)"
+            )
         }
         var contentIdentity = firstIdentity
         var messages = firstMessages
@@ -4635,7 +4654,7 @@ struct IRCModelsAndPolicyTests {
                 IRCTranscriptTable(
                     contentIdentity: contentIdentity,
                     messages: messages,
-                    estimatedRowHeight: 24,
+                    estimatedRowHeight: 32,
                     rowSpacing: 0,
                     renderConfiguration: "conversation-cell-isolation-test",
                     makeRow: { message in
@@ -4682,6 +4701,16 @@ struct IRCModelsAndPolicyTests {
                 in: hostingController.view
             ) as? NSTableView
         )
+        // The initial hidden layout creates authoritative measurements. They
+        // are not stale cache entries from an earlier attachment and must not
+        // be replaced by the neutral estimate during visible verification.
+        #expect(!recordedVisibleCacheReset())
+        #expect(
+            abs(
+                tableView.rect(ofRow: firstMessages.count).height
+                    - tallPreviewRowHeight
+            ) <= 0.5
+        )
 
         func visibleHostingViews() -> [NSView] {
             let visibleRows = tableView.rows(in: tableView.visibleRect)
@@ -4705,6 +4734,7 @@ struct IRCModelsAndPolicyTests {
         let firstHostingViewIDs = Set(firstHostingViews.map(ObjectIdentifier.init))
         #expect(!firstHostingViewIDs.isEmpty)
 
+        geometryEvents.removeAll()
         contentIdentity = secondIdentity
         messages = secondMessages
         hostingController.rootView = rootView()
@@ -4717,9 +4747,24 @@ struct IRCModelsAndPolicyTests {
         let secondHostingViewIDs = Set(secondHostingViews.map(ObjectIdentifier.init))
         #expect(firstHostingViewIDs.isDisjoint(with: secondHostingViewIDs))
 
+        // A first visit to this identity likewise has no pre-attachment cache
+        // to reset. This guards the pass-to-pass race which could leave tail
+        // rows at the estimate and make text overlap or end above the composer.
+        #expect(!recordedVisibleCacheReset())
+        #expect(
+            abs(
+                tableView.rect(ofRow: secondMessages.count).height
+                    - tallPreviewRowHeight
+            ) <= 0.5
+        )
+
         geometryEvents.removeAll()
         contentIdentity = firstIdentity
-        messages = firstMessages
+        // Revisit with messages received while the conversation was
+        // inactive. Existing tail rows have pre-attachment cache entries;
+        // the appended rows do not. Resetting the former must never make the
+        // latter eligible for resets on the next reconciliation pass.
+        messages = firstMessagesAfterInactiveAppend
         hostingController.rootView = rootView()
         hostingController.view.layoutSubtreeIfNeeded()
         try await Self.waitUntil {
@@ -4738,6 +4783,12 @@ struct IRCModelsAndPolicyTests {
                     - tallPreviewRowHeight
             ) <= 0.5
         )
+        #expect(
+            abs(
+                tableView.rect(ofRow: firstMessagesAfterInactiveAppend.count).height
+                    - inactiveTailRowHeight
+            ) <= 0.5
+        )
         #expect(recordedVisibleCacheReset())
 
         contentIdentity = secondIdentity
@@ -4753,7 +4804,7 @@ struct IRCModelsAndPolicyTests {
         presentsTallPreview = false
         geometryEvents.removeAll()
         contentIdentity = firstIdentity
-        messages = firstMessages
+        messages = firstMessagesAfterInactiveAppend
         hostingController.rootView = rootView()
         hostingController.view.layoutSubtreeIfNeeded()
         try await Self.waitUntil {
@@ -4777,11 +4828,11 @@ struct IRCModelsAndPolicyTests {
         let revisitedMessageRows = revisitedVisibleRows.location == NSNotFound
             ? []
             : (revisitedVisibleRows.location..<NSMaxRange(revisitedVisibleRows)).filter {
-                $0 > 0 && $0 <= firstMessages.count
+                $0 > 0 && $0 <= firstMessagesAfterInactiveAppend.count
             }
         #expect(!revisitedMessageRows.isEmpty)
         for row in revisitedMessageRows {
-            let message = firstMessages[row - 1]
+            let message = firstMessagesAfterInactiveAppend[row - 1]
             #expect(
                 abs(tableView.rect(ofRow: row).height - rowHeight(for: message)) <= 0.5
             )
