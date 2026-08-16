@@ -233,6 +233,11 @@ struct IRCTranscriptTable: NSViewRepresentable {
         private var lastViewportWidth: CGFloat = 0
         private var lastViewportHeight: CGFloat = 0
         private var pendingHeightMessageIDs = Set<UUID>()
+        /// Cached heights are useful for positioning an unmaterialized
+        /// transcript, but must not also constrain the first measurement of a
+        /// realized row. Otherwise a stale estimate can become the hosting
+        /// view's proposal and then be reported back as its fitting height.
+        private var initiallyResetCachedHeightMessageIDs = Set<UUID>()
         private var initiallyVerifiedMessageIDs = Set<UUID>()
         private var heightInvalidationScheduled = false
         private var fullHeightRefreshScheduled = false
@@ -324,6 +329,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             cancelTailPositioning()
             isRestoringReadingPosition = false
             pendingHeightMessageIDs.removeAll()
+            initiallyResetCachedHeightMessageIDs.removeAll()
             initiallyVerifiedMessageIDs.removeAll()
             initialPositionScheduled = false
             heightInvalidationScheduled = false
@@ -444,6 +450,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             followingTail = true
             topSpacerHeight = Self.topInset
             pendingHeightMessageIDs.removeAll()
+            initiallyResetCachedHeightMessageIDs.removeAll()
             initiallyVerifiedMessageIDs.removeAll()
             heightInvalidationScheduled = false
             fullHeightRefreshScheduled = false
@@ -1547,6 +1554,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
             var invalidatedRows = IndexSet()
             var hasUnverifiedRows = false
 #if DEBUG
+            var resetRows: [String] = []
             var verifiedRows: [String] = []
             var unverifiedRows: [String] = []
 #endif
@@ -1582,6 +1590,26 @@ struct IRCTranscriptTable: NSViewRepresentable {
                         - tableView.intercellSpacing.height
                 )
                 let previousCachedHeight = cachedRowHeight(for: message.id)
+                if let previousCachedHeight,
+                   initiallyResetCachedHeightMessageIDs.insert(message.id).inserted {
+                    // Break a possible self-validating measurement loop in
+                    // two stages. First make AppKit lay this realized row out
+                    // from the clean estimate; the next hidden positioning
+                    // pass measures and caches the hosted content at that
+                    // neutral height. This preserves cached geometry for the
+                    // rest of a large transcript while preventing one stale
+                    // visible value from surviving indefinitely as a gap.
+                    removeCachedRowHeight(for: message.id)
+                    invalidatedRows.insert(row)
+#if DEBUG
+                    resetRows.append(
+                        "\(row)/\(String(message.id.uuidString.prefix(8)))"
+                            + "/\(String(format: "%.1f", previousCachedHeight))"
+                            + "->\(String(format: "%.1f", parent.estimatedRowHeight))"
+                    )
+#endif
+                    continue
+                }
 #if DEBUG
                 reportLargeHeightDisagreementIfNeeded(
                     row: row,
@@ -1616,8 +1644,8 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // NSTableView can retain a stale automatic-height proposal by
                 // row index even when its rect happens to agree with the new
                 // hosting view during the first layout pass. Explicitly
-                // invalidate each initially visible message once per
-                // attachment so AppKit adopts the conversation-scoped cache.
+                // invalidate each initially visible message so AppKit adopts
+                // either its clean baseline or its newly measured cache value.
                 applyRowHeightChangesWithoutAnimation(
                     invalidatedRows,
                     in: tableView
@@ -1627,8 +1655,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
             if !invalidatedRows.isEmpty || hasUnverifiedRows {
                 parent.onGeometryChange?(
                     "initial-visible-row-heights-verified "
+                        + "reset=\(resetRows.count) "
                         + "invalidated=\(invalidatedRows.count) "
                         + "pending=\(unverifiedRows.count) "
+                        + "resetRows=\(resetRows.prefix(4).joined(separator: ",")) "
                         + "rows=\(verifiedRows.prefix(4).joined(separator: ",")) "
                         + "pendingRows=\(unverifiedRows.prefix(4).joined(separator: ","))",
                     geometry()
@@ -1680,6 +1710,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 )
             }
             evictOldRowHeightCachesIfNeeded()
+        }
+
+        private func removeCachedRowHeight(for messageID: UUID) {
+            guard let contentIdentity,
+                  let cache = rowHeightCaches[contentIdentity],
+                  rowHeightCacheMatchesCurrentLayout(cache) else { return }
+            cache.heightsByMessageID.removeValue(forKey: messageID)
         }
 
         private func cacheRealizedRowHeights(in tableView: NSTableView) {

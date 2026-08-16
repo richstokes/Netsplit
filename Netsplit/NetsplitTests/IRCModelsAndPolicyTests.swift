@@ -4593,21 +4593,22 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
-    @Test("Native transcript does not reuse hosted cells across attachments")
+    @Test("Native transcript isolates cells and remeasures cached visible rows")
     @MainActor
-    func isolatesNativeTranscriptCellsByAttachment() async throws {
+    func isolatesNativeTranscriptCellsAndRemeasuresCachedHeights() async throws {
         let tallPreviewMarker = "tall preview"
         let regularRowHeight: CGFloat = 24
         let tallPreviewRowHeight: CGFloat = 280
+        var presentsTallPreview = true
         func rowHeight(for message: IRCMessage) -> CGFloat {
-            message.text.contains(tallPreviewMarker)
+            message.text.contains(tallPreviewMarker) && presentsTallPreview
                 ? tallPreviewRowHeight
                 : regularRowHeight
         }
 
         let firstIdentity = SidebarItem.channel(UUID())
         let secondIdentity = SidebarItem.channel(UUID())
-        var firstMessages = (0..<100).map { index in
+        let firstMessages = (0..<100).map { index in
             IRCMessage(
                 sender: "first",
                 text: index == 99
@@ -4621,6 +4622,13 @@ struct IRCModelsAndPolicyTests {
         var contentIdentity = firstIdentity
         var messages = firstMessages
         var initialPositionCount = 0
+        var geometryEvents: [String] = []
+
+        func recordedVisibleCacheReset() -> Bool {
+            geometryEvents.contains {
+                $0.contains("reset=") && !$0.contains("reset=0")
+            }
+        }
 
         func rootView() -> AnyView {
             AnyView(
@@ -4644,7 +4652,7 @@ struct IRCModelsAndPolicyTests {
                     onInitialPositioned: { _ in initialPositionCount += 1 },
                     onFollowingTailChange: { _, _ in },
                     onTailPositioned: { _, _ in },
-                    onGeometryChange: { _, _ in }
+                    onGeometryChange: { event, _ in geometryEvents.append(event) }
                 )
                 .frame(width: 320, height: 240)
             )
@@ -4709,9 +4717,7 @@ struct IRCModelsAndPolicyTests {
         let secondHostingViewIDs = Set(secondHostingViews.map(ObjectIdentifier.init))
         #expect(firstHostingViewIDs.isDisjoint(with: secondHostingViewIDs))
 
-        firstMessages.append(contentsOf: (100..<112).map {
-            IRCMessage(sender: "first", text: "First conversation message \($0)")
-        })
+        geometryEvents.removeAll()
         contentIdentity = firstIdentity
         messages = firstMessages
         hostingController.rootView = rootView()
@@ -4720,17 +4726,52 @@ struct IRCModelsAndPolicyTests {
             initialPositionCount == 3 && !visibleHostingViews().isEmpty
         }
 
+        let tallRevisitedHostingViews = visibleHostingViews()
+        let tallRevisitedHostingViewIDs = Set(
+            tallRevisitedHostingViews.map(ObjectIdentifier.init)
+        )
+        #expect(firstHostingViewIDs.isDisjoint(with: tallRevisitedHostingViewIDs))
+        #expect(secondHostingViewIDs.isDisjoint(with: tallRevisitedHostingViewIDs))
+        #expect(
+            abs(
+                tableView.rect(ofRow: firstMessages.count).height
+                    - tallPreviewRowHeight
+            ) <= 0.5
+        )
+        #expect(recordedVisibleCacheReset())
+
+        contentIdentity = secondIdentity
+        messages = secondMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 4 }
+
+        // Model an asynchronous preview which was tall on the first visit but
+        // is no longer present when the same conversation is revisited. The
+        // message identity and render configuration remain unchanged, so the
+        // revisit initially receives the earlier cached height.
+        presentsTallPreview = false
+        geometryEvents.removeAll()
+        contentIdentity = firstIdentity
+        messages = firstMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil {
+            initialPositionCount == 5 && !visibleHostingViews().isEmpty
+        }
+
         // A revisit is a new row-mapping lifecycle even though the content
-        // identity matches. Reusing a hosting view from the previous visit can
-        // feed its old frame back into SwiftUI's intrinsic-height proposal,
-        // allowing a tall preview row to become blank space around a short
-        // message. Height estimates remain cached separately by message ID.
+        // identity matches. Fresh hosting views isolate the SwiftUI graph,
+        // while resetting the visible cached estimates prevents a formerly
+        // tall row from becoming blank space around its shorter replacement.
         let revisitedFirstHostingViews = visibleHostingViews()
         let revisitedFirstHostingViewIDs = Set(
             revisitedFirstHostingViews.map(ObjectIdentifier.init)
         )
         #expect(firstHostingViewIDs.isDisjoint(with: revisitedFirstHostingViewIDs))
         #expect(secondHostingViewIDs.isDisjoint(with: revisitedFirstHostingViewIDs))
+        #expect(tallRevisitedHostingViewIDs.isDisjoint(with: revisitedFirstHostingViewIDs))
+        #expect(recordedVisibleCacheReset())
 
         let revisitedVisibleRows = tableView.rows(in: tableView.visibleRect)
         let revisitedMessageRows = revisitedVisibleRows.location == NSNotFound
