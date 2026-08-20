@@ -4630,10 +4630,14 @@ struct IRCModelsAndPolicyTests {
                     : "Uncached inactive message \(index)"
             )
         }
-        let secondMessages = (0..<100).map { index in
+        // Match the revisited first conversation's final row count while
+        // giving that ordinal a radically different outgoing height. This
+        // exercises replacement where a retained automatic-height proposal
+        // would be harmful to a fresh incoming row.
+        let secondMessages = (0..<104).map { index in
             IRCMessage(
                 sender: "second",
-                text: index == 99
+                text: index == 103
                     ? "Second conversation \(tallPreviewMarker) row"
                     : "Second conversation message \(index)"
             )
@@ -4757,6 +4761,19 @@ struct IRCModelsAndPolicyTests {
                     - tallPreviewRowHeight
             ) <= 0.5
         )
+        let secondVisibleRows = tableView.rows(in: tableView.visibleRect)
+        let secondVisibleMessageRows = secondVisibleRows.location == NSNotFound
+            ? []
+            : (secondVisibleRows.location..<NSMaxRange(secondVisibleRows)).filter {
+                $0 > 0 && $0 <= secondMessages.count
+            }
+        #expect(!secondVisibleMessageRows.isEmpty)
+        for row in secondVisibleMessageRows {
+            let message = secondMessages[row - 1]
+            #expect(
+                abs(tableView.rect(ofRow: row).height - rowHeight(for: message)) <= 0.5
+            )
+        }
 
         geometryEvents.removeAll()
         contentIdentity = firstIdentity

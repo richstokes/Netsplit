@@ -1344,15 +1344,23 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 let messageAndBottomSpacerRows = IndexSet(
                     integersIn: 1..<tableView.numberOfRows
                 )
-                // Publish measurements before invalidating AppKit's cached
-                // estimates so heightOfRow remains stable between invalidation
-                // points, as required by NSTableViewDelegate. Include the
-                // bottom spacer: after a conversation swap, it can occupy an
-                // index that held a tall message in the outgoing table, and
-                // AppKit can otherwise retain that stale automatic-height
-                // proposal as invisible space below the tail. The top spacer
-                // has its own height adjustment and invalidation path.
-                self.cacheRealizedRowHeights(in: tableView)
+                // Once visible, publish measurements before invalidating
+                // AppKit's cached estimates so heightOfRow remains stable
+                // between invalidation points, as required by the delegate
+                // contract. A hidden conversation replacement is deliberately
+                // different: invalidate first so uncached incoming messages
+                // receive the clean estimate from heightOfRow. Measuring them
+                // first can let an outgoing tall row's retained ordinal
+                // proposal self-confirm and enter the incoming message cache.
+                // Initial positioning measures and caches the neutralized
+                // visible rows before the table is revealed.
+                if self.hasPositionedInitially {
+                    self.cacheRealizedRowHeights(in: tableView)
+                }
+                // Include the bottom spacer: after a conversation swap, it
+                // can occupy an index that held a tall outgoing message and
+                // otherwise survive as invisible space below the tail. The
+                // top spacer has its own height adjustment and invalidation.
                 self.applyRowHeightChangesWithoutAnimation(
                     messageAndBottomSpacerRows,
                     in: tableView

@@ -341,7 +341,7 @@
 				CODE_SIGN_ENTITLEMENTS = Netsplit/NetsplitDebug.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = KC28CN8ERG;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -353,7 +353,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.24;
+				MARKETING_VERSION = 1.25;
 				PRODUCT_BUNDLE_IDENTIFIER = richstokes.irc;
 				PRODUCT_NAME = Netsplit;
 				REGISTER_APP_GROUPS = YES;
@@ -374,7 +374,7 @@
 				CODE_SIGN_ENTITLEMENTS = Netsplit/Netsplit.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 48;
 				DEVELOPMENT_TEAM = KC28CN8ERG;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -387,7 +387,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.24;
+				MARKETING_VERSION = 1.25;
 				PRODUCT_BUNDLE_IDENTIFIER = richstokes.irc;
 				PRODUCT_NAME = Netsplit;
 				REGISTER_APP_GROUPS = YES;
