@@ -278,13 +278,13 @@ private struct DCCFileOfferPresentationWindowReader: NSViewRepresentable {
         deinit {
             let wasAttached = observedWindow != nil
             stopObservingWindow()
-            if wasAttached { didDetach() }
+            if wasAttached { notifyDidDetach() }
         }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             guard window !== observedWindow else { return }
-            if observedWindow != nil { didDetach() }
+            if observedWindow != nil { notifyDidDetach() }
             stopObservingWindow()
             guard let window else { return }
 
@@ -294,9 +294,27 @@ private struct DCCFileOfferPresentationWindowReader: NSViewRepresentable {
                 object: window,
                 queue: .main
             ) { [weak self] _ in
-                self?.didAttach(true)
+                self?.notifyDidAttach(isMainWindow: true)
             }
-            didAttach(window.isMainWindow)
+            notifyDidAttach(isMainWindow: window.isMainWindow)
+        }
+
+        private func notifyDidAttach(isMainWindow: Bool) {
+            let didAttach = didAttach
+            // viewDidMoveToWindow can run inside an NSViewRepresentable update.
+            // Defer ObservableObject mutations until SwiftUI finishes that pass.
+            DispatchQueue.main.async {
+                didAttach(isMainWindow)
+            }
+        }
+
+        private func notifyDidDetach() {
+            let didDetach = didDetach
+            // Keep detach ordered with a deferred attach without publishing from
+            // inside SwiftUI's view update.
+            DispatchQueue.main.async {
+                didDetach()
+            }
         }
 
         private func stopObservingWindow() {
