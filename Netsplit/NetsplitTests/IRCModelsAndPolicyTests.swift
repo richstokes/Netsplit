@@ -723,6 +723,24 @@ struct IRCModelsAndPolicyTests {
         ) == freshChannel.id)
     }
 
+    @Test("Notifications are suppressed until 30 seconds after server connection")
+    func suppressesInitialConnectionNotifications() {
+        let connectedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        #expect(!IRCInitialNotificationSuppressionPolicy.shouldAllowNotification(
+            connectedAt: nil,
+            now: connectedAt.addingTimeInterval(60)
+        ))
+        #expect(!IRCInitialNotificationSuppressionPolicy.shouldAllowNotification(
+            connectedAt: connectedAt,
+            now: connectedAt.addingTimeInterval(29.999)
+        ))
+        #expect(IRCInitialNotificationSuppressionPolicy.shouldAllowNotification(
+            connectedAt: connectedAt,
+            now: connectedAt.addingTimeInterval(30)
+        ))
+    }
+
     @Test("Direct message notifications follow the global setting and active conversation")
     func resolvesDirectMessageNotificationSettings() {
         #expect(IRCDirectMessageNotificationPolicy.shouldNotify(

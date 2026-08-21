@@ -1561,6 +1561,18 @@ enum IRCMentionNotificationPolicy {
     }
 }
 
+enum IRCInitialNotificationSuppressionPolicy {
+    static let interval: TimeInterval = 30
+
+    static func shouldAllowNotification(
+        connectedAt: Date?,
+        now: Date = Date()
+    ) -> Bool {
+        guard let connectedAt else { return false }
+        return now.timeIntervalSince(connectedAt) >= interval
+    }
+}
+
 struct IRCMentionNotificationDestination: Equatable {
     let serverID: UUID
     let channelName: String

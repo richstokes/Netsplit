@@ -207,6 +207,7 @@ final class IRCAppState: ObservableObject {
     private var pendingIRCURLTargets: [UUID: [IRCURLTarget]] = [:]
     private var activeNicknames: [UUID: String] = [:]
     private var registeredServerIDs = Set<UUID>()
+    private var serverConnectionDates: [UUID: Date] = [:]
     private var pendingNickDestinations: [UUID: SidebarItem] = [:]
     private var pendingWhoisDestinations: [String: SidebarItem] = [:]
     private var pendingTopicDestinations: [String: SidebarItem] = [:]
@@ -1461,6 +1462,7 @@ final class IRCAppState: ObservableObject {
         resetChannelListingRequest(for: profile.id)
         terminalServerErrors.removeValue(forKey: profile.id)
         registeredServerIDs.remove(profile.id)
+        serverConnectionDates.removeValue(forKey: profile.id)
         registrationNicknameSuffixes.removeValue(forKey: profile.id)
         observedLocalSourcePrefixes.removeValue(forKey: profile.id)
         activeNicknames[profile.id] = configuredNickname(for: profile)
@@ -1525,6 +1527,7 @@ final class IRCAppState: ObservableObject {
         sessionPendingAutomaticJoins.removeValue(forKey: profile.id)
         activeNicknames.removeValue(forKey: profile.id)
         registeredServerIDs.remove(profile.id)
+        serverConnectionDates.removeValue(forKey: profile.id)
         connectionStatuses.removeValue(forKey: profile.id)
         terminalServerErrors.removeValue(forKey: profile.id)
         registrationNicknameSuffixes.removeValue(forKey: profile.id)
@@ -1572,6 +1575,7 @@ final class IRCAppState: ObservableObject {
         sessionPendingAutomaticJoins.removeAll()
         activeNicknames.removeAll()
         registeredServerIDs.removeAll()
+        serverConnectionDates.removeAll()
         connectionStatuses.removeAll()
         terminalServerErrors.removeAll()
 
@@ -2948,11 +2952,13 @@ final class IRCAppState: ObservableObject {
             } else {
                 if case .offline = status {
                     registeredServerIDs.remove(profile.id)
+                    serverConnectionDates.removeValue(forKey: profile.id)
                     prepareChannelsForDisconnectedSession(for: profile.id)
                     resetChannelListingRequest(for: profile.id)
                 }
                 if case .failed = status {
                     registeredServerIDs.remove(profile.id)
+                    serverConnectionDates.removeValue(forKey: profile.id)
                     prepareChannelsForDisconnectedSession(for: profile.id)
                     resetChannelListingRequest(for: profile.id)
                 }
@@ -2975,6 +2981,7 @@ final class IRCAppState: ObservableObject {
             // the same disconnect is not presented twice.
             guard terminalServerErrors[profile.id] == nil else { return }
             registeredServerIDs.remove(profile.id)
+            serverConnectionDates.removeValue(forKey: profile.id)
             prepareChannelsForDisconnectedSession(for: profile.id)
             resetChannelListingRequest(for: profile.id)
             connectionStatuses[profile.id] = .failed(message)
@@ -2982,6 +2989,7 @@ final class IRCAppState: ObservableObject {
             scheduleReconnect(for: profile, reason: reason)
         case .terminalFailure(let message):
             registeredServerIDs.remove(profile.id)
+            serverConnectionDates.removeValue(forKey: profile.id)
             prepareChannelsForDisconnectedSession(for: profile.id)
             resetChannelListingRequest(for: profile.id)
             connectionStatuses[profile.id] = .failed(message)
@@ -3014,6 +3022,7 @@ final class IRCAppState: ObservableObject {
                 activeNicknames[profile.id] = registeredNickname
             }
             registeredServerIDs.insert(profile.id)
+            serverConnectionDates[profile.id] = Date()
             registrationNicknameSuffixes.removeValue(forKey: profile.id)
             connectionStatuses[profile.id] = .online
             // Registration alone is not enough to call a connection healthy.
@@ -3485,6 +3494,7 @@ final class IRCAppState: ObservableObject {
             terminalServerErrors[profile.id] = error
             connectionStatuses[profile.id] = .failed(error)
             registeredServerIDs.remove(profile.id)
+            serverConnectionDates.removeValue(forKey: profile.id)
             prepareChannelsForDisconnectedSession(for: profile.id)
             resetChannelListingRequest(for: profile.id)
             scheduleReconnect(for: profile, reason: .serverError)
@@ -5304,6 +5314,7 @@ final class IRCAppState: ObservableObject {
             self.sessionPendingAutomaticJoins.removeValue(forKey: profile.id)
             self.activeNicknames.removeValue(forKey: profile.id)
             self.registeredServerIDs.remove(profile.id)
+            self.serverConnectionDates.removeValue(forKey: profile.id)
             self.terminalServerErrors.removeValue(forKey: profile.id)
             failedTransport.disconnect()
             self.connect(activeProfile, selectConversation: false, isAutomaticRetry: true)
@@ -5446,7 +5457,10 @@ final class IRCAppState: ObservableObject {
     private func postMentionNotification(for message: IRCMessage, in item: SidebarItem) {
         guard case .channel(let conversationID) = item,
               let channel = channels.first(where: { $0.id == conversationID }),
-              let profile = profiles.first(where: { $0.id == channel.serverID }) else { return }
+              let profile = profiles.first(where: { $0.id == channel.serverID }),
+              IRCInitialNotificationSuppressionPolicy.shouldAllowNotification(
+                connectedAt: serverConnectionDates[profile.id]
+              ) else { return }
 
         let enabled = IRCMentionNotificationPolicy.isEnabled(
             globalSetting: mentionNotificationsEnabled,
@@ -5477,6 +5491,9 @@ final class IRCAppState: ObservableObject {
         guard case .directMessage(let conversationID) = item,
               let conversation = directMessages.first(where: { $0.id == conversationID }),
               let profile = profiles.first(where: { $0.id == conversation.serverID }),
+              IRCInitialNotificationSuppressionPolicy.shouldAllowNotification(
+                connectedAt: serverConnectionDates[profile.id]
+              ),
               IRCDirectMessageNotificationPolicy.shouldNotify(
                 isEnabled: directMessageNotificationsEnabled,
                 applicationIsActive: NSApplication.shared.isActive,
