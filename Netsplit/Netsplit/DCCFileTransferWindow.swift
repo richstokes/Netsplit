@@ -126,7 +126,7 @@ private struct DCCFileTransferProgressView: View {
 
             HStack(alignment: .firstTextBaseline) {
                 if transfer.outcome == nil {
-                    Text("Saving to Downloads/\(offer.request.filename)")
+                    Text("Saving to \(displayPath(proposedDestination))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -185,7 +185,7 @@ private struct DCCFileTransferProgressView: View {
     private func terminalStatus(_ outcome: IRCDCCFileTransferOutcome) -> some View {
         switch outcome {
         case .completed(let destination):
-            Label("Saved to Downloads/\(destination.lastPathComponent)", systemImage: "folder.fill")
+            Label("Saved to \(displayPath(destination))", systemImage: "folder.fill")
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
         case .failed(let message):
@@ -196,6 +196,17 @@ private struct DCCFileTransferProgressView: View {
             Text("No file was saved.")
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private func displayPath(_ url: URL) -> String {
+        url.dccDisplayPath
+    }
+
+    private var proposedDestination: URL {
+        transfer.downloadDirectory.appendingPathComponent(
+            offer.request.filename,
+            isDirectory: false
+        )
     }
 
     private func progressAccessibilityValue(_ fractionCompleted: Double) -> String {

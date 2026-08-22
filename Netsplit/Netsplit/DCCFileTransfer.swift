@@ -10,9 +10,67 @@ import Network
 
 enum IRCDCCPreferences {
     static let receivesFilesKey = "receivesDCCFiles"
+    static let automaticallySavesFilesKey = "automaticallySavesDCCFiles"
+    static let downloadDirectoryBookmarkKey = "dccDownloadDirectoryBookmark"
 
     static func receivesFiles(in defaults: UserDefaults) -> Bool {
         defaults.object(forKey: receivesFilesKey) as? Bool ?? false
+    }
+
+    static func automaticallySavesFiles(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: automaticallySavesFilesKey) as? Bool ?? true
+    }
+
+    static func downloadDirectory(in defaults: UserDefaults) -> URL? {
+        guard let bookmarkData = defaults.data(forKey: downloadDirectoryBookmarkKey) else {
+            return nil
+        }
+        var isStale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: bookmarkData,
+            options: [.withSecurityScope, .withoutUI],
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else {
+            defaults.removeObject(forKey: downloadDirectoryBookmarkKey)
+            return nil
+        }
+        if isStale, let refreshedBookmark = try? bookmark(for: url) {
+            defaults.set(refreshedBookmark, forKey: downloadDirectoryBookmarkKey)
+        }
+        return url
+    }
+
+    static func bookmark(for directory: URL) throws -> Data {
+        try directory.bookmarkData(
+            options: .withSecurityScope,
+            includingResourceValuesForKeys: [.isDirectoryKey],
+            relativeTo: nil
+        )
+    }
+}
+
+/// Keeps a sandbox extension obtained from an open panel or a persisted
+/// security-scoped bookmark alive for as long as its transfer can touch disk.
+final class IRCDCCSecurityScopedResourceAccess: @unchecked Sendable {
+    let url: URL
+    private let didStartAccessing: Bool
+
+    init(url: URL) {
+        self.url = url
+        didStartAccessing = url.startAccessingSecurityScopedResource()
+    }
+
+    deinit {
+        if didStartAccessing {
+            url.stopAccessingSecurityScopedResource()
+        }
+    }
+}
+
+extension URL {
+    nonisolated var dccDisplayPath: String {
+        (path(percentEncoded: false) as NSString).abbreviatingWithTildeInPath
     }
 }
 
@@ -570,15 +628,24 @@ actor IRCDCCFileSink {
     private let filename: String
     private let expectedByteCount: UInt64
     private let directoryOverride: URL?
+    // Retention is intentional: dropping this object revokes access to a
+    // custom folder while a background transfer may still be writing to it.
+    private let securityScopedAccess: IRCDCCSecurityScopedResourceAccess?
     private var fileHandle: FileHandle?
     private var temporaryURL: URL?
     private var downloadDirectory: URL?
     private var finalizedURL: URL?
 
-    init(filename: String, expectedByteCount: UInt64, directory: URL? = nil) {
+    init(
+        filename: String,
+        expectedByteCount: UInt64,
+        directory: URL? = nil,
+        securityScopedAccess: IRCDCCSecurityScopedResourceAccess? = nil
+    ) {
         self.filename = filename
         self.expectedByteCount = expectedByteCount
         directoryOverride = directory
+        self.securityScopedAccess = securityScopedAccess
     }
 
     func prepare() throws {
@@ -590,7 +657,7 @@ actor IRCDCCFileSink {
         do {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
-            throw IRCDCCTransferError.couldNotCreateDownloadsDirectory
+            throw IRCDCCTransferError.couldNotAccessDownloadDirectory
         }
         Self.removeStalePartialFiles(in: directory, fileManager: fileManager)
 
@@ -782,17 +849,20 @@ enum IRCDCCFileTransferOutcome: Equatable {
 
 struct IRCDCCFileTransferPresentation: Identifiable, Equatable {
     let offer: IRCDCCFileOffer
+    let downloadDirectory: URL
     var progress: IRCDCCTransferProgress
     let startedAt: Date
     var outcome: IRCDCCFileTransferOutcome?
 
     init(
         offer: IRCDCCFileOffer,
+        downloadDirectory: URL = IRCDCCStoragePolicy.downloadsDirectory(),
         progress: IRCDCCTransferProgress,
         startedAt: Date = .now,
         outcome: IRCDCCFileTransferOutcome? = nil
     ) {
         self.offer = offer
+        self.downloadDirectory = downloadDirectory
         self.progress = progress
         self.startedAt = startedAt
         self.outcome = outcome
@@ -894,7 +964,7 @@ enum IRCDCCTransferLivenessPolicy {
 }
 
 enum IRCDCCTransferError: LocalizedError {
-    case couldNotCreateDownloadsDirectory
+    case couldNotAccessDownloadDirectory
     case couldNotCreateTemporaryFile
     case couldNotQuarantineFile
     case insufficientDiskSpace
@@ -908,8 +978,8 @@ enum IRCDCCTransferError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .couldNotCreateDownloadsDirectory:
-            "The Downloads directory could not be accessed."
+        case .couldNotAccessDownloadDirectory:
+            "The download folder could not be accessed. Choose it again in Settings and retry."
         case .couldNotCreateTemporaryFile:
             "A temporary download file could not be created."
         case .couldNotQuarantineFile:
@@ -1007,6 +1077,7 @@ final class IRCDCCFileReceiver {
     init(
         offer: IRCDCCFileOffer,
         downloadDirectory: URL? = nil,
+        securityScopedAccess: IRCDCCSecurityScopedResourceAccess? = nil,
         connectionTimeout: TimeInterval = IRCDCCFileReceiver.defaultConnectionTimeout,
         inactivityTimeout: TimeInterval = IRCDCCFileReceiver.defaultInactivityTimeout,
         maximumTransferDuration: TimeInterval = IRCDCCResourcePolicy.maximumTransferDuration,
@@ -1022,7 +1093,8 @@ final class IRCDCCFileReceiver {
         fileSink = IRCDCCFileSink(
             filename: offer.request.filename,
             expectedByteCount: offer.request.size,
-            directory: downloadDirectory
+            directory: downloadDirectory,
+            securityScopedAccess: securityScopedAccess
         )
         self.connectionTimeout = max(0.01, connectionTimeout)
         self.inactivityTimeout = max(0.01, inactivityTimeout)

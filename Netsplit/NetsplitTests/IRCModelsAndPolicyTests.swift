@@ -35,12 +35,20 @@ struct IRCModelsAndPolicyTests {
         let defaults = UserDefaults.standard
         let key = IRCDCCPreferences.receivesFilesKey
         let previousValue = defaults.object(forKey: key)
+        let automaticSavingKey = IRCDCCPreferences.automaticallySavesFilesKey
+        let previousAutomaticSavingValue = defaults.object(forKey: automaticSavingKey)
         defaults.removeObject(forKey: key)
+        defaults.removeObject(forKey: automaticSavingKey)
         defer {
             if let previousValue {
                 defaults.set(previousValue, forKey: key)
             } else {
                 defaults.removeObject(forKey: key)
+            }
+            if let previousAutomaticSavingValue {
+                defaults.set(previousAutomaticSavingValue, forKey: automaticSavingKey)
+            } else {
+                defaults.removeObject(forKey: automaticSavingKey)
             }
         }
 
@@ -68,6 +76,13 @@ struct IRCModelsAndPolicyTests {
         #expect(pendingOffer.endpointSecurityAssessment.requiresExplicitConsent)
         #expect(!state.acceptDCCFileOffer(pendingOffer))
         #expect(state.pendingDCCFileOffer?.id == pendingOffer.id)
+        state.automaticallySavesDCCFiles = false
+        #expect(!state.acceptDCCFileOffer(
+            pendingOffer,
+            authorizingRestrictedEndpoint: true
+        ))
+        #expect(state.pendingDCCFileOffer?.id == pendingOffer.id)
+        state.automaticallySavesDCCFiles = true
 
         let staleOffer = IRCDCCFileOffer(
             serverID: pendingOffer.serverID,

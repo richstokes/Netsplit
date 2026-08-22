@@ -43,6 +43,7 @@ struct ContentView: View {
     @State private var showAddServer = false
     @State private var editingProfile: ServerProfile?
     @State private var ignoresProfile: ServerProfile?
+    @State private var profilePendingDeletion: ServerProfile?
     @State private var banListChannel: Conversation?
     @State private var dccFileOfferPresentationHostID = UUID()
     @StateObject private var previewExpansion = IRCMessagePreviewExpansionStore()
@@ -81,6 +82,7 @@ struct ContentView: View {
                 showAddServer: $showAddServer,
                 editingProfile: $editingProfile,
                 ignoresProfile: $ignoresProfile,
+                requestProfileDeletion: { profilePendingDeletion = $0 },
                 workspaceFocus: $workspaceFocus
             )
                 .navigationSplitViewColumnWidth(
@@ -95,7 +97,8 @@ struct ContentView: View {
                         state: state,
                         showAddServer: $showAddServer,
                         editingProfile: $editingProfile,
-                        ignoresProfile: $ignoresProfile
+                        ignoresProfile: $ignoresProfile,
+                        requestProfileDeletion: { profilePendingDeletion = $0 }
                     )
                 } else if let selection = state.selection {
                     ConversationView(
@@ -210,12 +213,17 @@ struct ContentView: View {
         ) { offer in
             DCCFileOfferView(
                 offer: offer,
+                saveLocation: state.automaticallySavesDCCFiles
+                    ? state.dccDownloadDirectory.appendingPathComponent(
+                        offer.request.filename,
+                        isDirectory: false
+                    ).dccDisplayPath
+                    : "Choose a folder after accepting",
                 accept: { authorizingRestrictedEndpoint in
-                    guard state.acceptDCCFileOffer(
+                    acceptDCCFileOffer(
                         offer,
                         authorizingRestrictedEndpoint: authorizingRestrictedEndpoint
-                    ) else { return }
-                    openWindow(id: DCCFileTransferWindow.sceneID)
+                    )
                 },
                 cancel: { state.cancelDCCFileOffer(offer) },
                 ignoreUser: { state.ignoreDCCFileOfferSender(offer) }
@@ -226,6 +234,28 @@ struct ContentView: View {
                 title: Text(issue.title),
                 message: Text(issue.message),
                 dismissButton: .default(Text("OK"))
+            )
+        }
+        .confirmationDialog(
+            "Delete \(profilePendingDeletion?.name ?? "server profile")?",
+            isPresented: Binding(
+                get: { profilePendingDeletion != nil },
+                set: { if !$0 { profilePendingDeletion = nil } }
+            )
+        ) {
+            if let profilePendingDeletion {
+                Button("Delete Server Profile", role: .destructive) {
+                    state.delete(profilePendingDeletion)
+                    self.profilePendingDeletion = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                profilePendingDeletion = nil
+            }
+        } message: {
+            Text(
+                "This removes the profile and its saved credentials. "
+                    + "If it is connected, Netsplit will disconnect it first."
             )
         }
 #if DEBUG
@@ -241,6 +271,40 @@ struct ContentView: View {
                    state.selection != selection { return }
                 workspaceFocus = request.target
             }
+        }
+    }
+
+    private func acceptDCCFileOffer(
+        _ offer: IRCDCCFileOffer,
+        authorizingRestrictedEndpoint: Bool
+    ) {
+        if state.automaticallySavesDCCFiles {
+            guard state.acceptDCCFileOffer(
+                offer,
+                authorizingRestrictedEndpoint: authorizingRestrictedEndpoint
+            ) else { return }
+            openWindow(id: DCCFileTransferWindow.sceneID)
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.title = "Choose Where to Save \(offer.request.filename)"
+        panel.message = "Netsplit will save the file in the selected folder without replacing existing files."
+        panel.prompt = "Save Here"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = state.dccDownloadDirectory
+        panel.identifier = NSUserInterfaceItemIdentifier("Netsplit.DCCDownloadFolderPicker")
+        panel.begin { response in
+            guard response == .OK, let directory = panel.url,
+                  state.acceptDCCFileOffer(
+                    offer,
+                    authorizingRestrictedEndpoint: authorizingRestrictedEndpoint,
+                    downloadDirectory: directory
+                  ) else { return }
+            openWindow(id: DCCFileTransferWindow.sceneID)
         }
     }
 }
@@ -329,6 +393,7 @@ private struct DCCFileOfferPresentationWindowReader: NSViewRepresentable {
 
 private struct DCCFileOfferView: View {
     let offer: IRCDCCFileOffer
+    let saveLocation: String
     let accept: (Bool) -> Void
     let cancel: () -> Void
     let ignoreUser: () -> Void
@@ -377,7 +442,7 @@ private struct DCCFileOfferView: View {
                         ? "Through this network’s SSH tunnel"
                         : "Direct peer connection"
                 )
-                detailRow("Save to", "Downloads/\(offer.request.filename)")
+                detailRow("Save to", saveLocation)
             }
 
             if !offer.routesThroughSSH {
@@ -535,6 +600,7 @@ private struct SidebarView: View {
     @Binding var showAddServer: Bool
     @Binding var editingProfile: ServerProfile?
     @Binding var ignoresProfile: ServerProfile?
+    let requestProfileDeletion: (ServerProfile) -> Void
     @FocusState.Binding var workspaceFocus: IRCWorkspaceFocus?
     @State private var listSelection: SidebarItem?
     @State private var collapsedProfileIDs: Set<UUID> = []
@@ -747,10 +813,10 @@ private struct SidebarView: View {
         ) {
             state.disconnect(profile)
         }
-        if !profile.isBuiltIn && !state.isOneOffServer(profile) {
+        if !state.isOneOffServer(profile) {
             Divider()
             Button(role: .destructive) {
-                state.delete(profile)
+                requestProfileDeletion(profile)
             } label: {
                 Label("Delete Server Profile", systemImage: "trash")
             }
@@ -1083,6 +1149,7 @@ private struct ConnectionCenterView: View {
     @Binding var showAddServer: Bool
     @Binding var editingProfile: ServerProfile?
     @Binding var ignoresProfile: ServerProfile?
+    let requestProfileDeletion: (ServerProfile) -> Void
 
     @Environment(\.ircTextMetrics) private var textMetrics
 
@@ -1130,7 +1197,8 @@ private struct ConnectionCenterView: View {
                                 profile: profile,
                                 state: state,
                                 editingProfile: $editingProfile,
-                                ignoresProfile: $ignoresProfile
+                                ignoresProfile: $ignoresProfile,
+                                requestProfileDeletion: requestProfileDeletion
                             )
                         }
                     }
@@ -1148,6 +1216,7 @@ private struct ServerProfileCard: View {
     @ObservedObject var state: IRCAppState
     @Binding var editingProfile: ServerProfile?
     @Binding var ignoresProfile: ServerProfile?
+    let requestProfileDeletion: (ServerProfile) -> Void
     @Environment(\.ircTextMetrics) private var textMetrics
     @Environment(\.ircThemePalette) private var themePalette
 
@@ -1307,13 +1376,11 @@ private struct ServerProfileCard: View {
                     state.restorePreset(profile)
                 }
             }
-            if !profile.isBuiltIn {
-                Divider()
-                Button(role: .destructive) {
-                    state.delete(profile)
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
+            Divider()
+            Button(role: .destructive) {
+                requestProfileDeletion(profile)
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }

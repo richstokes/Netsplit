@@ -382,6 +382,7 @@ enum IRCAutoConnectPolicy {
 enum ServerProfileStore {
     static let profilesKey = "profiles"
     static let decodeFailureBackupKey = "profiles.decodeFailureBackup"
+    static let deletedPresetIDsKey = "profiles.deletedPresetIDs"
 
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Netsplit",
@@ -392,8 +393,11 @@ enum ServerProfileStore {
         from defaults: UserDefaults,
         recommended: [ServerProfile] = ServerProfile.recommended
     ) -> [ServerProfile] {
+        let deletedPresetIDs = deletedPresetIDs(in: defaults)
         guard let data = defaults.data(forKey: profilesKey) else {
-            return recommended
+            return recommended.filter { profile in
+                !isDeletedPreset(profile, deletedPresetIDs: deletedPresetIDs)
+            }
         }
 
         do {
@@ -405,7 +409,11 @@ enum ServerProfileStore {
                 )
             }
 
-            let refreshed = refreshedProfiles(from: decoded.profiles, recommended: recommended)
+            let refreshed = refreshedProfiles(
+                from: decoded.profiles,
+                recommended: recommended,
+                deletedPresetIDs: deletedPresetIDs
+            )
             if decoded.droppedCount > 0 || refreshed != decoded.profiles {
                 save(refreshed, to: defaults)
             }
@@ -413,7 +421,9 @@ enum ServerProfileStore {
         } catch {
             preserveDecodeFailureBackup(data, in: defaults)
             logger.error("Could not decode saved server profiles: \(error.localizedDescription, privacy: .public)")
-            return recommended
+            return recommended.filter { profile in
+                !isDeletedPreset(profile, deletedPresetIDs: deletedPresetIDs)
+            }
         }
     }
 
@@ -431,9 +441,17 @@ enum ServerProfileStore {
 
     static func refreshedProfiles(
         from saved: [ServerProfile],
-        recommended: [ServerProfile] = ServerProfile.recommended
+        recommended: [ServerProfile] = ServerProfile.recommended,
+        deletedPresetIDs: Set<String> = []
     ) -> [ServerProfile] {
-        let refreshed = saved.map { profile -> ServerProfile in
+        let visibleSaved = saved.filter { profile in
+            !isDeletedPreset(
+                profile,
+                recommended: recommended,
+                deletedPresetIDs: deletedPresetIDs
+            )
+        }
+        let refreshed = visibleSaved.map { profile -> ServerProfile in
             guard profile.isBuiltIn,
                   let matchedPreset = preset(matching: profile, in: recommended) else {
                 return profile
@@ -462,11 +480,39 @@ enum ServerProfileStore {
             return current
         }
         let missing = recommended.filter { recommendedProfile in
-            !refreshed.contains { profile in
-                profile.isBuiltIn && profile.presetID == recommendedProfile.presetID
-            }
+            !isDeletedPreset(recommendedProfile, deletedPresetIDs: deletedPresetIDs)
+                && !refreshed.contains { profile in
+                    profile.isBuiltIn && profile.presetID == recommendedProfile.presetID
+                }
         }
         return refreshed + missing
+    }
+
+    static func recordDeletedPreset(matching profile: ServerProfile, in defaults: UserDefaults) {
+        guard profile.isBuiltIn,
+              let presetID = profile.presetID ?? preset(matching: profile)?.presetID else {
+            return
+        }
+        var deletedPresetIDs = deletedPresetIDs(in: defaults)
+        deletedPresetIDs.insert(presetID)
+        defaults.set(deletedPresetIDs.sorted(), forKey: deletedPresetIDsKey)
+    }
+
+    static func deletedPresetIDs(in defaults: UserDefaults) -> Set<String> {
+        Set(defaults.stringArray(forKey: deletedPresetIDsKey) ?? [])
+    }
+
+    private static func isDeletedPreset(
+        _ profile: ServerProfile,
+        recommended: [ServerProfile] = ServerProfile.recommended,
+        deletedPresetIDs: Set<String>
+    ) -> Bool {
+        guard profile.isBuiltIn,
+              let presetID = profile.presetID
+                ?? preset(matching: profile, in: recommended)?.presetID else {
+            return false
+        }
+        return deletedPresetIDs.contains(presetID)
     }
 
     private static func decodeProfiles(from data: Data) throws -> DecodedServerProfiles {

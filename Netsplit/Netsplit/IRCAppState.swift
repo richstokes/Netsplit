@@ -119,6 +119,15 @@ final class IRCAppState: ObservableObject {
             }
         }
     }
+    @Published var automaticallySavesDCCFiles: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                automaticallySavesDCCFiles,
+                forKey: IRCDCCPreferences.automaticallySavesFilesKey
+            )
+        }
+    }
+    @Published private(set) var customDCCDownloadDirectory: URL?
     @Published var mentionNotificationsEnabled: Bool {
         didSet {
             UserDefaults.standard.set(mentionNotificationsEnabled, forKey: "mentionNotificationsEnabled")
@@ -317,6 +326,8 @@ final class IRCAppState: ObservableObject {
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
         showsCTCPCommandsInUserMenu = defaults.object(forKey: "showsCTCPCommandsInUserMenu") as? Bool ?? false
         receivesDCCFiles = IRCDCCPreferences.receivesFiles(in: defaults)
+        automaticallySavesDCCFiles = IRCDCCPreferences.automaticallySavesFiles(in: defaults)
+        customDCCDownloadDirectory = IRCDCCPreferences.downloadDirectory(in: defaults)
         mentionNotificationsEnabled = defaults.object(forKey: "mentionNotificationsEnabled") as? Bool ?? false
         directMessageNotificationsEnabled = defaults.object(forKey: "directMessageNotificationsEnabled") as? Bool ?? false
         applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
@@ -347,6 +358,25 @@ final class IRCAppState: ObservableObject {
         IRCServerOrdering.alphabetically(
             profiles.filter { connections[$0.id] != nil }
         )
+    }
+
+    var dccDownloadDirectory: URL {
+        customDCCDownloadDirectory ?? IRCDCCStoragePolicy.downloadsDirectory()
+    }
+
+    var dccDownloadDirectoryDisplayPath: String {
+        dccDownloadDirectory.dccDisplayPath
+    }
+
+    func setDCCDownloadDirectory(_ directory: URL) throws {
+        let bookmark = try IRCDCCPreferences.bookmark(for: directory)
+        UserDefaults.standard.set(bookmark, forKey: IRCDCCPreferences.downloadDirectoryBookmarkKey)
+        customDCCDownloadDirectory = directory
+    }
+
+    func resetDCCDownloadDirectory() {
+        UserDefaults.standard.removeObject(forKey: IRCDCCPreferences.downloadDirectoryBookmarkKey)
+        customDCCDownloadDirectory = nil
     }
 
     var storedProfiles: [ServerProfile] {
@@ -752,7 +782,8 @@ final class IRCAppState: ObservableObject {
     @discardableResult
     func acceptDCCFileOffer(
         _ offer: IRCDCCFileOffer,
-        authorizingRestrictedEndpoint: Bool = false
+        authorizingRestrictedEndpoint: Bool = false,
+        downloadDirectory selectedDownloadDirectory: URL? = nil
     ) -> Bool {
         guard receivesDCCFiles,
               pendingDCCFileOffer?.id == offer.id else {
@@ -770,6 +801,12 @@ final class IRCAppState: ObservableObject {
         }
         guard !endpointAssessment.requiresExplicitConsent
                 || authorizingRestrictedEndpoint else { return false }
+        // When automatic saving is off, accepting the offer is deliberately a
+        // two-step operation: the caller must first obtain a folder from an
+        // NSOpenPanel and pass it here.
+        guard automaticallySavesDCCFiles || selectedDownloadDirectory != nil else {
+            return false
+        }
         guard activeDCCFileReceivers[offer.id] == nil else {
             resolveDCCFileOffer(offer)
             return true
@@ -807,7 +844,11 @@ final class IRCAppState: ObservableObject {
             route = .direct
         }
 
-        let downloadDirectory = IRCDCCStoragePolicy.downloadsDirectory()
+        let downloadDirectory = selectedDownloadDirectory ?? dccDownloadDirectory
+        let securityScopedAccess = selectedDownloadDirectory != nil
+                || customDCCDownloadDirectory != nil
+            ? IRCDCCSecurityScopedResourceAccess(url: downloadDirectory)
+            : nil
         let reservation = dccResourceBudget.reserve(
             offerID: offer.id,
             byteCount: offer.request.size,
@@ -824,6 +865,8 @@ final class IRCAppState: ObservableObject {
 
         let receiver = IRCDCCFileReceiver(
             offer: offer,
+            downloadDirectory: downloadDirectory,
+            securityScopedAccess: securityScopedAccess,
             progress: { [weak self] progress in
                 guard let self, self.activeDCCFileReceivers[offer.id] != nil else { return }
                 self.dccResourceBudget.recordProgress(
@@ -840,7 +883,8 @@ final class IRCAppState: ObservableObject {
                 case .success(let destination):
                     self.dccFileTransferStore.finish(.completed(destination), offerID: offer.id)
                     self.appendSystem(
-                        "Received \(offer.request.filename) from \(offer.sender). Saved it to Downloads as \(destination.lastPathComponent).",
+                        "Received \(offer.request.filename) from \(offer.sender). "
+                            + "Saved it to \(destination.dccDisplayPath).",
                         for: .server(offer.serverID)
                     )
                 case .failure(let error):
@@ -859,6 +903,7 @@ final class IRCAppState: ObservableObject {
         activeDCCFileReceivers[offer.id] = receiver
         dccFileTransferStore.insert(IRCDCCFileTransferPresentation(
             offer: offer,
+            downloadDirectory: downloadDirectory,
             progress: .connecting(totalByteCount: offer.request.size)
         ))
         dccFileTransferCount = dccFileTransferStore.count
@@ -1628,7 +1673,10 @@ final class IRCAppState: ObservableObject {
     }
 
     func delete(_ profile: ServerProfile) {
-        guard !profile.isBuiltIn else { return }
+        guard !isOneOffServer(profile), profiles.contains(where: { $0.id == profile.id }) else {
+            return
+        }
+        ServerProfileStore.recordDeletedPreset(matching: profile, in: .standard)
         disconnect(profile)
         removeConversations(for: profile.id)
         removeCredential(for: profile, kind: "server-password")

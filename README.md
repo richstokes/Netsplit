@@ -55,8 +55,10 @@ confirmation with its sender, filename, size, network endpoint, and connection
 route. After acceptance, a separate File Transfers window shows progress,
 current download speed, and an option to cancel without blocking the main chat
 window. Closing the transfer window does not cancel the download. Accepted files
-are saved to Downloads without replacing existing files. They are marked as
-internet downloads so macOS keeps its normal Gatekeeper protections in place.
+are saved to Downloads without replacing existing files by default. The Safety
+settings can select another persistent download folder or prompt for a folder
+after each accepted offer. Downloaded files are marked as internet downloads so
+macOS keeps its normal Gatekeeper protections in place.
 
 DCC itself is unencrypted, and a direct transfer can reveal your IP address to
 the sender. When the IRC network profile uses an SSH tunnel, Netsplit routes its

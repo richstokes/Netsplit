@@ -264,6 +264,68 @@ struct ServerProfileTests {
         #expect(secondLoad.first { $0.presetID == "new-network" }?.id == firstNewID)
     }
 
+    @Test("Deleted bundled presets stay deleted while new presets are still added")
+    func preservesDeletedPresetChoice() throws {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let deleted = ServerProfile(
+            name: "Deleted Network",
+            hostname: "irc.deleted.example",
+            port: 6697,
+            useTLS: true,
+            isBuiltIn: true,
+            presetID: "deleted-network"
+        )
+        let retained = ServerProfile(
+            name: "Retained Network",
+            hostname: "irc.retained.example",
+            port: 6697,
+            useTLS: true,
+            isBuiltIn: true,
+            presetID: "retained-network"
+        )
+        let newlyBundled = ServerProfile(
+            name: "New Network",
+            hostname: "irc.new.example",
+            port: 6697,
+            useTLS: true,
+            isBuiltIn: true,
+            presetID: "new-network"
+        )
+        ServerProfileStore.save([deleted, retained], to: defaults)
+
+        ServerProfileStore.recordDeletedPreset(matching: deleted, in: defaults)
+        ServerProfileStore.save([retained], to: defaults)
+        let loaded = ServerProfileStore.load(
+            from: defaults,
+            recommended: [deleted, retained, newlyBundled]
+        )
+
+        #expect(loaded.map(\.presetID) == ["retained-network", "new-network"])
+        #expect(loaded.first?.id == retained.id)
+        #expect(ServerProfileStore.deletedPresetIDs(in: defaults) == ["deleted-network"])
+    }
+
+    @Test("Deleted legacy bundled presets stay hidden when profile storage is absent")
+    func hidesDeletedPresetWithoutSavedProfiles() throws {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let deleted = ServerProfile.recommended[0]
+        let deletedPresetID = try #require(deleted.presetID)
+        var legacyDeletedProfile = deleted
+        legacyDeletedProfile.presetID = nil
+        let retained = ServerProfile.recommended[1]
+
+        ServerProfileStore.recordDeletedPreset(matching: legacyDeletedProfile, in: defaults)
+        let loaded = ServerProfileStore.load(
+            from: defaults,
+            recommended: [deleted, retained]
+        )
+
+        #expect(loaded.map(\.presetID) == [retained.presetID])
+        #expect(ServerProfileStore.deletedPresetIDs(in: defaults) == [deletedPresetID])
+    }
+
     private func makeDefaults() -> (UserDefaults, String) {
         let suiteName = "ServerProfileTests.\(UUID().uuidString)"
         return (UserDefaults(suiteName: suiteName)!, suiteName)

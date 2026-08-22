@@ -38,6 +38,7 @@ struct ServerProfileEditor: View {
     @State private var sshKeyFilename: String?
     @State private var sshKeyError: String?
     @State private var resetSSHHostKey = false
+    @State private var confirmsDeletion = false
 
     init(state: IRCAppState, profileToEdit: ServerProfile? = nil) {
         self.state = state
@@ -139,6 +140,11 @@ struct ServerProfileEditor: View {
                 .ircDivider()
 
             HStack {
+                if profileToEdit != nil {
+                    Button("Delete Profile…", role: .destructive) {
+                        confirmsDeletion = true
+                    }
+                }
                 if let profileToEdit, profileToEdit.isBuiltIn, profileToEdit.isPresetModified == true {
                     Button("Restore Default") {
                         state.restorePreset(profileToEdit)
@@ -164,6 +170,22 @@ struct ServerProfileEditor: View {
             Button("OK", role: .cancel) { sshKeyError = nil }
         } message: {
             Text(sshKeyError ?? "")
+        }
+        .confirmationDialog(
+            "Delete \(profileToEdit?.name ?? "this server profile")?",
+            isPresented: $confirmsDeletion
+        ) {
+            Button("Delete Profile", role: .destructive) {
+                guard let profileToEdit else { return }
+                state.delete(profileToEdit)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This removes the profile and its saved credentials. "
+                    + "If it is connected, Netsplit will disconnect it first."
+            )
         }
     }
 
@@ -970,6 +992,7 @@ enum IRCChannelBrowserJoinBehavior: Equatable {
 
 struct SettingsView: View {
     @ObservedObject var state: IRCAppState
+    @State private var dccDownloadFolderError: String?
 
     var body: some View {
         TabView {
@@ -981,6 +1004,17 @@ struct SettingsView: View {
                 .tabItem { Label("Safety", systemImage: "shield") }
         }
         .frame(width: 580, height: 620)
+        .alert(
+            "Couldn’t Use Download Folder",
+            isPresented: Binding(
+                get: { dccDownloadFolderError != nil },
+                set: { if !$0 { dccDownloadFolderError = nil } }
+            )
+        ) {
+            Button("OK") { dccDownloadFolderError = nil }
+        } message: {
+            Text(dccDownloadFolderError ?? "The folder could not be saved.")
+        }
     }
 
     private var generalSettings: some View {
@@ -1142,13 +1176,58 @@ struct SettingsView: View {
             }
             Section("File Sharing") {
                 Toggle("Receive files with DCC", isOn: $state.receivesDCCFiles)
-                Text("Off by default. When enabled, Netsplit asks before each file transfer and saves accepted files to Downloads without overwriting existing files. DCC is unencrypted and a direct transfer can reveal your IP address. Networks configured to use an SSH tunnel route accepted DCC connections through that tunnel too.")
+                Toggle("Save accepted files automatically", isOn: $state.automaticallySavesDCCFiles)
+                    .disabled(!state.receivesDCCFiles)
+                if state.automaticallySavesDCCFiles {
+                    HStack {
+                        LabeledContent(
+                            "Download folder",
+                            value: state.dccDownloadDirectoryDisplayPath
+                        )
+                        Button("Choose…", action: chooseDCCDownloadFolder)
+                        if state.customDCCDownloadDirectory != nil {
+                            Button("Use Downloads", action: state.resetDCCDownloadDirectory)
+                        }
+                    }
+                    .disabled(!state.receivesDCCFiles)
+                }
+                Text(
+                    "Off by default. When DCC is enabled, Netsplit asks before each transfer. "
+                        + "Accepted files are saved to the selected folder without overwriting "
+                        + "existing files; turn off automatic saving to choose a folder for every "
+                        + "file. DCC is unencrypted and a direct transfer can reveal your IP "
+                        + "address. Networks configured to use an SSH tunnel route accepted DCC "
+                        + "connections through that tunnel too."
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .padding(16)
+    }
+
+    private func chooseDCCDownloadFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a DCC Download Folder"
+        panel.message = "Accepted DCC files will be saved in this folder."
+        panel.prompt = "Choose Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = state.dccDownloadDirectory
+        panel.identifier = NSUserInterfaceItemIdentifier(
+            "Netsplit.DCCDefaultDownloadFolderPicker"
+        )
+        panel.begin { response in
+            guard response == .OK, let directory = panel.url else { return }
+            do {
+                try state.setDCCDownloadDirectory(directory)
+            } catch {
+                dccDownloadFolderError = error.localizedDescription
+            }
+        }
     }
 
     private var channelEventHelpText: String {

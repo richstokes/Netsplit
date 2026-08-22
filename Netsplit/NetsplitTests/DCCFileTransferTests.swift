@@ -17,6 +17,52 @@ struct DCCFileTransferTests {
         #expect(IRCDCCPreferences.receivesFiles(in: defaults))
     }
 
+    @Test("Automatic saving preserves the existing Downloads behavior by default")
+    func defaultsAutomaticSavingOn() throws {
+        let suiteName = "DCCFileTransferTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        #expect(IRCDCCPreferences.automaticallySavesFiles(in: defaults))
+        defaults.set(false, forKey: IRCDCCPreferences.automaticallySavesFilesKey)
+        #expect(!IRCDCCPreferences.automaticallySavesFiles(in: defaults))
+    }
+
+    @Test("Download folder bookmarks round-trip and retain their directory")
+    func roundTripsDownloadDirectoryBookmark() throws {
+        let fileManager = FileManager.default
+        let directory = try makeTemporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let suiteName = "DCCFileTransferTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(
+            try IRCDCCPreferences.bookmark(for: directory),
+            forKey: IRCDCCPreferences.downloadDirectoryBookmarkKey
+        )
+
+        let resolved = try #require(IRCDCCPreferences.downloadDirectory(in: defaults))
+
+        #expect(
+            resolved.resolvingSymlinksInPath().standardizedFileURL
+                == directory.resolvingSymlinksInPath().standardizedFileURL
+        )
+    }
+
+    @Test("Invalid download folder bookmarks are discarded")
+    func discardsInvalidDownloadDirectoryBookmark() throws {
+        let suiteName = "DCCFileTransferTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(
+            Data("not a bookmark".utf8),
+            forKey: IRCDCCPreferences.downloadDirectoryBookmarkKey
+        )
+
+        #expect(IRCDCCPreferences.downloadDirectory(in: defaults) == nil)
+        #expect(defaults.data(forKey: IRCDCCPreferences.downloadDirectoryBookmarkKey) == nil)
+    }
+
     @Test("Parses classic numeric DCC SEND offers")
     func parsesClassicSend() throws {
         let request = try #require(IRCDCCSendParser.request(
