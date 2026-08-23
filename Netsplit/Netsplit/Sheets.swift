@@ -1176,7 +1176,7 @@ struct SettingsView: View {
             }
             Section("File Sharing") {
                 Toggle("Receive files with DCC", isOn: $state.receivesDCCFiles)
-                Toggle("Save accepted files automatically", isOn: $state.automaticallySavesDCCFiles)
+                Toggle("Use default download folder", isOn: $state.automaticallySavesDCCFiles)
                     .disabled(!state.receivesDCCFiles)
                 if state.automaticallySavesDCCFiles {
                     HStack {
@@ -1192,12 +1192,10 @@ struct SettingsView: View {
                     .disabled(!state.receivesDCCFiles)
                 }
                 Text(
-                    "Off by default. When DCC is enabled, Netsplit asks before each transfer. "
-                        + "Accepted files are saved to the selected folder without overwriting "
-                        + "existing files; turn off automatic saving to choose a folder for every "
-                        + "file. DCC is unencrypted and a direct transfer can reveal your IP "
-                        + "address. Networks configured to use an SSH tunnel route accepted DCC "
-                        + "connections through that tunnel too."
+                    "Every transfer still requires approval, and accepted files never overwrite "
+                        + "existing files. If “Use default download folder” is off, Netsplit asks "
+                        + "where to save each file. DCC is unencrypted, and direct transfers can "
+                        + "reveal your IP address."
                 )
                     .font(.caption)
                     .foregroundStyle(.secondary)
