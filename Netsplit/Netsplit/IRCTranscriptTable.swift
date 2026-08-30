@@ -975,7 +975,13 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     self.pendingTailStartOrigin = nil
                     return
                 }
-                self.tableView?.layoutSubtreeIfNeeded()
+                if let tableView = self.tableView {
+                    self.materializeAndReconcileTailGeometry(in: tableView)
+                }
+                // Materialization and the spacer-height invalidation can both
+                // re-anchor NSTableView. Motion must start from the saved
+                // pre-append origin, but target/distance must use the corrected
+                // document height.
                 self.restorePendingTailStartOrigin()
                 let currentOriginY = self.scrollView?.contentView.bounds.origin.y ?? 0
                 let targetOriginY = self.tailOrigin()?.y ?? currentOriginY
@@ -996,7 +1002,10 @@ struct IRCTranscriptTable: NSViewRepresentable {
                     self.geometry()
                 )
 #endif
-                self.positionAtTail(animationDuration: motion?.duration) { [weak self] didAnimate in
+                self.positionAtTail(
+                    animationDuration: motion?.duration,
+                    hasPreparedTailGeometry: true
+                ) { [weak self] didAnimate in
                     guard let self, self.tailPositionGeneration == generation else { return }
                     self.isTailPositionAnimationInFlight = false
                     // An asynchronous preview can change the final row's
@@ -1025,24 +1034,25 @@ struct IRCTranscriptTable: NSViewRepresentable {
 
         private func positionAtTail(
             animationDuration: TimeInterval? = nil,
+            hasPreparedTailGeometry: Bool = false,
             completion: ((Bool) -> Void)? = nil
         ) {
             guard let tableView, let scrollView, tableView.numberOfRows > 0 else { return }
             tableView.layoutSubtreeIfNeeded()
-            if animationDuration != nil {
+            if !hasPreparedTailGeometry {
+                materializeAndReconcileTailGeometry(in: tableView)
+            }
+            if animationDuration != nil, !hasPreparedTailGeometry {
                 // NSTableView automatically re-anchors at the new bottom when
                 // rows are inserted. Restore the pre-append origin in the same
                 // run-loop turn that starts the animation so no intermediate
-                // frame is displayed.
+                // frame is displayed. Do this after reconciling the spacer,
+                // since its height invalidation can also re-anchor the table.
                 restorePendingTailStartOrigin()
             }
             guard let animationDuration else {
-                // Realize the final row first, then use the resulting exact
-                // document height. scrollRowToVisible alone can leave an
-                // automatic-height table overscrolled by the last estimate
-                // correction, exposing blank space below the transcript.
-                tableView.scrollRowToVisible(tableView.numberOfRows - 1)
-                tableView.layoutSubtreeIfNeeded()
+                // Use the exact document height after the final spacer has
+                // discarded any retained automatic-height proposal.
                 let clipView = scrollView.contentView
                 if let targetOrigin = tailOrigin() {
                     let targetBounds = NSRect(
@@ -1087,6 +1097,59 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #endif
                 completion?(true)
             }
+        }
+
+        private func materializeAndReconcileTailGeometry(in tableView: NSTableView) {
+            // Realize the final row first. A retained automatic-height
+            // proposal is only exposed after AppKit materializes it.
+            tableView.scrollRowToVisible(tableView.numberOfRows - 1)
+            tableView.layoutSubtreeIfNeeded()
+            reconcileBottomSpacerHeightForTail(in: tableView)
+        }
+
+        /// AppKit retains automatic row-height proposals by ordinal. Tail
+        /// materialization can therefore restore a former message height onto
+        /// the final spacer even though both its constraint and delegate value
+        /// are fixed. Reassert both before deriving the tail origin so that
+        /// stale spacer geometry cannot migrate into the next appended row.
+        private func reconcileBottomSpacerHeightForTail(in tableView: NSTableView) {
+            let row = messages.count + 1
+            guard row == tableView.numberOfRows - 1 else { return }
+
+            let spacer = tableView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: true
+            ) as? TranscriptSpacerCellView
+            let previousConstraintHeight = spacer?.height
+            let previousRowHeight = max(
+                0,
+                tableView.rect(ofRow: row).height
+                    - tableView.intercellSpacing.height
+            )
+            spacer?.height = Self.bottomInset
+            applyRowHeightChangesWithoutAnimation(
+                IndexSet(integer: row),
+                in: tableView
+            )
+#if DEBUG
+            let hadStaleConstraint = previousConstraintHeight.map {
+                abs($0 - Self.bottomInset) > 0.5
+            } ?? true
+            if hadStaleConstraint
+                || abs(previousRowHeight - Self.bottomInset) > 0.5 {
+                let constraintDescription = previousConstraintHeight.map {
+                    String(format: "%.1f", $0)
+                } ?? "missing"
+                parent.onGeometryChange?(
+                    "bottom-spacer-height-reconciled row=\(row) "
+                        + "constraint=\(constraintDescription) "
+                        + "rowHeight=\(String(format: "%.1f", previousRowHeight))"
+                        + "->\(String(format: "%.1f", Self.bottomInset))",
+                    geometry()
+                )
+            }
+#endif
         }
 
         private func scrollPositionDidChange(event: String) {

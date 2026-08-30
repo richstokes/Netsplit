@@ -4399,6 +4399,219 @@ struct IRCModelsAndPolicyTests {
         try await Task.sleep(for: .milliseconds(50))
     }
 
+    @Test("Revisited transcript does not retain a row gap after a short conversation")
+    @MainActor
+    func removesInactiveAppendGapAfterShortConversation() async throws {
+        let longIdentity = SidebarItem.channel(UUID())
+        let shortIdentity = SidebarItem.channel(UUID())
+        let regularRowHeight: CGFloat = 24
+        let wrappedRowHeight: CGFloat = 47
+        let rowSpacing: CGFloat = 3
+        let appendedRowRectHeight = regularRowHeight + rowSpacing
+        var longMessages = (0..<307).map { index in
+            IRCMessage(
+                sender: "long",
+                text: index == 286
+                    ? "A wrapped row near the cached tail"
+                    : "Long conversation message \(index)"
+            )
+        }
+        let shortMessages = (0..<6).map {
+            IRCMessage(sender: "short", text: "Short conversation message \($0)")
+        }
+        var contentIdentity = longIdentity
+        var messages = longMessages
+        var initialPositionCount = 0
+        var tailUpdates: [(animated: Bool, geometry: IRCTranscriptTableGeometry)] = []
+        var viewportHeight: CGFloat = 879
+
+        func rowHeight(for message: IRCMessage) -> CGFloat {
+            message.text.contains("wrapped") ? wrappedRowHeight : regularRowHeight
+        }
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 29,
+                    rowSpacing: rowSpacing,
+                    renderConfiguration: "short-conversation-inactive-append-gap-test",
+                    makeRow: { message in
+                        AnyView(
+                            Text(message.text)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: rowHeight(for: message),
+                                    maxHeight: rowHeight(for: message),
+                                    alignment: .leading
+                                )
+                        )
+                    },
+                    onInitialPositioned: { _ in initialPositionCount += 1 },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { animated, geometry in
+                        tailUpdates.append((animated, geometry))
+                    },
+                    onGeometryChange: { _, _ in }
+                )
+                .frame(width: 1_178, height: viewportHeight)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_178, height: 879),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { initialPositionCount == 1 }
+        let tableView = try #require(Self.view(
+            withIdentifier: "IRCTranscriptTable",
+            in: hostingController.view
+        ) as? NSTableView)
+
+        // Reproduce AppKit restoring an automatic-height proposal onto the
+        // lazily materialized bottom spacer after the normal height sweep.
+        // The next tail layout must reassert the spacer's fixed height before
+        // its ordinal can become an appended message while this channel is
+        // inactive.
+        let originalBottomSpacerRow = tableView.numberOfRows - 1
+        let originalBottomSpacer = try #require(tableView.view(
+            atColumn: 0,
+            row: originalBottomSpacerRow,
+            makeIfNecessary: true
+        ))
+        let spacerBody = try #require(originalBottomSpacer.subviews.first)
+        let spacerHeightConstraint = try #require(
+            spacerBody.constraints.first {
+                $0.firstAttribute == .height && $0.secondItem == nil
+            }
+        )
+        spacerHeightConstraint.constant = 132
+        tableView.noteHeightOfRows(
+            withIndexesChanged: IndexSet(integer: originalBottomSpacerRow)
+        )
+        tableView.layoutSubtreeIfNeeded()
+        #expect(tableView.rect(ofRow: originalBottomSpacerRow).height > 100)
+
+        viewportHeight = 878
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil {
+            abs(
+                tableView.rect(ofRow: originalBottomSpacerRow).height
+                    - (18 + rowSpacing)
+            ) <= 0.5
+        }
+        #expect(
+            abs(
+                tableView.rect(ofRow: originalBottomSpacerRow).height
+                    - (18 + rowSpacing)
+            ) <= 0.5
+        )
+
+        contentIdentity = shortIdentity
+        messages = shortMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 2 }
+
+        // The intermediate conversation is short enough to use the synthetic
+        // top spacer. Returning from this state previously allowed an older
+        // automatic-height proposal to reappear near the long transcript tail.
+        #expect(tableView.numberOfRows == shortMessages.count + 2)
+        #expect(tableView.rect(ofRow: 0).height > 600)
+
+        longMessages.append(
+            IRCMessage(sender: "long", text: "Short row appended while inactive")
+        )
+        contentIdentity = longIdentity
+        messages = longMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil { initialPositionCount == 3 }
+
+        let appendedRow = longMessages.count
+        let previousRow = appendedRow - 1
+        let bottomSpacerRow = tableView.numberOfRows - 1
+        let previousRect = tableView.rect(ofRow: previousRow)
+        let appendedRect = tableView.rect(ofRow: appendedRow)
+        let bottomSpacerRect = tableView.rect(ofRow: bottomSpacerRow)
+
+        #expect(tableView.numberOfRows == longMessages.count + 2)
+        #expect(abs(appendedRect.height - appendedRowRectHeight) <= 0.5)
+        #expect(abs(appendedRect.minY - previousRect.maxY) <= 0.5)
+        #expect(abs(bottomSpacerRect.minY - appendedRect.maxY) <= 0.5)
+        #expect(abs(bottomSpacerRect.height - (18 + rowSpacing)) <= 0.5)
+
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
+        let visibleMessageRows = visibleRows.location == NSNotFound
+            ? []
+            : (visibleRows.location..<NSMaxRange(visibleRows)).filter {
+                $0 > 0 && $0 <= longMessages.count
+            }
+        #expect(!visibleMessageRows.isEmpty)
+        for (earlierRow, laterRow) in zip(
+            visibleMessageRows,
+            visibleMessageRows.dropFirst()
+        ) {
+            #expect(
+                abs(
+                    tableView.rect(ofRow: laterRow).minY
+                        - tableView.rect(ofRow: earlierRow).maxY
+                ) <= 0.5
+            )
+        }
+
+        // A subsequent live append must take the animated insertion path without
+        // allowing the shifted bottom-spacer ordinal to contaminate either row.
+        tailUpdates.removeAll()
+        longMessages.append(
+            IRCMessage(sender: "long", text: "Short row appended while active")
+        )
+        messages = longMessages
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Self.waitUntil(timeout: .seconds(3)) { !tailUpdates.isEmpty }
+
+        let activeTailUpdate = try #require(tailUpdates.last)
+        let activeAppendedRow = longMessages.count
+        let activePreviousRow = activeAppendedRow - 1
+        let shiftedBottomSpacerRow = tableView.numberOfRows - 1
+        let activePreviousRect = tableView.rect(ofRow: activePreviousRow)
+        let activeAppendedRect = tableView.rect(ofRow: activeAppendedRow)
+        let shiftedBottomSpacerRect = tableView.rect(ofRow: shiftedBottomSpacerRow)
+        let tailBottomDistance = activeTailUpdate.geometry.contentBounds.maxY
+            - activeTailUpdate.geometry.visibleBounds.maxY
+
+        #expect(tableView.numberOfRows == longMessages.count + 2)
+        #expect(tailUpdates.count == 1)
+        #expect(activeTailUpdate.animated)
+        #expect(abs(activeAppendedRect.height - appendedRowRectHeight) <= 0.5)
+        #expect(abs(activeAppendedRect.minY - activePreviousRect.maxY) <= 0.5)
+        #expect(
+            abs(shiftedBottomSpacerRect.minY - activeAppendedRect.maxY) <= 0.5
+        )
+        #expect(abs(shiftedBottomSpacerRect.height - (18 + rowSpacing)) <= 0.5)
+        #expect(abs(tailBottomDistance) <= 0.5)
+
+        hostingController.rootView = AnyView(EmptyView())
+        hostingController.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
     @Test("Every initial transcript row category has an explicit height")
     @MainActor
     func assignsExplicitHeightsToEveryInitialRowCategory() {
