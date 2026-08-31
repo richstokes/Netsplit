@@ -5546,6 +5546,281 @@ struct IRCModelsAndPolicyTests {
         ))
     }
 
+    @Test("In-flight tail motion owns intrinsic height invalidation")
+    @MainActor
+    func keepsTailMotionAliveDuringIntrinsicHeightInvalidation() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
+        let appendedMessage = IRCMessage(
+            sender: "tester",
+            text: "A newly appended multiline row"
+        )
+        var messages = (0..<220).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var tableViewForMutation: NSTableView?
+        var didPositionInitially = false
+        var tailUpdates: [(animated: Bool, geometry: IRCTranscriptTableGeometry)] = []
+        var animationStarts = 0
+        var retargetCount = 0
+        var rowHeightChangeCount = 0
+        var rowHeightChangedBeforeTailCompletion = false
+        var mutatedFittingHeight: CGFloat?
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 24,
+                    rowSpacing: 3,
+                    renderConfiguration: "tail-height-settlement-ownership-test",
+                    makeRow: { message in
+                        if message.id == appendedMessage.id {
+                            return AnyView(
+                                Color.clear.frame(
+                                    maxWidth: .infinity,
+                                    minHeight: 72,
+                                    maxHeight: 72
+                                )
+                            )
+                        }
+                        return AnyView(
+                            Color.clear.frame(
+                                maxWidth: .infinity,
+                                minHeight: 24,
+                                maxHeight: 24
+                            )
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { _, _ in },
+                    onTailPositioned: { animated, geometry in
+                        tailUpdates.append((animated, geometry))
+                    },
+                    onGeometryChange: { event, _ in
+                        if event == "tail-position-animation-started" {
+                            animationStarts += 1
+                            if animationStarts == 1,
+                               let tableView = tableViewForMutation,
+                               let hostingView = Self.views(
+                                   withIdentifier: "IRCTranscriptHostedRow",
+                                   in: tableView
+                               )
+                               .compactMap({ $0 as? IntrinsicInvalidatingHostingView })
+                               .first(where: {
+                                   $0.representedMessageID == appendedMessage.id
+                               }) {
+                                // Inject the same intrinsic callback an async
+                                // row emits, precisely while motion is active.
+                                hostingView.setHostedContent(
+                                    AnyView(
+                                        Color.clear.frame(
+                                            width: max(1, tableView.bounds.width),
+                                            height: 76
+                                        )
+                                    ),
+                                    for: appendedMessage.id
+                                )
+                                hostingView.layoutSubtreeIfNeeded()
+                                mutatedFittingHeight = hostingView.fittingSize.height
+                                hostingView.invalidateIntrinsicContentSize()
+                            }
+                        } else if event == "tail-motion-retargeted" {
+                            retargetCount += 1
+                        } else if event == "row-height-changed" {
+                            rowHeightChangeCount += 1
+                            if tailUpdates.isEmpty {
+                                rowHeightChangedBeforeTailCompletion = true
+                            }
+                        }
+                    }
+                )
+                .frame(width: 1_178, height: 879)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_178, height: 879),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { didPositionInitially }
+        let tableView = try #require(Self.view(
+            withIdentifier: "IRCTranscriptTable",
+            in: hostingController.view
+        ) as? NSTableView)
+        tableViewForMutation = tableView
+        let scrollView = try #require(Self.view(
+            withIdentifier: "IRCTranscriptScrollView",
+            in: hostingController.view
+        ) as? NSScrollView)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(abs(
+            tableView.bounds.maxY - scrollView.contentView.bounds.maxY
+        ) <= 1)
+        tailUpdates.removeAll()
+        animationStarts = 0
+        retargetCount = 0
+        rowHeightChangeCount = 0
+        rowHeightChangedBeforeTailCompletion = false
+
+        messages.append(appendedMessage)
+        hostingController.rootView = rootView()
+
+        try await Self.waitUntil(timeout: .seconds(3)) {
+            !tailUpdates.isEmpty
+                && rowHeightChangeCount > 0
+                && mutatedFittingHeight != nil
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        let tailUpdate = try #require(tailUpdates.last)
+        let bottomDistance = tailUpdate.geometry.contentBounds.maxY
+            - tailUpdate.geometry.visibleBounds.maxY
+        let settledBottomDistance = tableView.bounds.maxY
+            - scrollView.contentView.bounds.maxY
+
+        #expect(tailUpdate.animated)
+        #expect(tailUpdates.count == 1)
+        #expect(animationStarts == 1)
+        #expect(retargetCount == 0)
+        #expect(rowHeightChangeCount > 0)
+        #expect(rowHeightChangedBeforeTailCompletion)
+        #expect(abs((mutatedFittingHeight ?? 0) - 76) <= 0.5)
+        #expect(tableView.numberOfRows == messages.count + 2)
+        #expect(abs(bottomDistance) <= 0.5)
+        #expect(abs(settledBottomDistance) <= 0.5)
+    }
+
+    @Test("Wrapped arrival remains at tail after preflight row recycling")
+    @MainActor
+    func keepsWrappedArrivalAtTailAfterPreflightRecycling() async throws {
+        let contentIdentity = SidebarItem.channel(UUID())
+        var messages = (0..<307).map {
+            IRCMessage(sender: "tester", text: "Message \($0)")
+        }
+        var didPositionInitially = false
+        var followingTail = true
+        var followingChanges: [Bool] = []
+        var tailUpdates: [(animated: Bool, geometry: IRCTranscriptTableGeometry)] = []
+        var geometryEvents: [String] = []
+
+        func rootView() -> AnyView {
+            AnyView(
+                IRCTranscriptTable(
+                    contentIdentity: contentIdentity,
+                    messages: messages,
+                    estimatedRowHeight: 29,
+                    rowSpacing: 3,
+                    renderConfiguration: "wrapped-arrival-preflight-recycling-test",
+                    makeRow: { message in
+                        let height: CGFloat = message.text.hasPrefix("Wrapped arrival")
+                            ? 74
+                            : 24
+                        return AnyView(
+                            Text(message.text)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: height,
+                                    maxHeight: height,
+                                    alignment: .leading
+                                )
+                        )
+                    },
+                    onInitialPositioned: { _ in didPositionInitially = true },
+                    onFollowingTailChange: { following, _ in
+                        followingTail = following
+                        followingChanges.append(following)
+                    },
+                    onTailPositioned: { animated, geometry in
+                        tailUpdates.append((animated, geometry))
+                    },
+                    onGeometryChange: { event, _ in geometryEvents.append(event) }
+                )
+                .frame(width: 1_178, height: 879)
+            )
+        }
+
+        let hostingController = NSHostingController(rootView: rootView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_178, height: 879),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentViewController = hostingController
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.contentViewController = nil
+            window.close()
+        }
+
+        try await Self.waitUntil { didPositionInitially }
+        let tableView = try #require(Self.view(
+            withIdentifier: "IRCTranscriptTable",
+            in: hostingController.view
+        ) as? NSTableView)
+        let scrollView = try #require(Self.view(
+            withIdentifier: "IRCTranscriptScrollView",
+            in: hostingController.view
+        ) as? NSScrollView)
+        try await Task.sleep(for: .milliseconds(300))
+        let initialBottomDistance = tableView.bounds.maxY
+            - scrollView.contentView.bounds.maxY
+        #expect(followingTail)
+        #expect(abs(initialBottomDistance) <= 1)
+        tailUpdates.removeAll()
+        followingChanges.removeAll()
+        geometryEvents.removeAll()
+
+        messages.append(IRCMessage(
+            sender: "tester",
+            text: "Wrapped arrival whose measured table height is seventy-seven points"
+        ))
+        hostingController.rootView = rootView()
+        hostingController.view.layoutSubtreeIfNeeded()
+
+        try await Self.waitUntil(timeout: .seconds(3)) { !tailUpdates.isEmpty }
+        try await Task.sleep(for: .milliseconds(500))
+        let appendedRow = messages.count
+        let appendedRect = tableView.rect(ofRow: appendedRow)
+        let spacerRect = tableView.rect(ofRow: tableView.numberOfRows - 1)
+        let settledBottomDistance = tableView.bounds.maxY
+            - scrollView.contentView.bounds.maxY
+
+        #expect(tableView.numberOfRows == messages.count + 2)
+        #expect(abs(appendedRect.height - 77) <= 0.5)
+        #expect(abs(spacerRect.height - 21) <= 0.5)
+        #expect(tailUpdates.count == 1)
+        let tailUpdate = try #require(tailUpdates.last)
+        #expect(tailUpdate.animated)
+        #expect(IRCTranscriptScrollPolicy.isAtBottom(
+            visibleBounds: tailUpdate.geometry.visibleBounds,
+            contentBounds: tailUpdate.geometry.contentBounds,
+            contentIsFlipped: tailUpdate.geometry.contentIsFlipped,
+            tolerance: 1
+        ))
+        #expect(followingTail)
+        #expect(!followingChanges.contains(false))
+        #expect(geometryEvents.contains { $0.hasPrefix("tail-motion-started") })
+        #expect(abs(settledBottomDistance) <= 1)
+    }
+
     @Test("A user scroll cancels an in-flight transcript tail animation")
     @MainActor
     func userScrollCancelsTranscriptTailAnimation() async throws {

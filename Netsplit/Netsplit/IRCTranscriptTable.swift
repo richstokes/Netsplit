@@ -1470,7 +1470,15 @@ struct IRCTranscriptTable: NSViewRepresentable {
                         return nil
                     }
                     hostingView.layoutSubtreeIfNeeded()
-                    let currentHeight = tableView.rect(ofRow: row).height
+                    // NSTableView includes intercell spacing in the row rect,
+                    // while the hosting view proposes only its content height.
+                    // Comparing the two directly makes every recycled row look
+                    // changed forever when nonzero message spacing is enabled.
+                    let currentHeight = max(
+                        0,
+                        tableView.rect(ofRow: row).height
+                            - tableView.intercellSpacing.height
+                    )
                     let proposedHeight = hostingView.fittingSize.height
                     guard currentHeight.isFinite,
                           proposedHeight.isFinite,
@@ -1496,7 +1504,18 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 let shouldFollowLayoutChange = readingAnchor == nil
                     && self.followingTail
                     && self.hasPositionedInitially
-                if shouldFollowLayoutChange {
+                let hasPendingTailMotion = self.isAwaitingTailPosition
+                    && self.pendingTailWorkItem != nil
+                // A pending tail move will derive its target after these row
+                // heights are applied, while an in-flight move performs an
+                // exact tail correction when it completes. Let that existing
+                // move retain ownership. Retargeting it for an intrinsic-size
+                // notification caused by tail materialization can otherwise
+                // recycle the same rows, generate another notification, and
+                // cancel every animation before it advances.
+                let shouldStartLayoutTailMotion = shouldFollowLayoutChange
+                    && !self.isAwaitingTailPosition
+                if shouldStartLayoutTailMotion {
                     self.prepareForTailMotion()
                 }
                 self.applyRowHeightChangesWithoutAnimation(rows, in: tableView)
@@ -1510,9 +1529,14 @@ struct IRCTranscriptTable: NSViewRepresentable {
                 // same bounded motion as an independent layout change.
                 // A restored reader position still wins if its new geometry
                 // happens to classify it as being at the tail.
-                if shouldFollowLayoutChange {
+                if shouldStartLayoutTailMotion {
                     self.restorePendingTailStartOrigin()
                     self.scheduleTailPosition(includesLayoutChange: true)
+                } else if shouldFollowLayoutChange, hasPendingTailMotion {
+                    // AppKit may re-anchor while adopting the measurement.
+                    // Preserve the pending move's pre-change start without
+                    // postponing it or disturbing an animator already running.
+                    self.restorePendingTailStartOrigin()
                 }
 #if DEBUG
                 self.parent.onGeometryChange?("row-height-changed", self.geometry())
