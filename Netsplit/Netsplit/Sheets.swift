@@ -789,6 +789,11 @@ struct JumpPalette: View {
 }
 
 struct ChannelBrowser: View {
+    private struct ListIdentity: Hashable {
+        let search: String
+        let isLoading: Bool
+    }
+
     @ObservedObject var state: IRCAppState
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ircTextMetrics) private var textMetrics
@@ -926,9 +931,10 @@ struct ChannelBrowser: View {
                         }
                         .accessibilityElement(children: .contain)
                     }
-                    // Reset a stale List offset when filtering, without resetting
-                    // for each batch of channels received from the server.
-                    .id(search)
+                    // Keep the List stable while sorted batches arrive, then reset
+                    // it once when loading finishes so browsing starts at the top.
+                    // Search changes also need a fresh offset for filtered results.
+                    .id(ListIdentity(search: search, isLoading: isLoading))
                 } else if isLoading {
                     VStack(spacing: 12) {
                         ProgressView()

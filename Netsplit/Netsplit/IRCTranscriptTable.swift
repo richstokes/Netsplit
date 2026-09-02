@@ -210,7 +210,7 @@ struct IRCTranscriptTable: NSViewRepresentable {
 #endif
 
         private static let topInset: CGFloat = 18
-        private static let bottomInset: CGFloat = 18
+        private static let bottomInset: CGFloat = 6
         private static let messageCellIdentifier = NSUserInterfaceItemIdentifier(
             "IRCTranscriptMessageCell"
         )

@@ -4370,8 +4370,8 @@ struct IRCModelsAndPolicyTests {
             let wrappedMessageHeight = tableView.rect(
                 ofRow: wrappedMessageRow
             ).height
-            return abs(distanceToTranscriptBottom - 21) <= 0.5
-                && abs(bottomSpacerRect.height - 21) <= 0.5
+            return abs(distanceToTranscriptBottom - 9) <= 0.5
+                && abs(bottomSpacerRect.height - 9) <= 0.5
                 && abs(normalMessageHeight - 27) <= 0.5
                 && abs(wrappedMessageHeight - 49) <= 0.5
         }
@@ -4387,9 +4387,9 @@ struct IRCModelsAndPolicyTests {
             heightOfRow: tableView.numberOfRows - 1
         )
 
-        #expect(abs(distanceToTranscriptBottom - 21) <= 0.5)
-        #expect(abs((bottomSpacerHeight ?? 0) - 18) <= 0.5)
-        #expect(abs(bottomSpacerRect.height - 21) <= 0.5)
+        #expect(abs(distanceToTranscriptBottom - 9) <= 0.5)
+        #expect(abs((bottomSpacerHeight ?? 0) - 6) <= 0.5)
+        #expect(abs(bottomSpacerRect.height - 9) <= 0.5)
         #expect(abs(tableView.rect(ofRow: normalMessageRow).height - 27) <= 0.5)
         #expect(abs(tableView.rect(ofRow: wrappedMessageRow).height - 49) <= 0.5)
         #expect(initialVisibleHeightVerificationCount >= 3)
@@ -4512,13 +4512,13 @@ struct IRCModelsAndPolicyTests {
         try await Self.waitUntil {
             abs(
                 tableView.rect(ofRow: originalBottomSpacerRow).height
-                    - (18 + rowSpacing)
+                    - (6 + rowSpacing)
             ) <= 0.5
         }
         #expect(
             abs(
                 tableView.rect(ofRow: originalBottomSpacerRow).height
-                    - (18 + rowSpacing)
+                    - (6 + rowSpacing)
             ) <= 0.5
         )
 
@@ -4554,7 +4554,7 @@ struct IRCModelsAndPolicyTests {
         #expect(abs(appendedRect.height - appendedRowRectHeight) <= 0.5)
         #expect(abs(appendedRect.minY - previousRect.maxY) <= 0.5)
         #expect(abs(bottomSpacerRect.minY - appendedRect.maxY) <= 0.5)
-        #expect(abs(bottomSpacerRect.height - (18 + rowSpacing)) <= 0.5)
+        #expect(abs(bottomSpacerRect.height - (6 + rowSpacing)) <= 0.5)
 
         let visibleRows = tableView.rows(in: tableView.visibleRect)
         let visibleMessageRows = visibleRows.location == NSNotFound
@@ -4604,7 +4604,7 @@ struct IRCModelsAndPolicyTests {
         #expect(
             abs(shiftedBottomSpacerRect.minY - activeAppendedRect.maxY) <= 0.5
         )
-        #expect(abs(shiftedBottomSpacerRect.height - (18 + rowSpacing)) <= 0.5)
+        #expect(abs(shiftedBottomSpacerRect.height - (6 + rowSpacing)) <= 0.5)
         #expect(abs(tailBottomDistance) <= 0.5)
 
         hostingController.rootView = AnyView(EmptyView())
@@ -4635,7 +4635,7 @@ struct IRCModelsAndPolicyTests {
         }
 
         #expect(rowCount == messages.count + 2)
-        #expect(rowHeights == [18, 24, 24, 18])
+        #expect(rowHeights == [18, 24, 24, 6])
         #expect(!rowHeights.contains(-1))
         #expect(coordinator.tableView(tableView, heightOfRow: -1) == -1)
         #expect(coordinator.tableView(tableView, heightOfRow: rowCount) == -1)
@@ -4707,12 +4707,12 @@ struct IRCModelsAndPolicyTests {
         hostingController.view.layoutSubtreeIfNeeded()
         try await Self.waitUntil {
             let newestMessageBottom = tableView.rect(ofRow: messages.count).maxY
-            let expectedMessageBottom = scrollView.contentView.bounds.height - 18
+            let expectedMessageBottom = scrollView.contentView.bounds.height - 6
             return abs(newestMessageBottom - expectedMessageBottom) <= 1
         }
 
         let newestMessageBottom = tableView.rect(ofRow: messages.count).maxY
-        let expectedMessageBottom = scrollView.contentView.bounds.height - 18
+        let expectedMessageBottom = scrollView.contentView.bounds.height - 6
 
         #expect(abs(newestMessageBottom - expectedMessageBottom) <= 1)
 
@@ -5354,7 +5354,7 @@ struct IRCModelsAndPolicyTests {
             ) as? NSScrollView
         )
         let messageBottom = tableView.rect(ofRow: 1).maxY
-        let expectedMessageBottom = scrollView.contentView.bounds.height - 18
+        let expectedMessageBottom = scrollView.contentView.bounds.height - 6
 
         #expect(abs(messageBottom - expectedMessageBottom) <= 1)
 
@@ -5420,7 +5420,7 @@ struct IRCModelsAndPolicyTests {
                 in: hostingController.view
             ) as? NSTableView
         )
-        let expectedMessageBottom = scrollView.contentView.bounds.height - 18
+        let expectedMessageBottom = scrollView.contentView.bounds.height - 6
 
         #expect(tableView.numberOfRows == 3)
         #expect(abs(tableView.rect(ofRow: 1).maxY - expectedMessageBottom) <= 1)
@@ -5805,7 +5805,7 @@ struct IRCModelsAndPolicyTests {
 
         #expect(tableView.numberOfRows == messages.count + 2)
         #expect(abs(appendedRect.height - 77) <= 0.5)
-        #expect(abs(spacerRect.height - 21) <= 0.5)
+        #expect(abs(spacerRect.height - 9) <= 0.5)
         #expect(tailUpdates.count == 1)
         let tailUpdate = try #require(tailUpdates.last)
         #expect(tailUpdate.animated)
