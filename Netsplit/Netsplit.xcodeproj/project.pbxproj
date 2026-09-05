@@ -492,7 +492,7 @@
 			repositoryURL = "https://github.com/apple/swift-nio-ssl.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 2.37.2;
+				minimumVersion = 2.37.4;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
