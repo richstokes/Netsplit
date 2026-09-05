@@ -839,9 +839,11 @@ enum IRCOutgoingEchoRetentionPolicy {
     static func shouldExpire(
         _ state: IRCOutgoingEchoState,
         sentAt: Date,
-        now: Date
+        now: Date,
+        suppressTranscript: Bool = false
     ) -> Bool {
-        state.hasCompletedWrite
+        !suppressTranscript
+            && state.hasCompletedWrite
             && now.timeIntervalSince(sentAt) > maximumAge
     }
 }

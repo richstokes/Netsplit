@@ -510,7 +510,7 @@ enum IRCNumericReply {
   static func isError(_ command: String) -> Bool {
     command.count == 3
       && command.allSatisfy(\.isNumber)
-      && (400...599).contains(Int(command) ?? 0)
+      && ((400...599).contains(Int(command) ?? 0) || command == "716") // ERR_TARGUMODEG
   }
 }
 

@@ -15,6 +15,10 @@ struct ServerProfileEditor: View {
     @ObservedObject var state: IRCAppState
     let profileToEdit: ServerProfile?
     @Environment(\.dismiss) private var dismiss
+    @State private var credentialSnapshot: IRCProfileCredentialSnapshot
+    @State private var draftProfileID: UUID
+    @State private var credentialSaveFailed = false
+    @State private var hasLoadedCredentials: Bool
     @State private var name: String
     @State private var hostname: String
     @State private var port: String
@@ -43,6 +47,12 @@ struct ServerProfileEditor: View {
     init(state: IRCAppState, profileToEdit: ServerProfile? = nil) {
         self.state = state
         self.profileToEdit = profileToEdit
+        // SwiftUI can reconstruct this value repeatedly while the sheet is open.
+        // Read Keychain once when the editor appears, outside view construction.
+        let credentials = IRCProfileCredentialSnapshot()
+        _hasLoadedCredentials = State(initialValue: profileToEdit == nil)
+        _credentialSnapshot = State(initialValue: credentials)
+        _draftProfileID = State(initialValue: profileToEdit?.id ?? UUID())
         _name = State(initialValue: profileToEdit?.name ?? "")
         _hostname = State(initialValue: profileToEdit?.hostname ?? "")
         _port = State(initialValue: String(profileToEdit?.port ?? 6697))
@@ -55,11 +65,11 @@ struct ServerProfileEditor: View {
         )
         _realNameOverride = State(initialValue: profileToEdit?.realNameOverride ?? "")
         _mentionNotificationsOverride = State(initialValue: profileToEdit?.mentionNotificationsOverride)
-        _serverPassword = State(initialValue: profileToEdit.map { state.serverPassword(for: $0) } ?? "")
+        _serverPassword = State(initialValue: credentials.serverPassword ?? "")
         _useSASL = State(initialValue: profileToEdit?.useSASL ?? false)
         _saslUsername = State(initialValue: profileToEdit?.saslUsername ?? "")
-        _saslPassword = State(initialValue: profileToEdit.map { state.saslPassword(for: $0) } ?? "")
-        let onConnectCommands = profileToEdit.map { state.onConnectCommands(for: $0) }
+        _saslPassword = State(initialValue: credentials.saslPassword ?? "")
+        let onConnectCommands = credentials.onConnectCommands
             ?? IRCOnConnectCommandPhases()
         _beforeFavoritesJoinedCommands = State(
             initialValue: onConnectCommands.beforeFavoritesJoined.map {
@@ -75,14 +85,15 @@ struct ServerProfileEditor: View {
         _sshHostname = State(initialValue: profileToEdit?.sshHostname ?? "")
         _sshPort = State(initialValue: String(profileToEdit?.sshPort ?? 22))
         _sshUsername = State(initialValue: profileToEdit?.sshUsername ?? "")
-        _sshPassword = State(initialValue: profileToEdit.map { state.sshPassword(for: $0) } ?? "")
-        _sshPrivateKey = State(initialValue: profileToEdit.map { state.sshPrivateKey(for: $0) } ?? "")
+        _sshPassword = State(initialValue: credentials.sshPassword ?? "")
+        _sshPrivateKey = State(initialValue: credentials.sshPrivateKey ?? "")
         _sshKeyFilename = State(initialValue: profileToEdit?.sshKeyFilename)
     }
 
     private var isEditing: Bool { profileToEdit != nil }
     private var hasSSHAuthentication: Bool {
         !sshPassword.isEmpty || !sshPrivateKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || credentialSnapshot.sshPassword == nil || credentialSnapshot.sshPrivateKey == nil
     }
     private var nicknameOverrideError: String? {
         let nickname = nicknameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -97,9 +108,10 @@ struct ServerProfileEditor: View {
         return value
     }
     private var canSave: Bool {
+        guard hasLoadedCredentials else { return false }
         guard !hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         guard ircPort != nil, nicknameOverrideError == nil else { return false }
-        guard !useSASL || !saslPassword.isEmpty else { return false }
+        guard !useSASL || !saslPassword.isEmpty || credentialSnapshot.saslPassword == nil else { return false }
         guard useSSHTunnel else { return true }
         return !sshHostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !sshUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -125,6 +137,12 @@ struct ServerProfileEditor: View {
 
             ScrollView {
                 VStack(spacing: 18) {
+                    if credentialSaveFailed {
+                        ServerEditorHelpText("Some credentials could not be saved. Your changes are still here; try saving again.", tint: .red, isError: true)
+                    }
+                    if credentialSnapshot.hasUnavailableValues {
+                        ServerEditorHelpText("Some saved credentials could not be read. Leave those fields unchanged to keep their saved values, or enter replacements.")
+                    }
                     connectionSection
                     identitySection
                     notificationsSection
@@ -187,6 +205,21 @@ struct ServerProfileEditor: View {
                     + "If it is connected, Netsplit will disconnect it first."
             )
         }
+        .onAppear(perform: loadCredentialsIfNeeded)
+    }
+
+    private func loadCredentialsIfNeeded() {
+        guard !hasLoadedCredentials, let profileToEdit else { return }
+        hasLoadedCredentials = true
+        let credentials = state.credentialSnapshot(for: profileToEdit)
+        credentialSnapshot = credentials
+        serverPassword = credentials.serverPassword ?? ""
+        saslPassword = credentials.saslPassword ?? ""
+        sshPassword = credentials.sshPassword ?? ""
+        sshPrivateKey = credentials.sshPrivateKey ?? ""
+        let commands = credentials.onConnectCommands ?? IRCOnConnectCommandPhases()
+        beforeFavoritesJoinedCommands = commands.beforeFavoritesJoined.map { EditableOnConnectCommand(text: $0) }
+        afterFavoritesJoinedCommands = commands.afterFavoritesJoined.map { EditableOnConnectCommand(text: $0) }
     }
 
     private var connectionSection: some View {
@@ -250,7 +283,7 @@ struct ServerProfileEditor: View {
                     SecureField("Required for SASL", text: $saslPassword)
                         .accessibilityLabel("SASL password")
                 }
-                if saslPassword.isEmpty {
+                if saslPassword.isEmpty && credentialSnapshot.saslPassword != nil {
                     ServerEditorHelpText("Enter a SASL password or turn off SASL authentication.", tint: .red, isError: true)
                 }
             }
@@ -373,12 +406,22 @@ struct ServerProfileEditor: View {
             beforeFavoritesJoined: beforeFavoritesJoinedCommands.map(\.text),
             afterFavoritesJoined: afterFavoritesJoinedCommands.map(\.text)
         )
+        let changes = credentialSnapshot.changes(
+            serverPassword: serverPassword,
+            saslPassword: saslPassword,
+            onConnectCommands: onConnectCommands,
+            sshPassword: sshPassword,
+            sshPrivateKey: sshPrivateKey
+        )
+        let result: IRCProfileSaveResult
         if let profileToEdit {
-            state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
+            result = state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, credentials: changes, useSASL: useSASL, saslUsername: saslUsername, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
         } else {
-            state.addProfile(name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, serverPassword: serverPassword, useSASL: useSASL, saslUsername: saslUsername, saslPassword: saslPassword, onConnectCommands: onConnectCommands, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshPassword: sshPassword, sshPrivateKey: sshPrivateKey, sshKeyFilename: sshKeyFilename)
+            result = state.addProfile(id: draftProfileID, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, credentials: changes, useSASL: useSASL, saslUsername: saslUsername, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshKeyFilename: sshKeyFilename)
         }
-        dismiss()
+        credentialSnapshot.recordSavedChanges(result.savedCredentials)
+        credentialSaveFailed = !result.succeeded
+        if result.succeeded { dismiss() }
     }
 
     private func chooseSSHKey() {

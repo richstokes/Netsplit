@@ -74,7 +74,10 @@ after retained and favorite channel join attempts complete, making it suitable
 for ChanServ requests, modes, topics, and other channel setup. Client commands
 such as `/msg NickServ IDENTIFY ...` and raw IRC commands are both accepted.
 Both command lists are stored in the macOS Keychain because they may contain
-passwords.
+passwords. Chat messages sent by these commands and their server echoes are
+kept out of transcripts. Error replies that identify these messages are
+redacted. Editing a profile preserves credentials that could not be read
+from Keychain, and a failed save keeps the editor open for retry.
 
 Commands are sent 0.5 seconds apart. Netsplit waits 2 seconds after the final
 pre-join command before joining channels. Post-join commands begin after the
@@ -133,7 +136,7 @@ server, channel, or private message first.
 
 | Command | Description |
 | --- | --- |
-| `/join <channel>` | Join a channel. A missing channel prefix is automatically changed to `#`. |
+| `/join <channel> [key]` | Join a channel, optionally using its key. A missing prefix uses the network's preferred channel prefix. Keys stay in memory for reconnects and `/hop` until the conversation is closed. Unanswered attempts time out after 20 seconds so you can retry. |
 | `/hop [#channel] [message]` | Leave and immediately rejoin the current channel or a named joined channel, optionally with a part message. |
 | `/list [arguments]` | Open the live channel browser and request the server's channel list. |
 | `/part [#channel] [reason]` | Leave the current channel, a named joined channel, or include a part reason. |

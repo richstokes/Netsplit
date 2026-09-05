@@ -643,6 +643,14 @@ struct IRCWireMessage {
     var parameters: [String]
     var trailing: String?
 
+    /// Parameters have the same meaning whether the final value uses a colon or not.
+    /// Keep the original wire fields available for framing and expose semantic access here.
+    func parameter(at index: Int) -> String? {
+        guard index >= 0 else { return nil }
+        if index < parameters.count { return parameters[index] }
+        return index == parameters.count ? trailing : nil
+    }
+
     var isSASLContinuation: Bool {
         guard command == "AUTHENTICATE" else { return false }
         return (parameters == ["+"] && trailing == nil)

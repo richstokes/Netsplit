@@ -3,6 +3,20 @@ import Testing
 
 @Suite("IRC wire message parsing")
 struct IRCWireMessageTests {
+    @Test("Semantic parameter access treats the trailing colon as optional")
+    func accessesSemanticParameters() throws {
+        for suffix in ["hello", ":hello"] {
+            let message = try #require(IRCWireMessage(line: "PRIVMSG target \(suffix)"))
+            #expect(message.parameter(at: 0) == "target")
+            #expect(message.parameter(at: 1) == "hello")
+            #expect(message.parameter(at: 2) == nil)
+            #expect(message.parameter(at: -1) == nil)
+        }
+        let empty = try #require(IRCWireMessage(line: "NOTICE target :"))
+        #expect(empty.parameter(at: 1) == "")
+        #expect(empty.parameter(at: 2) == nil)
+    }
+
     @Test("Parses tags, prefix, parameters, and trailing text")
     func parsesCompleteMessage() throws {
         let message = try #require(IRCWireMessage(
