@@ -13,8 +13,17 @@ enum KeychainStore {
         let status: OSStatus
     }
 
-    // Keep this value stable: all existing credentials use it.
-    static let service = "richstokes.irc"
+    // The App Store bundle ID remains richstokes.irc, preserving existing credentials.
+    // Development builds and test hosts must never share that service.
+    static let service = serviceName(
+        bundleIdentifier: Bundle.main.bundleIdentifier,
+        isTestMode: NetsplitLaunchEnvironment.currentProcessIsInTestMode
+    )
+
+    static func serviceName(bundleIdentifier: String?, isTestMode: Bool) -> String {
+        if isTestMode { return "richstokes.irc.tests" }
+        return bundleIdentifier ?? "richstokes.irc.development"
+    }
 
     static func value(for account: String) throws -> String {
         let query: [CFString: Any] = [

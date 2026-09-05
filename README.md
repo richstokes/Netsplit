@@ -115,6 +115,19 @@ normal **Run** action (Command-R) builds and launches the app. **Test**
 (Command-U) runs the focused regression suite using the shared `NetsplitCore`
 test plan.
 
+Debug builds use the separate `richstokes.irc.debug` app identity, preferences
+container, and Keychain service. They start with their own settings. App Store
+archives keep the production identity, `richstokes.irc`.
+When switching from an older checkout, use **Product → Clean Build Folder**
+before testing so Xcode also refreshes its cached test-host identity.
+
+Test-host app states use a fresh disposable preferences suite and in-memory
+credentials by default. Tests that need seeded preferences must inject their own
+suite. Never use `UserDefaults.standard` or override its argument domain for test
+fixtures: volatile read overrides do not stop app code from writing persistent
+preferences. Run local probes with the Debug configuration; do not launch a
+Release build against live settings to test fixture data.
+
 ## Supported commands
 
 Commands are entered in the message field with a leading `/`. Netsplit sends

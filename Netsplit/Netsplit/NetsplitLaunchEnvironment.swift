@@ -8,7 +8,13 @@ enum NetsplitLaunchEnvironment {
     }
 
     static func isTestMode(environment: [String: String]) -> Bool {
-        guard let value = environment[testModeKey]?.lowercased() else { return false }
-        return value == "1" || value == "true" || value == "yes"
+        if let value = environment[testModeKey]?.lowercased(),
+           value == "1" || value == "true" || value == "yes" {
+            return true
+        }
+        // Also protect custom test plans that omit NETSPLIT_TEST_MODE.
+        return ["XCTestConfigurationFilePath", "XCTestBundlePath"].contains {
+            !(environment[$0] ?? "").isEmpty
+        }
     }
 }

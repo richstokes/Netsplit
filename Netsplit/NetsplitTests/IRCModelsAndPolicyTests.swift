@@ -4,8 +4,8 @@ import SwiftUI
 import Testing
 @testable import Netsplit
 
-// These tests share UserDefaults.standard and include AppKit/SwiftUI integration
-// checks whose run-loop work must not overlap another test in this suite.
+// AppKit/SwiftUI integration checks have run-loop work that must not overlap.
+// Each state instance uses isolated preferences and in-memory credentials in test mode.
 @Suite("IRC models and state policies", .serialized)
 struct IRCModelsAndPolicyTests {
     @Test("IRC URLs require confirmation before connecting to unknown servers")
@@ -32,27 +32,11 @@ struct IRCModelsAndPolicyTests {
     @Test("DCC offers stay dormant until the global opt-in is enabled")
     @MainActor
     func gatesDCCOffersBehindGlobalSetting() throws {
-        let defaults = UserDefaults.standard
-        let key = IRCDCCPreferences.receivesFilesKey
-        let previousValue = defaults.object(forKey: key)
-        let automaticSavingKey = IRCDCCPreferences.automaticallySavesFilesKey
-        let previousAutomaticSavingValue = defaults.object(forKey: automaticSavingKey)
-        defaults.removeObject(forKey: key)
-        defaults.removeObject(forKey: automaticSavingKey)
-        defer {
-            if let previousValue {
-                defaults.set(previousValue, forKey: key)
-            } else {
-                defaults.removeObject(forKey: key)
-            }
-            if let previousAutomaticSavingValue {
-                defaults.set(previousAutomaticSavingValue, forKey: automaticSavingKey)
-            } else {
-                defaults.removeObject(forKey: automaticSavingKey)
-            }
-        }
+        let suiteName = "Netsplit.DCCPolicyTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let state = IRCAppState()
+        let state = IRCAppState(defaults: defaults)
         let profile = try #require(state.profiles.first)
         let localNickname = configuredNickname(in: state, for: profile)
         let sender = "DCC\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"

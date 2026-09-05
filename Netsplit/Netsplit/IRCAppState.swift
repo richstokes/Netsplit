@@ -301,11 +301,28 @@ final class IRCAppState: ObservableObject {
     )
 
     private let defaults: UserDefaults
+    private let ownedDefaultsSuiteName: String?
     private let credentialStore: any IRCCredentialStore
 
-    init(defaults: UserDefaults = .standard, credentialStore: (any IRCCredentialStore)? = nil) {
+    init(defaults suppliedDefaults: UserDefaults? = nil, credentialStore: (any IRCCredentialStore)? = nil) {
+        let isTesting = NetsplitLaunchEnvironment.currentProcessIsInTestMode
+        let suiteName = suppliedDefaults == nil && isTesting
+            ? "Netsplit.AppStateTests.\(UUID().uuidString)" : nil
+        let defaults: UserDefaults
+        if let suppliedDefaults {
+            defaults = suppliedDefaults
+        } else if let suiteName {
+            guard let isolatedDefaults = UserDefaults(suiteName: suiteName) else {
+                fatalError("Could not create isolated test preferences")
+            }
+            defaults = isolatedDefaults
+        } else {
+            defaults = .standard
+        }
         self.defaults = defaults
-        self.credentialStore = credentialStore ?? IRCKeychainCredentialStore()
+        self.ownedDefaultsSuiteName = suiteName
+        self.credentialStore = credentialStore
+            ?? (isTesting ? IRCInMemoryCredentialStore() : IRCKeychainCredentialStore())
         let legacyAccountNickname = NSFullUserName().replacingOccurrences(of: " ", with: "").lowercased()
         let savedNickname = defaults.string(forKey: "nickname")
         if let savedNickname,
@@ -357,6 +374,12 @@ final class IRCAppState: ObservableObject {
             requestNotificationAuthorization()
         }
         if receivesDCCFiles { removeStaleDCCPartialFiles() }
+    }
+
+    deinit {
+        if let ownedDefaultsSuiteName {
+            defaults.removePersistentDomain(forName: ownedDefaultsSuiteName)
+        }
     }
 
     var activeProfiles: [ServerProfile] {

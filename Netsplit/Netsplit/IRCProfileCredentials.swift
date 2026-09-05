@@ -16,6 +16,19 @@ struct IRCKeychainCredentialStore: IRCCredentialStore {
     }
 }
 
+/// Used by test-host state instances so they cannot read or alter saved credentials.
+final class IRCInMemoryCredentialStore: IRCCredentialStore {
+    private var values: [String: String] = [:]
+
+    func value(for account: String) throws -> String {
+        values[account] ?? ""
+    }
+
+    func set(_ value: String, for account: String) throws {
+        values[account] = value.isEmpty ? nil : value
+    }
+}
+
 /// A nil field means its saved value could not be read, not that it is empty.
 struct IRCProfileCredentialSnapshot {
     var serverPassword: String? = ""
