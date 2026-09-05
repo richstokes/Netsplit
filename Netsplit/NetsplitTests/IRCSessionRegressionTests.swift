@@ -135,6 +135,168 @@ struct IRCSessionRegressionTests {
         try await waitForSessionCondition { server.lines.filter { $0 == "JOIN #lookup" }.count == 2 }
     }
 
+    @Test("A forwarded JOIN replaces its placeholder and follows the destination", arguments: [false, true])
+    func forwardedJoin(selectPlaceholder: Bool) async throws {
+        let server = try SessionTestServer()
+        defer { server.stop() }
+        try await waitForSessionCondition { server.port != nil }
+        let context = try SessionTestContext(port: #require(server.port))
+        defer { context.close() }
+        context.state.connect(context.profile)
+        try await waitForSessionCondition { context.isOnline }
+        context.state.selection = context.serverItem
+        context.state.send("/join #chat", to: context.serverItem)
+        try await waitForSessionCondition { server.lines.contains("JOIN #chat") }
+        let source = try #require(context.state.channels.first { $0.name == "#chat" })
+        if selectPlaceholder { context.state.selection = .channel(source.id) }
+        server.send(":review 470 ReviewUser #CHAT ##chat :Forwarding to another channel")
+        try await server.synchronize()
+        let target = try #require(context.state.channels.first { $0.name == "##chat" })
+        #expect(!context.state.channels.contains { $0.id == source.id })
+        #expect(context.state.selection == .channel(target.id))
+        #expect(!context.state.isJoinedChannel(named: "##chat", on: context.profile.id))
+        server.send(":ReviewUser!u@h JOIN ##chat")
+        try await server.synchronize()
+        #expect(context.state.isJoinedChannel(named: "##chat", on: context.profile.id))
+        #expect(context.messages(in: .channel(target.id)).contains { $0.text == "Redirected from #CHAT to ##chat." })
+        #expect(!context.allMessages.contains { $0.text.hasPrefix("Joining ") })
+        #expect(!server.lines.contains("JOIN ##chat"))
+        #expect(!server.lines.contains { $0.hasPrefix("PART ") })
+    }
+
+    @Test("A redirect reuses an existing destination without stealing focus", arguments: [false, true])
+    func forwardedJoinToExistingChannel(alreadyJoined: Bool) async throws {
+        let server = try SessionTestServer()
+        defer { server.stop() }
+        try await waitForSessionCondition { server.port != nil }
+        let context = try SessionTestContext(port: #require(server.port))
+        defer { context.close() }
+        context.state.connect(context.profile)
+        try await waitForSessionCondition { context.isOnline }
+        context.state.send("/join ##chat", to: context.serverItem)
+        try await waitForSessionCondition { server.lines.contains("JOIN ##chat") }
+        if alreadyJoined { server.send(":ReviewUser!u@h JOIN ##chat") }
+        server.send(":Alice!u@h PRIVMSG ##chat :Existing destination history")
+        try await server.synchronize()
+        let target = try #require(context.state.channels.first { $0.name == "##chat" })
+        context.state.send("/join #chat", to: context.serverItem)
+        try await waitForSessionCondition { server.lines.contains("JOIN #chat") }
+        context.state.send("/query Alice hello", to: context.serverItem)
+        let directMessage = try #require(context.state.directMessages.first { $0.name == "Alice" })
+        context.state.selection = .directMessage(directMessage.id)
+        let selection = context.state.selection
+        server.send(":review 470 ReviewUser #chat ##chat :Forwarding to another channel")
+        if !alreadyJoined { server.send(":ReviewUser!u@h JOIN ##chat") }
+        try await server.synchronize()
+        #expect(context.state.channels.count == 1)
+        #expect(context.state.channels.first?.id == target.id)
+        #expect(context.state.selection == selection)
+        #expect(context.messages(in: .channel(target.id)).contains { $0.text == "Existing destination history" })
+        #expect(!context.allMessages.contains { $0.text.hasPrefix("Joining ") })
+    }
+
+    @Test("Chained redirects correlate a destination failure and allow retry")
+    func forwardedJoinFailure() async throws {
+        let server = try SessionTestServer()
+        defer { server.stop() }
+        try await waitForSessionCondition { server.port != nil }
+        let context = try SessionTestContext(port: #require(server.port))
+        defer { context.close() }
+        context.state.connect(context.profile)
+        try await waitForSessionCondition { context.isOnline }
+        context.state.send("/join #chat", to: context.serverItem)
+        try await waitForSessionCondition { server.lines.contains("JOIN #chat") }
+        server.send(":review 470 ReviewUser #chat ##chat :Forwarding\r\n:review 470 ReviewUser ##chat #final :Forwarding\r\n:review 473 ReviewUser #final :Invite only")
+        try await server.synchronize()
+        #expect(context.state.channels.isEmpty)
+        #expect(context.messages(in: context.serverItem).contains { $0.text == "Could not join #final: Invite only" })
+        server.confirmsJoins = true
+        context.state.send("/join #chat", to: context.serverItem)
+        try await waitForSessionCondition { context.state.isJoinedChannel(named: "#chat", on: context.profile.id) }
+    }
+
+    @Test("An unanswered redirected join times out at the destination")
+    func forwardedJoinTimeout() async throws {
+        let server = try SessionTestServer()
+        defer { server.stop() }
+        try await waitForSessionCondition { server.port != nil }
+        let context = try SessionTestContext(port: #require(server.port))
+        defer { context.close() }
+        context.state.connect(context.profile)
+        try await waitForSessionCondition { context.isOnline }
+        context.state.selection = context.serverItem
+        context.state.send("/join #chat", to: context.serverItem)
+        try await waitForSessionCondition { server.lines.contains("JOIN #chat") }
+        server.send(":review 470 ReviewUser #chat ##chat :Forwarding")
+        try await server.synchronize()
+        try await waitForSessionCondition(timeout: 25) {
+            context.messages(in: context.serverItem).contains {
+                $0.text == "Could not join ##chat: The server did not confirm the join. Try joining again."
+            }
+        }
+        #expect(context.state.channels.isEmpty)
+        #expect(!context.allMessages.contains { $0.text.hasPrefix("Could not join #chat:") })
+        #expect(context.state.selection == context.serverItem)
+        server.confirmsJoins = true
+        context.state.send("/join ##chat", to: context.serverItem)
+        try await waitForSessionCondition { context.state.isJoinedChannel(named: "##chat", on: context.profile.id) }
+    }
+
+    @Test("A redirected rejoin preserves source history and completes post-join setup", arguments: [false, true])
+    func forwardedRejoin(selectSource: Bool) async throws {
+        let server = try SessionTestServer()
+        defer { server.stop() }
+        try await waitForSessionCondition { server.port != nil }
+        let context = try SessionTestContext(
+            port: #require(server.port),
+            commands: IRCOnConnectCommandPhases(afterFavoritesJoined: ["/mode ReviewUser +i"])
+        )
+        defer { context.close() }
+        context.state.connect(context.profile)
+        try await waitForSessionCondition { context.isOnline && server.lines.contains("MODE ReviewUser +i") }
+        server.send(":ReviewUser!u@h JOIN #chat\r\n:Alice!u@h PRIVMSG #chat :Keep source history")
+        try await server.synchronize()
+        let source = try #require(context.state.channels.first { $0.name == "#chat" })
+        context.state.selection = selectSource ? .channel(source.id) : context.serverItem
+        context.state.reconnect(context.profile)
+        try await waitForSessionCondition { context.isOnline && server.lines.contains("JOIN #chat") }
+        server.send(":review 470 ReviewUser #chat ##chat :Forwarding")
+        try await server.synchronize()
+        #expect(server.lines.filter { $0 == "MODE ReviewUser +i" }.count == 1)
+        server.send(":ReviewUser!u@h JOIN ##chat")
+        try await waitForSessionCondition { server.lines.filter { $0 == "MODE ReviewUser +i" }.count == 2 }
+        let target = try #require(context.state.channels.first { $0.name == "##chat" })
+        #expect(context.state.selection == (selectSource ? .channel(target.id) : context.serverItem))
+        #expect(context.messages(in: .channel(source.id)).contains { $0.text == "Keep source history" })
+        #expect(context.messages(in: .channel(source.id)).contains { $0.text == "Redirected from #chat to ##chat." })
+        #expect(!context.allMessages.contains { $0.text.hasPrefix("Rejoining ") || $0.text.hasPrefix("Joining ") })
+    }
+
+    @Test("Unrelated or malformed redirects do not consume a pending join", arguments: [
+        ":review 470 ReviewUser #other ##chat :Forwarding",
+        ":review 470 ReviewUser #chat #CHAT :Forwarding",
+        ":review 470 ReviewUser #chat :Forwarding",
+        ":review 470 ReviewUser #chat :#missing destination",
+        ":review 470 ReviewUser #chat nickname :Forwarding"
+    ])
+    func invalidJoinRedirect(line: String) async throws {
+        let server = try SessionTestServer()
+        defer { server.stop() }
+        try await waitForSessionCondition { server.port != nil }
+        let context = try SessionTestContext(port: #require(server.port))
+        defer { context.close() }
+        context.state.connect(context.profile)
+        try await waitForSessionCondition { context.isOnline }
+        context.state.send("/join #chat", to: context.serverItem)
+        try await waitForSessionCondition { server.lines.contains("JOIN #chat") }
+        server.send(line)
+        server.send(":ReviewUser!u@h JOIN #chat")
+        try await server.synchronize()
+        #expect(context.state.channels.map(\.name) == ["#chat"])
+        #expect(context.state.isJoinedChannel(named: "#chat", on: context.profile.id))
+        #expect(!context.allMessages.contains { $0.text.hasPrefix("Joining ") })
+    }
+
     @Test("Failed automatic rejoins retain history and permit a manual retry")
     func failedRejoinCanBeRetried() async throws {
         let server = try SessionTestServer()

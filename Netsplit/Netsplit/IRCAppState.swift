@@ -2352,10 +2352,16 @@ final class IRCAppState: ObservableObject {
                   pendingJoin.statusMessageID == joiningMessage.id else { return }
             self.failPendingJoin(pendingJoin, reason: "The join request could not be sent.")
         }
+        scheduleJoinTimeout(statusMessageID: joiningMessage.id, serverID: profile.id)
+    }
+
+    private func scheduleJoinTimeout(statusMessageID: UUID, serverID: UUID) {
+        let sessionID = sessionIDs[serverID]
         DispatchQueue.main.asyncAfter(deadline: .now() + automaticJoinCompletionTimeout) { [weak self] in
-            guard let self, self.sessionIDs[profile.id] == sessionID,
-                  let pendingJoin = self.pendingJoins[requestKey],
-                  pendingJoin.statusMessageID == joiningMessage.id else { return }
+            guard let self, self.sessionIDs[serverID] == sessionID,
+                  let pendingJoin = self.pendingJoins.values.first(where: {
+                      $0.serverID == serverID && $0.statusMessageID == statusMessageID
+                  }) else { return }
             self.failPendingJoin(pendingJoin, reason: "The server did not confirm the join. Try joining again.")
         }
     }
@@ -3453,11 +3459,9 @@ final class IRCAppState: ObservableObject {
                     let topicSuffix = topic.isEmpty ? "" : " Topic: \(topic)"
                     appendChannelEvent("Joined \(channelName).\(topicSuffix)", kind: .join, channelID: channel.id)
                     if let sessionID = sessionIDs[profile.id] {
-                        completeAutomaticJoinAttempt(
-                            channelName,
-                            for: profile,
-                            sessionID: sessionID
-                        )
+                        for name in [channelName] + (pendingJoin?.redirectedFromChannels ?? []) {
+                            completeAutomaticJoinAttempt(name, for: profile, sessionID: sessionID)
+                        }
                     }
                 } else {
                     appendChannelEvent("\(sender) joined \(channelName).", kind: .join, channelID: channel.id)
@@ -3657,6 +3661,10 @@ final class IRCAppState: ObservableObject {
             if !handleJoinError(wire, serverID: profile.id),
                !handleInviteError(wire, serverID: profile.id),
                !handleModerationError(wire, serverID: profile.id) {
+                appendUnhandledNumericError(wire, profile: profile)
+            }
+        case "470":
+            if !handleJoinRedirect(wire, profile: profile) {
                 appendUnhandledNumericError(wire, profile: profile)
             }
         case "405", "471", "474", "475", "476", "477", "489":
@@ -3888,6 +3896,71 @@ final class IRCAppState: ObservableObject {
         pendingOutgoingEchoes[serverID]?.first(where: { $0.label == label })?.destination
     }
 
+    private func handleJoinRedirect(_ wire: IRCWireMessage, profile: ServerProfile) -> Bool {
+        let serverID = profile.id
+        // 470 <nick> <requested channel> <destination channel> :reason
+        guard wire.parameters.count >= 3,
+              let sourceName = wire.parameter(at: 1),
+              let targetName = wire.parameter(at: 2),
+              isChannelName(sourceName, serverID: serverID),
+              isChannelName(targetName, serverID: serverID),
+              !identifiersEqual(sourceName, targetName, serverID: serverID),
+              var pending = pendingJoins[joinKey(serverID: serverID, channel: sourceName)],
+              let source = channels.first(where: { $0.id == pending.channelID }),
+              channelJoinInstants[source.id] == nil else { return false }
+
+        let shouldSelect = selection == .channel(source.id)
+            || (pending.selectsConversationOnSuccess && selection == pending.destination)
+        let targetKey = joinKey(serverID: serverID, channel: targetName)
+        let existingTarget = existingChannel(named: targetName, serverID: serverID)
+        let target = existingTarget ?? channel(named: targetName, serverID: serverID)
+        let targetPending = pendingJoins[targetKey]
+        let redirectMessage = "Redirected from \(sourceName) to \(targetName)."
+
+        pendingJoins.removeValue(forKey: joinKey(serverID: serverID, channel: sourceName))
+        conversations[source.id]?.removeAll { $0.id == pending.statusMessageID }
+        if pending.preservesConversationOnFailure {
+            // A rejoin can be forwarded too; keep the original transcript in its own channel.
+            appendSystem(redirectMessage, for: .channel(source.id))
+        } else {
+            removeChannelConversation(source)
+        }
+        if shouldSelect { selection = .channel(target.id) }
+        appendSystem(redirectMessage, for: .channel(target.id))
+
+        pending.redirectedFromChannels += [pending.channel] + (targetPending?.redirectedFromChannels ?? [])
+        pending.channel = targetName
+        pending.channelID = target.id
+        pending.topic = targetPending?.topic ?? "" // Only retain the destination's listed topic.
+        pending.preservesConversationOnFailure = targetPending?.preservesConversationOnFailure ?? (existingTarget != nil)
+        if let targetPending {
+            conversations[target.id]?.removeAll { $0.id == targetPending.statusMessageID }
+            if !shouldSelect {
+                pending.destination = targetPending.destination
+                pending.selectsConversationOnSuccess = targetPending.selectsConversationOnSuccess
+            }
+        }
+        if pending.destination == .channel(source.id) && !channels.contains(where: { $0.id == source.id }) {
+            pending.destination = .server(serverID)
+        }
+        if channelJoinInstants[target.id] != nil {
+            pendingJoins.removeValue(forKey: targetKey)
+            if let sessionID = sessionIDs[serverID] {
+                for name in [targetName] + pending.redirectedFromChannels {
+                    completeAutomaticJoinAttempt(name, for: profile, sessionID: sessionID)
+                }
+            }
+        } else {
+            let joining = IRCMessage(sender: "System", text: "Joining \(targetName)…", isSystem: true)
+            pending.statusMessageID = joining.id
+            pendingJoins[targetKey] = pending
+            append(joining, for: .channel(target.id))
+            // The server performs the forwarded JOIN; only wait for its confirmation.
+            scheduleJoinTimeout(statusMessageID: joining.id, serverID: serverID)
+        }
+        return true
+    }
+
     @discardableResult
     private func handleJoinError(_ wire: IRCWireMessage, serverID: UUID) -> Bool {
         let responseParameters = wire.parameters.dropFirst()
@@ -3905,11 +3978,9 @@ final class IRCAppState: ObservableObject {
         pendingJoins.removeValue(forKey: joinKey(serverID: serverID, channel: pendingJoin.channel))
         if let profile = profiles.first(where: { $0.id == serverID }),
            let sessionID = sessionIDs[serverID] {
-            completeAutomaticJoinAttempt(
-                pendingJoin.channel,
-                for: profile,
-                sessionID: sessionID
-            )
+            for name in [pendingJoin.channel] + pendingJoin.redirectedFromChannels {
+                completeAutomaticJoinAttempt(name, for: profile, sessionID: sessionID)
+            }
         }
         if let channel = channels.first(where: { $0.id == pendingJoin.channelID }) {
             if pendingJoin.preservesConversationOnFailure {
@@ -6461,6 +6532,7 @@ private struct PendingJoin {
     var topic: String
     var preservesConversationOnFailure = false
     var selectsConversationOnSuccess = false
+    var redirectedFromChannels: [String] = []
 }
 
 private struct PendingInvite {
