@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import Network
 import Security
@@ -9,6 +10,65 @@ import Testing
 @Suite("IRC session regressions", .serialized)
 @MainActor
 struct IRCSessionRegressionTests {
+    @Test("Disconnecting one server clears only its requests and preserves the other server's identical targets")
+    func serverRequestOwnership() async throws {
+        let firstServer = try SessionTestServer()
+        let secondServer = try SessionTestServer()
+        defer { firstServer.stop(); secondServer.stop() }
+        try await waitForSessionCondition { firstServer.port != nil && secondServer.port != nil }
+        let context = try SessionTestContext(port: #require(firstServer.port))
+        defer { context.close() }
+        let secondID = UUID()
+        let result = context.state.addProfile(
+            id: secondID, name: "Second Server", hostname: "127.0.0.1",
+            port: try #require(secondServer.port), useTLS: false, autoConnect: false,
+            nicknameOverride: "", realNameOverride: "", mentionNotificationsOverride: nil,
+            credentials: .init(), useSASL: false, saslUsername: "", useSSHTunnel: false,
+            sshHostname: "", sshPort: 22, sshUsername: "", sshKeyFilename: nil
+        )
+        #expect(result.succeeded)
+        let secondProfile = try #require(context.state.profiles.first { $0.id == secondID })
+        defer { context.state.disconnect(secondProfile) }
+        context.state.connect(context.profile)
+        context.state.connect(secondProfile)
+        try await waitForSessionCondition {
+            context.isOnline && context.state.canBrowseChannels(for: secondProfile)
+        }
+        firstServer.send(":ReviewUser!u@h JOIN #shared")
+        secondServer.send(":ReviewUser!u@h JOIN #shared")
+        try await firstServer.synchronize()
+        try await secondServer.synchronize()
+        let firstChannel = try #require(context.state.channels.first { $0.serverID == context.profile.id })
+        let secondChannel = try #require(context.state.channels.first { $0.serverID == secondID })
+        let firstItem = SidebarItem.channel(firstChannel.id)
+        let secondItem = SidebarItem.channel(secondChannel.id)
+        context.state.setDraft("Retain first draft", for: firstItem)
+        context.state.setDraft("Retain second draft", for: secondItem)
+        context.state.requestWhois(for: "Alice", from: firstItem)
+        context.state.requestWhois(for: "Alice", from: secondItem)
+        try await waitForSessionCondition {
+            firstServer.lines.contains("WHOIS Alice") && secondServer.lines.contains("WHOIS Alice")
+        }
+
+        context.state.disconnect(context.profile)
+        secondServer.send(":review 311 ReviewUser ALICE user second.invalid * :Second result")
+        try await secondServer.synchronize()
+        #expect(context.messages(in: secondItem).contains { $0.text.contains("Second result") })
+        #expect(!context.messages(in: firstItem).contains { $0.text.contains("Second result") })
+        #expect(!context.state.isJoinedChannel(named: "#shared", on: context.profile.id))
+        #expect(context.state.isJoinedChannel(named: "#shared", on: secondID))
+        #expect(context.state.draft(for: firstItem) == "Retain first draft")
+        #expect(context.state.draft(for: secondItem) == "Retain second draft")
+
+        // A reply without a new request must not inherit the disconnected
+        // session's destination when this server reconnects.
+        context.state.connect(context.profile)
+        try await waitForSessionCondition { context.isOnline }
+        firstServer.send(":review 311 ReviewUser Alice user first.invalid * :Old request result")
+        try await firstServer.synchronize()
+        #expect(!context.messages(in: firstItem).contains { $0.text.contains("Old request result") })
+    }
+
     @Test("Unlabeled message rejections are shown in the recipient's conversation")
     func unlabeledMessageRejection() async throws {
         let server = try SessionTestServer()
@@ -515,7 +575,12 @@ struct IRCSessionRegressionTests {
         defer { context.close() }
         context.state.connect(context.profile)
         try await waitForSessionCondition { context.isOnline }
+        var publications = 0
+        let subscription = context.state.objectWillChange.sink { publications += 1 }
+        defer { subscription.cancel() }
         context.state.send("/list", to: context.serverItem)
+        #expect(publications > 0)
+        let publicationsBeforeRows = publications
         let wires = (0..<16_000).map {
             IRCWireMessage(line: ":review 322 ReviewUser #channel\($0) \($0 + 1) :Topic")!
         }
@@ -526,10 +591,14 @@ struct IRCSessionRegressionTests {
             try #require(IRCWireMessage(line: ":review 322 ReviewUser #CHANNEL0 99999 :Duplicate")),
             profile: context.profile
         )
+        // Buffered rows must not invalidate the workspace individually. The
+        // directory's flush must still reach the app subscription used by UI.
+        #expect(publications == publicationsBeforeRows)
         context.state.handle(
             try #require(IRCWireMessage(line: ":review 323 ReviewUser :End of LIST")),
             profile: context.profile
         )
+        #expect(publications > publicationsBeforeRows)
         let listings = context.state.channelListings(for: context.profile.id)
         #expect(listings.count == 16_000)
         #expect(listings.first?.name == "#channel15999")

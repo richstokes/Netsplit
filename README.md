@@ -128,6 +128,21 @@ fixtures: volatile read overrides do not stop app code from writing persistent
 preferences. Run local probes with the Debug configuration; do not launch a
 Release build against live settings to test fixture data.
 
+State ownership follows its lifetime. `IRCAppState` coordinates user actions
+and protocol events; `IRCConversationStore` owns transcripts, drafts, composer
+history, and conversation removal. `IRCChannelState` keeps reconnect information
+separate from live membership and ban requests. `IRCServerSession` owns registration,
+on-connect sequencing, and `IRCServerRequests`, so transport replacement retires
+all request correlation together. `IRCChannelDirectory` owns LIST staging and
+caching, and `IRCDCCCoordinator` owns file-offer and receiver lifetimes.
+
+Disconnect retains conversations but resets their live channel state. Closing a
+conversation removes its entire record; deleting a server removes all its
+records, including its server transcript. Transcript and member changes use
+conversation-scoped revision signals; sidebar, topic, and request-presentation
+changes notify the app's observers. Keep those publication boundaries when
+adding state so message traffic does not redraw the entire workspace.
+
 ## Supported commands
 
 Commands are entered in the message field with a leading `/`. Netsplit sends
