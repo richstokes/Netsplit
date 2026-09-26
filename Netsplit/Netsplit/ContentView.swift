@@ -1755,38 +1755,49 @@ private struct ConversationView: View {
 
     private func completeRecipient() -> Bool {
         guard isChannel,
-              let context = IRCComposerCompletion.recipientContext(in: draft) else { return false }
-
-        if var completion = tabCompletion,
-           completion.command == context.command,
-           completion.completedDraft == draft,
-           !completion.candidates.isEmpty {
-            completion.index = (completion.index + 1) % completion.candidates.count
-            draft.replaceSubrange(context.range, with: completion.candidates[completion.index])
-            completion.completedDraft = draft
-            tabCompletion = completion
-            return true
-        }
-
-        let candidates = state.members(for: selection)
-            .map(\.nickname)
-            .filter { $0.lowercased().hasPrefix(context.prefix.lowercased()) }
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-        guard let firstCandidate = candidates.first else { return false }
-
-        draft.replaceSubrange(context.range, with: firstCandidate)
-        tabCompletion = RecipientTabCompletion(
-            command: context.command,
-            candidates: candidates,
-            index: 0,
-            completedDraft: draft
-        )
+              let completion = IRCComposerCompletion.recipientCompletion(
+                in: draft,
+                nicknames: state.members(for: selection).map(\.nickname),
+                suffix: state.nicknameCompletionSuffix,
+                continuing: tabCompletion
+              ) else { return false }
+        draft = completion.completedDraft
+        tabCompletion = completion
         return true
     }
 
 }
 
 enum IRCComposerCompletion {
+    static func recipientCompletion(
+        in input: String,
+        nicknames: [String],
+        suffix: String,
+        continuing previous: RecipientTabCompletion? = nil
+    ) -> RecipientTabCompletion? {
+        // Continue before parsing: an appended space no longer belongs to the
+        // nickname token, but repeated Tab presses must replace that same nick.
+        if var completion = previous, completion.completedDraft == input {
+            completion.index = (completion.index + 1) % completion.candidates.count
+            return completion
+        }
+
+        guard let context = recipientContext(in: input) else { return nil }
+        let candidates = nicknames
+            .filter { $0.lowercased().hasPrefix(context.prefix.lowercased()) }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        guard !candidates.isEmpty else { return nil }
+
+        let trimmedSuffix = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let addressesRecipient = context.command == nil && context.range.lowerBound == input.startIndex
+        let appendedSuffix = addressesRecipient && !trimmedSuffix.isEmpty ? trimmedSuffix + " " : ""
+        return RecipientTabCompletion(
+            candidates: candidates,
+            textBeforeRecipient: String(input[..<context.range.lowerBound]),
+            textAfterRecipient: appendedSuffix + String(input[context.range.upperBound...])
+        )
+    }
+
     static func recipientContext(in input: String) -> RecipientCompletionContext? {
         guard input.first == "/" else {
             guard !input.isEmpty else { return nil }
@@ -2416,11 +2427,15 @@ struct RecipientCompletionContext {
     let range: Range<String.Index>
 }
 
-private struct RecipientTabCompletion {
-    let command: String?
-    let candidates: [String]
-    var index: Int
-    var completedDraft: String
+struct RecipientTabCompletion {
+    fileprivate let candidates: [String]
+    fileprivate let textBeforeRecipient: String
+    fileprivate let textAfterRecipient: String
+    fileprivate var index = 0
+
+    var completedDraft: String {
+        textBeforeRecipient + candidates[index] + textAfterRecipient
+    }
 }
 
 private struct CommandTabCompletion {

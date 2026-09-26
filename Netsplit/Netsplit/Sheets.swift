@@ -1107,6 +1107,12 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Typing") {
+                TextField("Nickname completion suffix", text: $state.nicknameCompletionSuffix, prompt: Text("None"))
+                Text("Added with a space when Tab completes the first nickname in a message. Use : or , or enter your own suffix. Leave empty for no suffix or added space.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Notifications") {
                 Toggle("Notify me when my username is mentioned", isOn: $state.mentionNotificationsEnabled)
                 Text("Individual server profiles can follow or override mention notifications.")

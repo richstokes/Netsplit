@@ -43,6 +43,9 @@ final class IRCAppState: ObservableObject {
     @Published var quitMessage: String {
         didSet { defaults.set(quitMessage, forKey: "quitMessage") }
     }
+    @Published var nicknameCompletionSuffix: String {
+        didSet { defaults.set(nicknameCompletionSuffix, forKey: "nicknameCompletionSuffix") }
+    }
     @Published var reconnectAutomatically: Bool {
         didSet {
             defaults.set(reconnectAutomatically, forKey: "reconnectAutomatically")
@@ -259,6 +262,7 @@ final class IRCAppState: ObservableObject {
         }
         let savedQuitMessage = defaults.string(forKey: "quitMessage")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         quitMessage = savedQuitMessage.isEmpty ? Self.defaultQuitMessage : savedQuitMessage
+        nicknameCompletionSuffix = defaults.string(forKey: "nicknameCompletionSuffix") ?? ":"
         reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
         showsCTCPCommandsInUserMenu = defaults.object(forKey: "showsCTCPCommandsInUserMenu") as? Bool ?? false

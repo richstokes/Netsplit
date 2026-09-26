@@ -108,6 +108,12 @@ While the jump palette is open, type any part of a server, channel, or nickname;
 use `↑` and `↓` to choose a result, `Return` to open it, or `Escape` to close the
 palette.
 
+In channel messages, `Tab` completes nicknames and repeated presses cycle through
+matches. At the start of a message it adds `: ` after the nickname. Change the
+**Nickname completion suffix** in **Settings → General → Typing** to use a comma
+or another suffix, or leave it empty to add neither punctuation nor a space.
+Nicknames completed within a sentence or as command arguments have no suffix.
+
 ## Development and tests
 
 Open `Netsplit/Netsplit.xcodeproj` and use the shared **Netsplit** scheme. Its
