@@ -90,9 +90,17 @@ enum IRCMessageSpacing: String, CaseIterable, Identifiable {
 enum IRCChatFont: String, CaseIterable, Identifiable {
     case system
     case rounded
+    case newYork
     case monospaced
+    case menlo
+    case courier
 
     static let `default`: IRCChatFont = .monospaced
+
+    /// Proportional faces, in picker order.
+    static let proportionalCases: [IRCChatFont] = [.system, .rounded, .newYork]
+    /// Fixed-width faces, in picker order.
+    static let monospacedCases: [IRCChatFont] = [.monospaced, .menlo, .courier]
 
     var id: Self { self }
 
@@ -100,33 +108,76 @@ enum IRCChatFont: String, CaseIterable, Identifiable {
         switch self {
         case .system: return "System (SF Pro)"
         case .rounded: return "SF Rounded"
+        case .newYork: return "New York"
         case .monospaced: return "SF Mono"
+        case .menlo: return "Menlo"
+        case .courier: return "Courier"
         }
     }
+
+    var isMonospaced: Bool { Self.monospacedCases.contains(self) }
 
     var design: Font.Design {
         switch self {
         case .system: return .default
         case .rounded: return .rounded
-        case .monospaced: return .monospaced
+        case .newYork: return .serif
+        case .monospaced, .menlo, .courier: return .monospaced
+        }
+    }
+
+    /// PostScript names for faces that are installed fonts rather than SF
+    /// designs. Both ship with macOS; if one is ever missing the face falls
+    /// back to SF Mono so the transcript keeps a fixed-width layout.
+    var postScriptNames: (regular: String, bold: String)? {
+        switch self {
+        case .menlo: return ("Menlo-Regular", "Menlo-Bold")
+        case .courier: return ("Courier", "Courier-Bold")
+        case .system, .rounded, .newYork, .monospaced: return nil
         }
     }
 
     func font(size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: design)
+        if let named = namedFont(size: size, bold: Self.isBold(weight)) {
+            return Font(named)
+        }
+        return .system(size: size, weight: weight, design: design)
     }
 
     func nsFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        if let named = namedFont(size: size, bold: weight.rawValue >= NSFont.Weight.semibold.rawValue) {
+            return named
+        }
         let base = NSFont.systemFont(ofSize: size, weight: weight)
         let systemDesign: NSFontDescriptor.SystemDesign?
         switch self {
         case .system: systemDesign = nil
         case .rounded: systemDesign = .rounded
-        case .monospaced: systemDesign = .monospaced
+        case .newYork: systemDesign = .serif
+        case .monospaced, .menlo, .courier: systemDesign = .monospaced
         }
         guard let systemDesign,
               let descriptor = base.fontDescriptor.withDesign(systemDesign) else { return base }
         return NSFont(descriptor: descriptor, size: size) ?? base
+    }
+
+    /// Resolves an installed font by PostScript name, or `nil` when it is not
+    /// available so callers can fall back to a system design.
+    static func installedFont(postScriptName: String, size: CGFloat) -> NSFont? {
+        guard let font = NSFont(name: postScriptName, size: size),
+              font.fontName == postScriptName else { return nil }
+        return font
+    }
+
+    private func namedFont(size: CGFloat, bold: Bool) -> NSFont? {
+        guard let postScriptNames else { return nil }
+        let name = bold ? postScriptNames.bold : postScriptNames.regular
+        return Self.installedFont(postScriptName: name, size: size)
+            ?? Self.installedFont(postScriptName: postScriptNames.regular, size: size)
+    }
+
+    private static func isBold(_ weight: Font.Weight) -> Bool {
+        [.semibold, .bold, .heavy, .black].contains(weight)
     }
 }
 

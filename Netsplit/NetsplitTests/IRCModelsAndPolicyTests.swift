@@ -2891,10 +2891,38 @@ struct IRCModelsAndPolicyTests {
 
     @Test("Chat typography defaults to SF Mono")
     func exposesChatFonts() {
-        #expect(IRCChatFont.allCases == [.system, .rounded, .monospaced])
+        #expect(IRCChatFont.allCases == [.system, .rounded, .newYork, .monospaced, .menlo, .courier])
+        #expect(IRCChatFont.proportionalCases + IRCChatFont.monospacedCases == IRCChatFont.allCases)
         #expect(IRCChatFont.default == .monospaced)
         #expect(IRCChatFont.system.label == "System (SF Pro)")
         #expect(IRCChatFont.monospaced.label == "SF Mono")
+        #expect(IRCChatFont.newYork.design == .serif)
+        #expect(!IRCChatFont.newYork.isMonospaced)
+        #expect(IRCChatFont.menlo.isMonospaced)
+        #expect(IRCChatFont.courier.isMonospaced)
+    }
+
+    @Test("Named chat fonts resolve to their installed faces with bold variants")
+    func resolvesNamedChatFonts() {
+        let menlo = IRCChatFont.menlo.nsFont(size: 15)
+        #expect(menlo.fontName == "Menlo-Regular")
+        #expect(menlo.isFixedPitch)
+        #expect(IRCChatFont.menlo.nsFont(size: 15, weight: .semibold).fontName == "Menlo-Bold")
+
+        let courier = IRCChatFont.courier.nsFont(size: 15)
+        #expect(courier.fontName == "Courier")
+        #expect(courier.isFixedPitch)
+        #expect(IRCChatFont.courier.nsFont(size: 15, weight: .bold).fontName == "Courier-Bold")
+
+        // SF faces keep using system fonts rather than a named lookup.
+        #expect(IRCChatFont.monospaced.nsFont(size: 15).isFixedPitch)
+        #expect(IRCChatFont.system.nsFont(size: 15).fontName.hasPrefix(".") || IRCChatFont.system.nsFont(size: 15).familyName?.hasPrefix(".") == true)
+    }
+
+    @Test("Missing named fonts are reported so the chat font can fall back")
+    func reportsMissingNamedFonts() {
+        #expect(IRCChatFont.installedFont(postScriptName: "Netsplit-NoSuchFont-\(UUID().uuidString)", size: 15) == nil)
+        #expect(IRCChatFont.installedFont(postScriptName: "Menlo-Regular", size: 15)?.fontName == "Menlo-Regular")
     }
 
     @Test("Message rendering recognizes IRC channel types and trims surrounding punctuation")

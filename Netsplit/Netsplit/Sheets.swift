@@ -1155,12 +1155,24 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 Picker("Chat font", selection: $state.chatFont) {
-                    ForEach(IRCChatFont.allCases) { chatFont in
-                        Text(chatFont.label)
-                            .font(chatFont.font(size: 13))
-                            .tag(chatFont)
+                    Section("Proportional") {
+                        ForEach(IRCChatFont.proportionalCases) { chatFont in
+                            Text(chatFont.label)
+                                .font(chatFont.font(size: 13))
+                                .tag(chatFont)
+                        }
+                    }
+                    Section("Monospaced") {
+                        ForEach(IRCChatFont.monospacedCases) { chatFont in
+                            Text(chatFont.label)
+                                .font(chatFont.font(size: 13))
+                                .tag(chatFont)
+                        }
                     }
                 }
+                Text("Monospaced fonts keep nicknames and timestamps aligned. All faces ship with macOS.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("Use distinct nickname colors", isOn: $state.usesColoredNicknames)
                 Toggle("Use monospace for server messages", isOn: $state.usesMonospacedServerMessages)
 

@@ -2935,8 +2935,8 @@ private struct MessageRow: View {
     private static let attributedTextCache = IRCMessageTextCache(countLimit: 5_500)
 
     private var serverMessageFont: Font {
-        let design: Font.Design = usesMonospacedServerMessages ? .monospaced : chatFont.design
-        return .system(size: textMetrics.bodySize, design: design)
+        let font: IRCChatFont = usesMonospacedServerMessages && !chatFont.isMonospaced ? .monospaced : chatFont
+        return font.font(size: textMetrics.bodySize)
     }
 
     @ViewBuilder
