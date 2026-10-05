@@ -101,6 +101,7 @@ listed in the app menus where applicable.
 | `⌘W` | Close the current conversation, leave the current channel, or disconnect the selected server. |
 | `⌘E` | Show or hide the server and channel sidebar. |
 | `⌘B` | Show or hide the channel member list. |
+| `⌘⇧T` | Show or hide the topic bar (conversation name, network, and topic) above messages. |
 | `⌘+` / `⌘-` | Increase or decrease transcript text size. |
 | `⌘0` | Restore the default transcript text size. |
 

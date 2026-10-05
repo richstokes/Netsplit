@@ -3635,6 +3635,28 @@ struct IRCModelsAndPolicyTests {
         #expect(signal.revision == 4)
     }
 
+    @Test("Topic bar visibility defaults to shown and persists across launches")
+    @MainActor
+    func persistsTopicBarVisibility() throws {
+        let suiteName = "Netsplit.TopicBarTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let state = IRCAppState(defaults: defaults)
+        #expect(state.showsTopicBar)
+
+        state.toggleTopicBar()
+        #expect(!state.showsTopicBar)
+        #expect(defaults.object(forKey: "showsTopicBar") as? Bool == false)
+
+        let reloaded = IRCAppState(defaults: defaults)
+        #expect(!reloaded.showsTopicBar)
+
+        reloaded.toggleTopicBar()
+        #expect(reloaded.showsTopicBar)
+        #expect(IRCAppState(defaults: defaults).showsTopicBar)
+    }
+
     @Test("Member list shortcut only applies to channels")
     @MainActor
     func ignoresMemberListToggleOutsideChannels() {

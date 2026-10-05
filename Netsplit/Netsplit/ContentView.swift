@@ -1462,62 +1462,72 @@ private struct ConversationView: View {
         )
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: textMetrics.spacing(13)) {
-                Image(systemName: selection.icon)
-                    .font(.system(size: textMetrics.size(17), weight: .semibold))
-                    .foregroundStyle(.tint)
-                    .frame(width: textMetrics.spacing(34), height: textMetrics.spacing(34))
-                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: textMetrics.size(18), weight: .semibold))
-                    HStack(spacing: textMetrics.spacing(5)) {
-                        Text(subtitle)
-                            .fontWeight(.medium)
-                            .lineLimit(1)
-                        if let channelTopic {
-                            Text("·")
-                                .foregroundStyle(.tertiary)
-                            Button {
-                                showsTopic.toggle()
-                            } label: {
-                                HStack(spacing: textMetrics.spacing(4)) {
-                                    Text(IRCMessageTextRenderer.plainText(channelTopic))
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-                                    Image(systemName: "chevron.down")
-                                        .font(.system(size: textMetrics.size(8), weight: .semibold))
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .layoutPriority(-1)
-                            .help("View the full channel topic")
-                            .accessibilityLabel("View channel topic")
-                            .accessibilityValue(IRCMessageTextRenderer.plainText(channelTopic))
-                            .popover(isPresented: $showsTopic, arrowEdge: .bottom) {
-                                ChannelTopicPopover(
-                                    topic: channelTopic,
-                                    channelTypes: state.channelTypes(for: selection),
-                                    rendersIRCFormatting: state.rendersIRCFormatting
-                                )
+    /// The header above the transcript: icon, conversation name, network, and
+    /// the channel topic (when one is set). Hidden by the "Hide Topic Bar"
+    /// preference.
+    @ViewBuilder
+    private var topicBar: some View {
+        HStack(spacing: textMetrics.spacing(13)) {
+            Image(systemName: selection.icon)
+                .font(.system(size: textMetrics.size(17), weight: .semibold))
+                .foregroundStyle(.tint)
+                .frame(width: textMetrics.spacing(34), height: textMetrics.spacing(34))
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: textMetrics.size(18), weight: .semibold))
+                HStack(spacing: textMetrics.spacing(5)) {
+                    Text(subtitle)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                    if let channelTopic {
+                        Text("·")
+                            .foregroundStyle(.tertiary)
+                        Button {
+                            showsTopic.toggle()
+                        } label: {
+                            HStack(spacing: textMetrics.spacing(4)) {
+                                Text(IRCMessageTextRenderer.plainText(channelTopic))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: textMetrics.size(8), weight: .semibold))
                             }
                         }
+                        .buttonStyle(.plain)
+                        .layoutPriority(-1)
+                        .help("View the full channel topic")
+                        .accessibilityLabel("View channel topic")
+                        .accessibilityValue(IRCMessageTextRenderer.plainText(channelTopic))
+                        .popover(isPresented: $showsTopic, arrowEdge: .bottom) {
+                            ChannelTopicPopover(
+                                topic: channelTopic,
+                                channelTypes: state.channelTypes(for: selection),
+                                rendersIRCFormatting: state.rendersIRCFormatting
+                            )
+                        }
                     }
-                    .font(.system(size: textMetrics.size(12)))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .font(.system(size: textMetrics.size(12)))
+                .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, textMetrics.spacing(22))
-            .padding(.vertical, textMetrics.spacing(13))
-            .ircBarBackground()
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, textMetrics.spacing(22))
+        .padding(.vertical, textMetrics.spacing(13))
+        .ircBarBackground()
 
-            Divider()
-                .ircDivider()
+        Divider()
+            .ircDivider()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if state.showsTopicBar {
+                topicBar
+            }
 
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
@@ -1593,24 +1603,30 @@ private struct ConversationView: View {
                     .ircBarBackground()
                 }
             }
-            .inspector(isPresented: memberListPresentation) {
-                if isChannel {
-                    ChannelMemberList(state: state, selection: selection)
-                        .id(selection)
-                        .inspectorColumnWidth(
-                            min: textMetrics.spacing(210),
-                            ideal: textMetrics.spacing(238),
-                            max: textMetrics.spacing(310)
-                        )
-                }
+        }
+        // The inspector must own the whole conversation column, header
+        // included. On macOS 26 the system split view adds a 52pt titlebar
+        // background (toolbar scroll pocket) at its own top edge, so attaching
+        // the inspector below the header rendered that pocket as a thick band
+        // under the header whenever the window toolbar uses the default
+        // (automatic) background.
+        .inspector(isPresented: memberListPresentation) {
+            if isChannel {
+                ChannelMemberList(state: state, selection: selection)
+                    .id(selection)
+                    .inspectorColumnWidth(
+                        min: textMetrics.spacing(210),
+                        ideal: textMetrics.spacing(238),
+                        max: textMetrics.spacing(310)
+                    )
             }
-            // A channel/DM switch changes whether the inspector is available,
-            // not the user's inspector preference. Treat that navigation as an
-            // immediate layout change while preserving the native animation for
-            // toolbar- and menu-driven inspector toggles.
-            .transaction(value: isChannel) { transaction in
-                transaction.disablesAnimations = true
-            }
+        }
+        // A channel/DM switch changes whether the inspector is available,
+        // not the user's inspector preference. Treat that navigation as an
+        // immediate layout change while preserving the native animation for
+        // toolbar- and menu-driven inspector toggles.
+        .transaction(value: isChannel) { transaction in
+            transaction.disablesAnimations = true
         }
         .onAppear {
 #if DEBUG

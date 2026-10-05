@@ -1198,6 +1198,10 @@ struct SettingsView: View {
                 Text("This also remembers changes made with the toolbar button or Command-B.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Toggle("Show topic bar", isOn: $state.showsTopicBar)
+                Text("Shows the conversation name, network, and channel topic above messages. This also remembers changes made with Command-Shift-T.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("Channel Events") {
                 Picker("Show joins, parts, quits, nickname, topic, and mode changes", selection: $state.channelEventVisibility) {

@@ -131,6 +131,12 @@ final class IRCAppState: ObservableObject {
     @Published var showsMemberList: Bool {
         didSet { defaults.set(showsMemberList, forKey: "showsMemberList") }
     }
+    /// Whether conversations show the header bar (name, network, and topic)
+    /// above the transcript. A single global preference, like the member
+    /// list, so the layout stays consistent when switching conversations.
+    @Published var showsTopicBar: Bool {
+        didSet { defaults.set(showsTopicBar, forKey: "showsTopicBar") }
+    }
     @Published var showsServerChannelPane = true
     @Published var isJumpPalettePresented = false
     @Published private(set) var workspaceFocusRequest: IRCWorkspaceFocusRequest?
@@ -281,6 +287,7 @@ final class IRCAppState: ObservableObject {
         automaticallyPreviewsImages = defaults.object(forKey: "automaticallyPreviewsImages") as? Bool ?? false
         channelEventVisibility = defaults.string(forKey: "channelEventVisibility").flatMap(IRCChannelEventVisibility.init(rawValue:)) ?? .alwaysShow
         showsMemberList = defaults.object(forKey: "showsMemberList") as? Bool ?? true
+        showsTopicBar = defaults.object(forKey: "showsTopicBar") as? Bool ?? true
         let savedTranscriptFontSize = defaults.object(forKey: "transcriptFontSize") as? Double ?? 16
         transcriptFontSize = min(max(savedTranscriptFontSize, 12), 24)
 
@@ -424,6 +431,10 @@ final class IRCAppState: ObservableObject {
 
     func toggleServerChannelPane() {
         showsServerChannelPane.toggle()
+    }
+
+    func toggleTopicBar() {
+        showsTopicBar.toggle()
     }
 
     func presentJumpPalette() {

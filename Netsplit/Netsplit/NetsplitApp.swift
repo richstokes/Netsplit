@@ -404,6 +404,10 @@ struct NetsplitApp: App {
                 }
                 .keyboardShortcut("b", modifiers: [.command])
                 .disabled(!state.canToggleMemberList)
+                Button(state.showsTopicBar ? "Hide Topic Bar" : "Show Topic Bar") {
+                    state.toggleTopicBar()
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
                 Button("Zoom In") { state.adjustTranscriptFontSize(by: 1) }
                     .keyboardShortcut("+", modifiers: [.command])
