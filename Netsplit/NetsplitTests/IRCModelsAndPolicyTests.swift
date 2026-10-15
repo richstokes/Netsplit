@@ -3748,6 +3748,54 @@ struct IRCModelsAndPolicyTests {
         #expect(reselectionRequest.id != secondRequest.id)
     }
 
+    @Test("Recreating the conversation window restores the composer's substitution choices")
+    @MainActor
+    func restoresSubstitutionsInConversationWindow() async throws {
+        let suiteName = "Netsplit.SubstitutionWindowTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let state = IRCAppState(defaults: defaults, credentialStore: IRCInMemoryCredentialStore())
+        let profile = state.profiles[0]
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        state.composerSubstitutions.set(false, for: .dashes)
+        state.composerSubstitutions.set(false, for: .quotes)
+
+        for opening in 0..<2 {
+            let hostingController = NSHostingController(
+                rootView: ContentView(state: state)
+                    .frame(width: 1_000, height: 700)
+            )
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 700),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            window.animationBehavior = .none
+            window.isReleasedWhenClosed = false
+            window.contentViewController = hostingController
+            window.orderFrontRegardless()
+            defer {
+                window.orderOut(nil)
+                window.contentViewController = nil
+                window.close()
+            }
+
+            try await Self.waitUntil {
+                Self.composer(in: hostingController.view) != nil
+            }
+            let composer = try #require(Self.composer(in: hostingController.view))
+            try await Self.waitUntil { window.firstResponder === composer }
+            #expect(!composer.isAutomaticDashSubstitutionEnabled)
+            #expect(composer.isAutomaticQuoteSubstitutionEnabled == (opening == 1))
+
+            if opening == 0 {
+                composer.toggleAutomaticQuoteSubstitution(nil)
+                #expect(state.composerSubstitutions.overrides[.quotes] == true)
+            }
+        }
+    }
+
     @Test("Native composer is reused and becomes first responder when focus is requested")
     @MainActor
     func focusesNativeComposer() async throws {

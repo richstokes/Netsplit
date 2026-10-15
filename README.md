@@ -116,6 +116,10 @@ matches. At the start of a message it adds `: ` after the nickname. Change the
 or another suffix, or leave it empty to add neither punctuation nor a space.
 Nicknames completed within a sentence or as command arguments have no suffix.
 
+The message field's **Substitutions** menu remembers your choices across windows
+and app launches. For example, turn off **Smart Dashes** to keep typed hyphens
+unchanged. Options you have not changed continue to use macOS defaults.
+
 ## Development and tests
 
 Open `Netsplit/Netsplit.xcodeproj` and use the shared **Netsplit** scheme. Its

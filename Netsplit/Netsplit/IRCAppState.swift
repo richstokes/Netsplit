@@ -227,6 +227,7 @@ final class IRCAppState: ObservableObject {
     private let defaults: UserDefaults
     private let ownedDefaultsSuiteName: String?
     private let credentialStore: any IRCCredentialStore
+    let composerSubstitutions: IRCComposerSubstitutionPreferences
 
     init(defaults suppliedDefaults: UserDefaults? = nil, credentialStore: (any IRCCredentialStore)? = nil) {
         let isTesting = NetsplitLaunchEnvironment.currentProcessIsInTestMode
@@ -244,6 +245,7 @@ final class IRCAppState: ObservableObject {
             defaults = .standard
         }
         self.defaults = defaults
+        self.composerSubstitutions = IRCComposerSubstitutionPreferences(defaults: defaults)
         self.ownedDefaultsSuiteName = suiteName
         self.credentialStore = credentialStore
             ?? (isTesting ? IRCInMemoryCredentialStore() : IRCKeychainCredentialStore())

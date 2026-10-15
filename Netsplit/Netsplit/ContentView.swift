@@ -1551,6 +1551,7 @@ private struct ConversationView: View {
                         ZStack(alignment: .topLeading) {
                             IRCComposerTextView(
                                 text: $draft,
+                                substitutions: state.composerSubstitutions,
                                 maximumUTF8Bytes: composerMaximumBytes,
                                 font: state.chatFont.nsFont(size: textMetrics.size(15)),
                                 workspaceFocus: $workspaceFocus,
@@ -1877,6 +1878,7 @@ enum IRCComposerCompletion {
 
 private struct IRCComposerTextView: NSViewRepresentable {
     @Binding var text: String
+    let substitutions: IRCComposerSubstitutionPreferences
     let maximumUTF8Bytes: Int?
     let font: NSFont
     let workspaceFocus: FocusState<IRCWorkspaceFocus?>.Binding
@@ -1922,6 +1924,7 @@ private struct IRCComposerTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onTab = onTab
         textView.onHistory = onHistory
+        textView.configureSubstitutions(using: substitutions)
         textView.onDidMoveToWindow = { [weak textView, weak coordinator = context.coordinator] in
             guard let textView, let coordinator else { return }
             coordinator.scheduleFocusIfNeeded(for: textView)
@@ -2094,65 +2097,6 @@ private struct IRCComposerTextView: NSViewRepresentable {
             }
             textView.scrollRangeToVisible(textView.selectedRange())
         }
-    }
-}
-
-private final class IRCComposerNativeTextView: NSTextView {
-    var onSubmit: (() -> Void)?
-    var onTab: (() -> Bool)?
-    var onHistory: ((IRCComposerHistoryDirection, String) -> String?)?
-    var onDidMoveToWindow: (() -> Void)?
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        onDidMoveToWindow?()
-    }
-
-    override func keyDown(with event: NSEvent) {
-        // Return and Tab belong to the input method while it is converting
-        // marked text (for example, choosing a CJK candidate). Let AppKit
-        // commit that composition before treating either key as a composer
-        // command.
-        if hasMarkedText() {
-            super.keyDown(with: event)
-            return
-        }
-
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if event.keyCode == 36 || event.keyCode == 76 {
-            if modifiers.contains(.shift) || modifiers.contains(.option) {
-                super.keyDown(with: event)
-            } else {
-                onSubmit?()
-            }
-            return
-        }
-        if event.keyCode == 48, !modifiers.contains(.shift) {
-            if onTab?() != true {
-                window?.selectNextKeyView(self)
-            }
-            return
-        }
-        if event.keyCode == 126 || event.keyCode == 125,
-           modifiers.isDisjoint(with: [.shift, .control, .option, .command]) {
-            let direction: IRCComposerHistoryDirection = event.keyCode == 126
-                ? .previous
-                : .next
-            if IRCComposerHistoryCaretPolicy.canNavigate(
-                direction,
-                in: string,
-                selectedRange: selectedRange()
-            ), let recalledDraft = onHistory?(direction, string) {
-                string = recalledDraft
-                setSelectedRange(NSRange(
-                    location: (recalledDraft as NSString).length,
-                    length: 0
-                ))
-                didChangeText()
-                return
-            }
-        }
-        super.keyDown(with: event)
     }
 }
 
