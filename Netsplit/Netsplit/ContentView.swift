@@ -109,49 +109,55 @@ struct ContentView: View {
                     )
                 }
             }
-            .toolbar {
-                ToolbarItemGroup(placement: .navigation) {
-                    Button { state.navigateBack() } label: {
-                        Label("Back", systemImage: "chevron.left")
-                    }
-                    .disabled(!state.canNavigateBack)
-                    .help("Back (⌘[)")
-                    .accessibilityHint("Returns to the previously viewed conversation")
-
-                    Button { state.navigateForward() } label: {
-                        Label("Forward", systemImage: "chevron.right")
-                    }
-                    .disabled(!state.canNavigateForward)
-                    .help("Forward (⌘])")
-                    .accessibilityHint("Moves to the next conversation in navigation history")
+        }
+        // Attach the toolbar to the split view, not the detail column. On
+        // macOS 15, a detail-column toolbar plus the conversation inspector
+        // makes SwiftUI insert a second tracking separator for the sidebar
+        // divider ("splitViewSeparator-0i" alongside "-0"), and AppKit throws
+        // "Cannot register more than one NSTrackingSeparatorToolbarItem that
+        // tracks the same divider" as soon as a conversation opens.
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button { state.navigateBack() } label: {
+                    Label("Back", systemImage: "chevron.left")
                 }
-                ToolbarItemGroup(placement: .primaryAction) {
-                    if state.selectedProfile != nil {
-                        Button { state.requestChannelListing() } label: {
-                            Label("Browse Channels…", systemImage: "list.bullet.rectangle")
-                        }
-                        .disabled(!state.canBrowseSelectedChannels)
-                        .accessibilityHint("Shows the channel list for the selected server")
-                    }
-                    if hasSelectedChannel {
-                        Button {
-                            banListChannel = state.selectedChannel
-                        } label: {
-                            Label("Bans…", systemImage: "shield.slash")
-                        }
-                        .help("View and manage channel bans")
-                        .accessibilityHint("Shows the ban list for the selected channel")
+                .disabled(!state.canNavigateBack)
+                .help("Back (⌘[)")
+                .accessibilityHint("Returns to the previously viewed conversation")
 
-                        Toggle(isOn: Binding(
-                            get: { state.showsMemberList },
-                            set: { _ in state.toggleMemberList() }
-                        )) {
-                            Label("Members", systemImage: "sidebar.right")
-                        }
-                        .toggleStyle(.button)
-                        .accessibilityLabel(state.showsMemberList ? "Hide Members" : "Show Members")
-                        .help(state.showsMemberList ? "Hide member list" : "Show member list")
+                Button { state.navigateForward() } label: {
+                    Label("Forward", systemImage: "chevron.right")
+                }
+                .disabled(!state.canNavigateForward)
+                .help("Forward (⌘])")
+                .accessibilityHint("Moves to the next conversation in navigation history")
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                if state.selectedProfile != nil {
+                    Button { state.requestChannelListing() } label: {
+                        Label("Browse Channels…", systemImage: "list.bullet.rectangle")
                     }
+                    .disabled(!state.canBrowseSelectedChannels)
+                    .accessibilityHint("Shows the channel list for the selected server")
+                }
+                if hasSelectedChannel {
+                    Button {
+                        banListChannel = state.selectedChannel
+                    } label: {
+                        Label("Bans…", systemImage: "shield.slash")
+                    }
+                    .help("View and manage channel bans")
+                    .accessibilityHint("Shows the ban list for the selected channel")
+
+                    Toggle(isOn: Binding(
+                        get: { state.showsMemberList },
+                        set: { _ in state.toggleMemberList() }
+                    )) {
+                        Label("Members", systemImage: "sidebar.right")
+                    }
+                    .toggleStyle(.button)
+                    .accessibilityLabel(state.showsMemberList ? "Hide Members" : "Show Members")
+                    .help(state.showsMemberList ? "Hide member list" : "Show member list")
                 }
             }
         }
