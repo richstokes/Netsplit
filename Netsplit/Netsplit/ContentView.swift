@@ -616,6 +616,7 @@ private struct SidebarView: View {
         List(selection: $listSelection) {
             Section {
                 Label("Connections", systemImage: "bolt.horizontal.circle")
+                    .labelStyle(.ircSidebar)
                     .font(.system(size: textMetrics.size(16), weight: .medium))
                     .padding(.vertical, textMetrics.spacing(2))
                     .tag(SidebarItem.connectionCenter)
@@ -664,6 +665,7 @@ private struct SidebarView: View {
                         ForEach(state.directMessages(for: profile)) { message in
                             HStack(spacing: 6) {
                                 Label(message.name, systemImage: "person.crop.circle")
+                                    .labelStyle(.ircSidebar)
                                 Spacer(minLength: 0)
                                 if state.isMuted(message) {
                                     Image(systemName: "bell.slash.fill")
@@ -960,6 +962,9 @@ private struct SidebarServerHeader: View {
     let activity: IRCServerActivity
     let onToggle: () -> Void
     @Environment(\.ircTextMetrics) private var textMetrics
+    @Environment(\.ircThemePalette) private var themePalette
+
+    private var accent: Color { themePalette?.accent ?? Color.accentColor }
 
     var body: some View {
         if isCollapsible {
@@ -973,7 +978,7 @@ private struct SidebarServerHeader: View {
                     if isCollapsed, let indicator = activity.indicator {
                         Image(systemName: indicator == .mention ? "at.circle.fill" : "circle.fill")
                             .font(.system(size: textMetrics.size(indicator == .mention ? 10 : 7), weight: .semibold))
-                            .foregroundStyle(indicator == .mention ? Color.accentColor : Color.primary)
+                            .foregroundStyle(indicator == .mention ? accent : Color.primary)
                             .accessibilityHidden(true)
                     }
                 }
@@ -1003,8 +1008,11 @@ private struct SidebarChannelLabel: View {
     let isMuted: Bool
 
     @Environment(\.ircTextMetrics) private var textMetrics
+    @Environment(\.ircThemePalette) private var themePalette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isPulseDimmed = false
+
+    private var accent: Color { themePalette?.accent ?? Color.accentColor }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1014,6 +1022,7 @@ private struct SidebarChannelLabel: View {
                     ? "at.circle.fill"
                     : (channel.hasUnread ? "number.circle.fill" : "number.circle")
             )
+            .labelStyle(.ircSidebar)
             .opacity(isPulseDimmed ? 0.42 : 1)
 
             Spacer(minLength: 0)
@@ -1032,7 +1041,7 @@ private struct SidebarChannelLabel: View {
                     .accessibilityHidden(true)
             }
         }
-        .foregroundStyle(channel.hasMention ? Color.accentColor : (channel.hasUnread ? Color.primary : Color.secondary))
+        .foregroundStyle(channel.hasMention ? accent : (channel.hasUnread ? Color.primary : Color.secondary))
         .font(.system(size: textMetrics.size(15), weight: channel.hasUnread ? .semibold : .regular))
         .padding(.vertical, textMetrics.spacing(1.5))
         .task(id: channel.hasMention ? channel.mentionRevision : nil) {
@@ -1070,6 +1079,7 @@ private struct ServerRow: View {
     let profile: ServerProfile
     @ObservedObject var state: IRCAppState
     @Environment(\.ircTextMetrics) private var textMetrics
+    @Environment(\.ircThemePalette) private var themePalette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isInvitePulseDimmed = false
 
@@ -1104,7 +1114,7 @@ private struct ServerRow: View {
             if unreadInviteCount > 0 {
                 Image(systemName: "envelope.badge.fill")
                     .font(.system(size: textMetrics.size(13), weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(themePalette?.accent ?? Color.accentColor)
                     .opacity(isInvitePulseDimmed ? 0.35 : 1)
                     .accessibilityHidden(true)
             }

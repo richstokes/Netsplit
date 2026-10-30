@@ -351,6 +351,28 @@ private struct IRCCustomWindowBackgroundModifier: ViewModifier {
   }
 }
 
+/// The `.sidebar` list style paints Label icons with the system control accent
+/// (the color picked in System Settings) and ignores `.tint`, so themed sidebars
+/// ended up with blue icons next to an orange toolbar. This style colors the icon
+/// with the active palette's accent and leaves the system behavior alone when no
+/// palette is set (System, Light and Dark appearances).
+struct IRCSidebarLabelStyle: LabelStyle {
+  @Environment(\.ircThemePalette) private var palette
+
+  func makeBody(configuration: Configuration) -> some View {
+    Label {
+      configuration.title
+    } icon: {
+      configuration.icon
+        .foregroundStyle(palette?.accent ?? Color.accentColor)
+    }
+  }
+}
+
+extension LabelStyle where Self == IRCSidebarLabelStyle {
+  static var ircSidebar: IRCSidebarLabelStyle { IRCSidebarLabelStyle() }
+}
+
 extension View {
   func ircApplicationAppearance(_ appearance: IRCApplicationAppearance) -> some View {
     modifier(IRCApplicationAppearanceModifier(appearance: appearance))
