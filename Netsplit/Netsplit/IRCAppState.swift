@@ -3085,6 +3085,7 @@ final class IRCAppState: ObservableObject {
                   let channel = existingChannel(named: wire.parameters[0], serverID: profile.id) else { return }
             let target = wire.parameters[1]
             let pendingKick = sessions[profile.id, default: .init()].requests.kicks.removeValue(forKey: kickKey(serverID: profile.id, channel: channel.name, nickname: target))
+            let memberCountBeforeKick = conversationStore.channel(channel.id)?.members.count ?? 0
             _ = removeMember(named: target, from: channel.id)
             let reason = wire.trailing.map { " — \($0)" } ?? ""
             if identifiersEqual(target, nickname(for: profile), serverID: profile.id) {
@@ -3092,7 +3093,15 @@ final class IRCAppState: ObservableObject {
                 removeChannelConversation(channel)
                 return
             }
-            appendChannelEvent("\(sender) removed \(target)\(reason).", channelID: channel.id)
+            // Kicks of other users are routine channel activity, so they follow
+            // the channel event visibility setting. Being kicked yourself is
+            // reported in the server buffer above and is always shown.
+            appendChannelEvent(
+                "\(sender) removed \(target)\(reason).",
+                kind: .kick,
+                channelID: channel.id,
+                memberCount: memberCountBeforeKick
+            )
             if let pendingKick, pendingKick.destination != .channel(channel.id) {
                 appendSystem("Kicked \(pendingKick.nickname) from \(pendingKick.channel)\(reason).", for: pendingKick.destination)
             }

@@ -1302,11 +1302,11 @@ struct SettingsView: View {
     private var channelEventHelpText: String {
         switch state.channelEventVisibility {
         case .alwaysShow:
-            return "Shows routine activity in every channel. Failed joins and moderation events are always shown."
+            return "Shows routine activity in every channel. Failed joins and kicks of you are always shown."
         case .hideInBusyChannels:
-            return "Hides routine activity in channels with \(IRCChannelEventVisibility.busyChannelMemberThreshold) or more members. Failed joins and moderation events are always shown."
+            return "Hides routine activity in channels with \(IRCChannelEventVisibility.busyChannelMemberThreshold) or more members. Failed joins and kicks of you are always shown."
         case .alwaysHide:
-            return "Hides routine activity in every channel. Failed joins and moderation events are always shown."
+            return "Hides routine activity in every channel. Failed joins and kicks of you are always shown."
         }
     }
 }

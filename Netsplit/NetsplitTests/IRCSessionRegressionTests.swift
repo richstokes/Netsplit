@@ -109,6 +109,33 @@ struct IRCSessionRegressionTests {
         #expect(!context.messages(in: .channel(channel.id)).contains { !$0.isSystem && $0.text == "hello" })
     }
 
+    @Test("Kicks of other users follow the channel event visibility setting")
+    func otherUserKicksAreRoutineActivity() async throws {
+        let server = try SessionTestServer()
+        defer { server.stop() }
+        try await waitForSessionCondition { server.port != nil }
+        let context = try SessionTestContext(port: #require(server.port))
+        defer { context.close() }
+        context.state.connect(context.profile)
+        try await waitForSessionCondition { context.isOnline }
+        server.send(":ReviewUser!u@h JOIN #kicks")
+        server.send(":Alice!u@h JOIN #kicks")
+        server.send(":Bot!u@h KICK #kicks Alice :Change your nick")
+        try await server.synchronize()
+        let channel = try #require(context.state.channels.first { $0.name == "#kicks" })
+        let item = SidebarItem.channel(channel.id)
+
+        let kick = try #require(context.messages(in: item).first { $0.text.contains("removed Alice") })
+        #expect(kick.channelEventKind == .kick)
+        #expect(!context.state.messages(for: item, channelEventVisibility: .alwaysHide)
+            .contains { $0.text.contains("removed Alice") })
+
+        server.send(":Bot!u@h KICK #kicks ReviewUser :Change your nick")
+        try await server.synchronize()
+        #expect(context.messages(in: context.serverItem)
+            .contains { $0.text.contains("You were removed from #kicks by Bot") })
+    }
+
     @Test("Unlabeled errors never remove an arbitrary previously sent message")
     func ambiguousRejectionPreservesEarlierMessage() async throws {
         let server = try SessionTestServer()

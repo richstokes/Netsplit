@@ -217,6 +217,7 @@ enum IRCChannelEventKind: Hashable {
     case nickname
     case topic
     case mode
+    case kick
 }
 
 enum IRCNoticeRoutingPolicy {
