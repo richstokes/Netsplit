@@ -100,6 +100,9 @@ final class IRCAppState: ObservableObject {
     @Published var applicationAppearance: IRCApplicationAppearance {
         didSet { defaults.set(applicationAppearance.rawValue, forKey: "applicationAppearance") }
     }
+    @Published var appIcon: IRCAppIcon {
+        didSet { defaults.set(appIcon.rawValue, forKey: "appIcon") }
+    }
     @Published var messageSpacing: IRCMessageSpacing {
         didSet { defaults.set(messageSpacing.rawValue, forKey: "messageSpacing") }
     }
@@ -280,6 +283,7 @@ final class IRCAppState: ObservableObject {
         mentionNotificationsEnabled = defaults.object(forKey: "mentionNotificationsEnabled") as? Bool ?? false
         directMessageNotificationsEnabled = defaults.object(forKey: "directMessageNotificationsEnabled") as? Bool ?? false
         applicationAppearance = defaults.string(forKey: "applicationAppearance").flatMap(IRCApplicationAppearance.init(rawValue:)) ?? .system
+        appIcon = defaults.string(forKey: "appIcon").flatMap(IRCAppIcon.init(rawValue:)) ?? .default
         messageSpacing = defaults.string(forKey: "messageSpacing").flatMap(IRCMessageSpacing.init(rawValue:)) ?? .comfortable
         chatFont = defaults.string(forKey: "chatFont").flatMap(IRCChatFont.init(rawValue:)) ?? .default
         usesColoredNicknames = defaults.object(forKey: "usesColoredNicknames") as? Bool ?? false

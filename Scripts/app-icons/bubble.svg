@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FDF8EF"/>
+      <stop offset="1" stop-color="#EBDDC7"/>
+    </linearGradient>
+    <linearGradient id="coral" gradientUnits="userSpaceOnUse" x1="0" y1="300" x2="0" y2="780">
+      <stop offset="0" stop-color="#F6764A"/>
+      <stop offset="1" stop-color="#D5411B"/>
+    </linearGradient>
+    <filter id="plate-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="10"/>
+      <feOffset dy="10"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.3"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="bubble-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14"/>
+      <feOffset dy="16"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.28"/></feComponentTransfer>
+      <feFlood flood-color="#7A2A0E" result="tint"/>
+      <feComposite in="tint" in2="SourceAlpha" operator="in"/>
+    </filter>
+    <clipPath id="plate"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+    <!-- The crack runs top to bottom; each half of the bubble is clipped to one side of it. -->
+    <clipPath id="left-of-crack"><path d="M0 0H556L548 250L470 468L560 522L492 760V1024H0Z"/></clipPath>
+    <clipPath id="right-of-crack"><path d="M1024 0H556L548 250L470 468L560 522L492 760V1024H1024Z"/></clipPath>
+    <g id="bubble">
+      <rect x="232" y="300" width="560" height="360" rx="104"/>
+      <path d="M318 610V792L486 640Z"/>
+    </g>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#paper)" filter="url(#plate-shadow)"/>
+
+  <g clip-path="url(#plate)">
+    <g id="halves">
+      <g transform="translate(-20 -4) rotate(-3 512 512)"><g clip-path="url(#left-of-crack)">
+        <use href="#bubble" filter="url(#bubble-shadow)" opacity="0.55"/>
+        <use href="#bubble" fill="url(#coral)"/>
+        <circle cx="366" cy="480" r="40" fill="#FDF8EF"/>
+      </g></g>
+      <g transform="translate(20 10) rotate(3 512 512)"><g clip-path="url(#right-of-crack)">
+        <use href="#bubble" filter="url(#bubble-shadow)" opacity="0.55"/>
+        <use href="#bubble" fill="url(#coral)"/>
+        <circle cx="660" cy="480" r="40" fill="#FDF8EF"/>
+      </g></g>
+    </g>
+    <rect x="101.500" y="101.500" width="821" height="821" rx="183.500" fill="none" stroke="#FFFFFF" stroke-opacity="0.6" stroke-width="3"/>
+  </g>
+</svg>

@@ -337,6 +337,10 @@ struct NetsplitApp: App {
                 }
                 .onAppear {
                     appDelegate.state = state
+                    state.appIcon.applyToRunningApplication()
+                }
+                .onChange(of: state.appIcon) { _, appIcon in
+                    appIcon.applyToRunningApplication()
                 }
                 .onOpenURL { url in
                     guard state.openIRCURL(url) else { return }
@@ -441,6 +445,22 @@ struct NetsplitApp: App {
             SettingsView(state: state)
                 .ircApplicationAppearance(state.applicationAppearance)
         }
+    }
+}
+
+extension IRCAppIcon {
+    var image: NSImage {
+        if let assetName, let image = NSImage(named: assetName) {
+            return image
+        }
+        return NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
+    }
+
+    /// macOS has no alternate-icon API, so this swaps the Dock icon for as long as
+    /// the app runs. Finder, and the Dock once the app quits, show the bundle icon.
+    func applyToRunningApplication() {
+        // nil hands the Dock tile back to the bundle icon.
+        NSApp.applicationIconImage = assetName.flatMap { NSImage(named: $0) }
     }
 }
 

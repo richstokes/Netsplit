@@ -1041,6 +1041,7 @@ enum IRCChannelBrowserJoinBehavior: Equatable {
 
 struct SettingsView: View {
     @ObservedObject var state: IRCAppState
+    @Environment(\.ircThemePalette) private var themePalette
     @State private var dccDownloadFolderError: String?
 
     var body: some View {
@@ -1134,8 +1135,48 @@ struct SettingsView: View {
         .padding(16)
     }
 
+    private var appIconSettings: some View {
+        Section("App Icon") {
+            HStack(spacing: 16) {
+                ForEach(IRCAppIcon.allCases) { appIcon in
+                    let isSelected = state.appIcon == appIcon
+                    Button {
+                        state.appIcon = appIcon
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(nsImage: appIcon.image)
+                                .resizable()
+                                .interpolation(.high)
+                                .frame(width: 64, height: 64)
+                                .padding(4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .strokeBorder(
+                                            isSelected ? (themePalette?.accent ?? Color.accentColor) : .clear,
+                                            lineWidth: 2.5
+                                        )
+                                )
+                            Text(appIcon.label)
+                                .font(.caption)
+                                .foregroundStyle(isSelected ? .primary : .secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(appIcon.label) icon")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                }
+                Spacer(minLength: 0)
+            }
+            Text("Shown in the Dock while Netsplit is open. Finder always shows the default icon.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private var appearanceSettings: some View {
         Form {
+            appIconSettings
             Section("Chat Appearance") {
                 Picker("Theme", selection: $state.applicationAppearance) {
                     ForEach(IRCApplicationAppearance.settingsCases) { appearance in

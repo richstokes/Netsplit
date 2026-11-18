@@ -87,6 +87,32 @@ enum IRCMessageSpacing: String, CaseIterable, Identifiable {
     }
 }
 
+/// The icons offered in Settings. Raw values are persisted, so keep them stable.
+enum IRCAppIcon: String, CaseIterable, Identifiable {
+    case classic
+    case bubble
+
+    static let `default`: IRCAppIcon = .classic
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .classic: return "Classic"
+        case .bubble: return "Bubble"
+        }
+    }
+
+    /// The asset catalog image for this icon. The default icon is the bundle's own
+    /// AppIcon, which macOS draws itself, so it has no separate image.
+    var assetName: String? {
+        switch self {
+        case .classic: return nil
+        case .bubble: return "AppIconBubble"
+        }
+    }
+}
+
 enum IRCChatFont: String, CaseIterable, Identifiable {
     case system
     case rounded
