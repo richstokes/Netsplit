@@ -56,6 +56,21 @@ final class IRCComposerNativeTextView: NSTextView {
         substitutions?.set(enabled, for: setting)
     }
 
+    static let composerIdentifier = NSUserInterfaceItemIdentifier("IRCComposerTextView")
+
+    /// The composer hosted in `window`, if any. Each window shows one
+    /// conversation, so there is at most one.
+    static func composer(in window: NSWindow) -> IRCComposerNativeTextView? {
+        func search(_ view: NSView) -> IRCComposerNativeTextView? {
+            if let composer = view as? IRCComposerNativeTextView { return composer }
+            for subview in view.subviews {
+                if let composer = search(subview) { return composer }
+            }
+            return nil
+        }
+        return window.contentView.flatMap(search)
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         onDidMoveToWindow?()

@@ -1564,56 +1564,63 @@ private struct ConversationView: View {
                         previewExpansion: previewExpansion
                     )
                     HStack(alignment: .bottom, spacing: 12) {
-                        ZStack(alignment: .topLeading) {
-                            IRCComposerTextView(
-                                text: $draft,
-                                substitutions: state.composerSubstitutions,
-                                maximumUTF8Bytes: composerMaximumBytes,
-                                font: state.chatFont.nsFont(size: textMetrics.size(15)),
-                                workspaceFocus: $workspaceFocus,
-                                focusTarget: .composer(selection),
-                                focusRequestID: composerFocusRequestID,
-                                measuredHeight: $composerTextHeight,
-                                onSubmit: send,
-                                onTab: completeComposer,
-                                onHistory: { direction, currentDraft in
-                                    state.navigateComposerHistory(
-                                        direction,
-                                        from: currentDraft,
-                                        for: selection
-                                    )
+                        // With the emoji option on, the composer follows the
+                        // layout requested in issue 17: both buttons sit inside
+                        // the field. Off keeps the original layout untouched.
+                        HStack(alignment: .bottom, spacing: textMetrics.spacing(6)) {
+                            ZStack(alignment: .topLeading) {
+                                IRCComposerTextView(
+                                    text: $draft,
+                                    substitutions: state.composerSubstitutions,
+                                    maximumUTF8Bytes: composerMaximumBytes,
+                                    font: state.chatFont.nsFont(size: textMetrics.size(15)),
+                                    workspaceFocus: $workspaceFocus,
+                                    focusTarget: .composer(selection),
+                                    focusRequestID: composerFocusRequestID,
+                                    measuredHeight: $composerTextHeight,
+                                    onSubmit: send,
+                                    onTab: completeComposer,
+                                    onHistory: { direction, currentDraft in
+                                        state.navigateComposerHistory(
+                                            direction,
+                                            from: currentDraft,
+                                            for: selection
+                                        )
+                                    }
+                                )
+                                if draft.isEmpty {
+                                    Text("Message \(title)")
+                                        .font(state.chatFont.font(size: textMetrics.size(15)))
+                                        .foregroundStyle(.tertiary)
+                                        .allowsHitTesting(false)
                                 }
-                            )
-                            if draft.isEmpty {
-                                Text("Message \(title)")
-                                    .font(state.chatFont.font(size: textMetrics.size(15)))
-                                    .foregroundStyle(.tertiary)
-                                    .allowsHitTesting(false)
                             }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .frame(height: composerTextHeight)
-                            .padding(.horizontal, textMetrics.spacing(12))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(height: composerTextHeight)
                             .padding(.vertical, textMetrics.spacing(9))
-                            .ircFieldBackground(in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                             .accessibilityLabel("Message to \(title)")
                             .accessibilityHint("Type one IRC message. Press Return to send or Tab to complete a command or nickname.")
-                        if let remainingMessageBytes, remainingMessageBytes <= 64 {
-                            Text("\(remainingMessageBytes)")
-                                .font(.system(size: textMetrics.size(11), weight: .medium, design: .monospaced))
-                                .foregroundStyle(remainingMessageBytes == 0 ? .orange : .secondary)
-                                .accessibilityLabel("\(remainingMessageBytes) message bytes remaining")
-                                .help("\(remainingMessageBytes) UTF-8 bytes remaining")
+                            if state.showsComposerEmojiButton {
+                                remainingBytesLabel
+                                    .padding(.bottom, textMetrics.spacing(11))
+                                inFieldComposerButtons
+                            }
                         }
-                        Button(action: send) {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: textMetrics.size(14), weight: .bold))
-                                .frame(width: textMetrics.spacing(30), height: textMetrics.spacing(30))
+                        .padding(.leading, textMetrics.spacing(12))
+                        .padding(.trailing, textMetrics.spacing(state.showsComposerEmojiButton ? 5 : 12))
+                        .ircFieldBackground(in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        if !state.showsComposerEmojiButton {
+                            remainingBytesLabel
+                            Button(action: send) {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: textMetrics.size(14), weight: .bold))
+                                    .frame(width: textMetrics.spacing(30), height: textMetrics.spacing(30))
+                            }
+                            .buttonStyle(.borderedProminent).clipShape(Circle())
+                            .disabled(!canSendDraft)
+                            .accessibilityLabel("Send message")
+                            .accessibilityHint("Sends the message to \(title)")
                         }
-                        .buttonStyle(.borderedProminent).clipShape(Circle())
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .accessibilityLabel("Send message")
-                        .accessibilityHint("Sends the message to \(title)")
                     }
                     .padding(.horizontal, textMetrics.spacing(20))
                     .padding(.vertical, textMetrics.spacing(14))
@@ -1720,6 +1727,70 @@ private struct ConversationView: View {
 
     private var composerMaximumBytes: Int? {
         draft.first == "/" ? nil : state.maximumMessageBytes(for: selection)
+    }
+
+    private var canSendDraft: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    @ViewBuilder
+    private var remainingBytesLabel: some View {
+        if let remainingMessageBytes, remainingMessageBytes <= 64 {
+            Text("\(remainingMessageBytes)")
+                .font(.system(size: textMetrics.size(11), weight: .medium, design: .monospaced))
+                .foregroundStyle(remainingMessageBytes == 0 ? .orange : .secondary)
+                .accessibilityLabel("\(remainingMessageBytes) message bytes remaining")
+                .help("\(remainingMessageBytes) UTF-8 bytes remaining")
+        }
+    }
+
+    /// Emoji and send buttons drawn inside the message field. Both are the
+    /// same circle, sized to sit within a single-line field with even
+    /// margins, and stay pinned to the last line as the field grows.
+    private var inFieldComposerButtons: some View {
+        let diameter = textMetrics.spacing(26)
+        return HStack(spacing: textMetrics.spacing(4)) {
+            Button(action: showEmojiPicker) {
+                // The glyph is itself a disc, so size it to read as the
+                // same circle as the send button beside it.
+                Image(systemName: "face.smiling")
+                    .font(.system(size: textMetrics.size(23)))
+                    .foregroundStyle(.secondary)
+                    .frame(width: diameter, height: diameter)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Emoji & Symbols")
+            .accessibilityLabel("Insert emoji")
+            .accessibilityHint("Opens the emoji picker for the message to \(title)")
+            Button(action: send) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: textMetrics.size(13), weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: diameter, height: diameter)
+                    .background(.tint, in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSendDraft)
+            .opacity(canSendDraft ? 1 : 0.45)
+            .help("Send")
+            .accessibilityLabel("Send message")
+            .accessibilityHint("Sends the message to \(title)")
+        }
+        .padding(.bottom, textMetrics.spacing(5))
+    }
+
+    /// The system picker inserts into the first responder, so the composer
+    /// has to hold focus before the picker opens. Going through the window
+    /// directly avoids racing the asynchronous workspace focus request.
+    private func showEmojiPicker() {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow,
+              let composer = IRCComposerNativeTextView.composer(in: window) else { return }
+        if window.firstResponder !== composer {
+            window.makeFirstResponder(composer)
+        }
+        NSApp.orderFrontCharacterPalette(composer)
     }
 
     private var composerFocusRequestID: UUID? {
@@ -1919,7 +1990,7 @@ private struct IRCComposerTextView: NSViewRepresentable {
 
         let textView = IRCComposerNativeTextView()
         textView.delegate = context.coordinator
-        textView.identifier = NSUserInterfaceItemIdentifier("IRCComposerTextView")
+        textView.identifier = IRCComposerNativeTextView.composerIdentifier
         textView.string = text
         textView.font = font
         textView.textColor = .labelColor

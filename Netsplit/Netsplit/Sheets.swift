@@ -1256,6 +1256,12 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Section("Message Field") {
+                Toggle("Show emoji button", isOn: $state.showsComposerEmojiButton)
+                Text("Off by default. Puts an emoji picker button and the send button inside the message field. Control-Command-Space opens the same picker at any time.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Channel Events") {
                 Picker("Show joins, parts, quits, nickname, topic, and mode changes", selection: $state.channelEventVisibility) {
                     ForEach(IRCChannelEventVisibility.allCases) { visibility in

@@ -2891,7 +2891,7 @@ struct IRCModelsAndPolicyTests {
 
     @Test("Chat typography defaults to SF Mono")
     func exposesChatFonts() {
-        #expect(IRCChatFont.allCases == [.system, .rounded, .newYork, .monospaced, .menlo, .courier])
+        #expect(IRCChatFont.allCases == [.system, .rounded, .newYork, .comicSans, .monospaced, .menlo, .courier])
         #expect(IRCChatFont.proportionalCases + IRCChatFont.monospacedCases == IRCChatFont.allCases)
         #expect(IRCChatFont.default == .monospaced)
         #expect(IRCChatFont.system.label == "System (SF Pro)")
@@ -2913,6 +2913,11 @@ struct IRCModelsAndPolicyTests {
         #expect(courier.fontName == "Courier")
         #expect(courier.isFixedPitch)
         #expect(IRCChatFont.courier.nsFont(size: 15, weight: .bold).fontName == "Courier-Bold")
+
+        let comicSans = IRCChatFont.comicSans.nsFont(size: 15)
+        #expect(comicSans.fontName == "ComicSansMS")
+        #expect(!IRCChatFont.comicSans.isMonospaced)
+        #expect(IRCChatFont.comicSans.nsFont(size: 15, weight: .bold).fontName == "ComicSansMS-Bold")
 
         // SF faces keep using system fonts rather than a named lookup.
         #expect(IRCChatFont.monospaced.nsFont(size: 15).isFixedPitch)
@@ -3683,6 +3688,22 @@ struct IRCModelsAndPolicyTests {
         reloaded.toggleTopicBar()
         #expect(reloaded.showsTopicBar)
         #expect(IRCAppState(defaults: defaults).showsTopicBar)
+    }
+
+    @Test("Composer emoji button defaults to hidden and persists across launches")
+    @MainActor
+    func persistsComposerEmojiButtonVisibility() throws {
+        let suiteName = "Netsplit.ComposerEmojiButtonTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let state = IRCAppState(defaults: defaults)
+        #expect(!state.showsComposerEmojiButton)
+        #expect(defaults.object(forKey: "showsComposerEmojiButton") == nil)
+
+        state.showsComposerEmojiButton = true
+        #expect(defaults.object(forKey: "showsComposerEmojiButton") as? Bool == true)
+        #expect(IRCAppState(defaults: defaults).showsComposerEmojiButton)
     }
 
     @Test("Member list shortcut only applies to channels")

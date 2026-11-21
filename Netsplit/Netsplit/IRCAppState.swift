@@ -140,6 +140,11 @@ final class IRCAppState: ObservableObject {
     @Published var showsTopicBar: Bool {
         didSet { defaults.set(showsTopicBar, forKey: "showsTopicBar") }
     }
+    /// Whether the composer shows a button that opens the system emoji
+    /// picker next to the send button. Off by default.
+    @Published var showsComposerEmojiButton: Bool {
+        didSet { defaults.set(showsComposerEmojiButton, forKey: "showsComposerEmojiButton") }
+    }
     @Published var showsServerChannelPane = true
     @Published var isJumpPalettePresented = false
     @Published private(set) var workspaceFocusRequest: IRCWorkspaceFocusRequest?
@@ -294,6 +299,7 @@ final class IRCAppState: ObservableObject {
         channelEventVisibility = defaults.string(forKey: "channelEventVisibility").flatMap(IRCChannelEventVisibility.init(rawValue:)) ?? .alwaysShow
         showsMemberList = defaults.object(forKey: "showsMemberList") as? Bool ?? true
         showsTopicBar = defaults.object(forKey: "showsTopicBar") as? Bool ?? true
+        showsComposerEmojiButton = defaults.object(forKey: "showsComposerEmojiButton") as? Bool ?? false
         let savedTranscriptFontSize = defaults.object(forKey: "transcriptFontSize") as? Double ?? 16
         transcriptFontSize = min(max(savedTranscriptFontSize, 12), 24)
 

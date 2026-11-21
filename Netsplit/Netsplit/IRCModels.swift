@@ -117,6 +117,7 @@ enum IRCChatFont: String, CaseIterable, Identifiable {
     case system
     case rounded
     case newYork
+    case comicSans
     case monospaced
     case menlo
     case courier
@@ -124,7 +125,7 @@ enum IRCChatFont: String, CaseIterable, Identifiable {
     static let `default`: IRCChatFont = .monospaced
 
     /// Proportional faces, in picker order.
-    static let proportionalCases: [IRCChatFont] = [.system, .rounded, .newYork]
+    static let proportionalCases: [IRCChatFont] = [.system, .rounded, .newYork, .comicSans]
     /// Fixed-width faces, in picker order.
     static let monospacedCases: [IRCChatFont] = [.monospaced, .menlo, .courier]
 
@@ -135,6 +136,7 @@ enum IRCChatFont: String, CaseIterable, Identifiable {
         case .system: return "System (SF Pro)"
         case .rounded: return "SF Rounded"
         case .newYork: return "New York"
+        case .comicSans: return "Comic Sans MS"
         case .monospaced: return "SF Mono"
         case .menlo: return "Menlo"
         case .courier: return "Courier"
@@ -145,7 +147,7 @@ enum IRCChatFont: String, CaseIterable, Identifiable {
 
     var design: Font.Design {
         switch self {
-        case .system: return .default
+        case .system, .comicSans: return .default
         case .rounded: return .rounded
         case .newYork: return .serif
         case .monospaced, .menlo, .courier: return .monospaced
@@ -153,12 +155,14 @@ enum IRCChatFont: String, CaseIterable, Identifiable {
     }
 
     /// PostScript names for faces that are installed fonts rather than SF
-    /// designs. Both ship with macOS; if one is ever missing the face falls
-    /// back to SF Mono so the transcript keeps a fixed-width layout.
+    /// designs. All ship with macOS; if one is ever missing the face falls
+    /// back to its system design (SF Mono for the fixed-width faces, so the
+    /// transcript keeps a fixed-width layout).
     var postScriptNames: (regular: String, bold: String)? {
         switch self {
         case .menlo: return ("Menlo-Regular", "Menlo-Bold")
         case .courier: return ("Courier", "Courier-Bold")
+        case .comicSans: return ("ComicSansMS", "ComicSansMS-Bold")
         case .system, .rounded, .newYork, .monospaced: return nil
         }
     }
@@ -177,7 +181,7 @@ enum IRCChatFont: String, CaseIterable, Identifiable {
         let base = NSFont.systemFont(ofSize: size, weight: weight)
         let systemDesign: NSFontDescriptor.SystemDesign?
         switch self {
-        case .system: systemDesign = nil
+        case .system, .comicSans: systemDesign = nil
         case .rounded: systemDesign = .rounded
         case .newYork: systemDesign = .serif
         case .monospaced, .menlo, .courier: systemDesign = .monospaced
