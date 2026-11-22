@@ -228,6 +228,14 @@ final class NetsplitAppDelegate: NSObject, NSApplicationDelegate, UNUserNotifica
             }
 
         case .otherMouseDown:
+            // Middle click closes the sidebar row under the pointer, like
+            // closing a browser tab. It never reaches trackpad users, who
+            // keep Command-W and the context menu.
+            if event.buttonNumber == 2 {
+                guard let item = IRCSidebarRowMarker.item(at: event) else { return event }
+                state?.close(item)
+                return nil
+            }
             guard let direction = IRCHistoryNavigationShortcut.direction(
                 mouseButtonNumber: event.buttonNumber
             ) else { return event }
@@ -333,6 +341,9 @@ struct NetsplitApp: App {
                     // be the About or Settings window when this view updates.
                     MainWindowReader { window in
                         appDelegate.mainWindow = window
+                        // The toolbar has no use for the app name. The title
+                        // stays set for the Window menu and Mission Control.
+                        window?.titleVisibility = .hidden
                     }
                 }
                 .onAppear {
@@ -461,6 +472,58 @@ extension IRCAppIcon {
     func applyToRunningApplication() {
         // nil hands the Dock tile back to the bundle icon.
         NSApp.applicationIconImage = assetName.flatMap { NSImage(named: $0) }
+    }
+}
+
+/// Tags a sidebar row with the item it shows so AppKit-level mouse handling
+/// can tell which row a click landed on. SwiftUI's List has no middle-click
+/// gesture, and matching by row index would break whenever the sidebar's
+/// sections change.
+struct IRCSidebarRowMarker: NSViewRepresentable {
+    let item: SidebarItem
+
+    func makeNSView(context: Context) -> MarkerView {
+        let view = MarkerView()
+        view.item = item
+        return view
+    }
+
+    func updateNSView(_ view: MarkerView, context: Context) {
+        view.item = item
+    }
+
+    final class MarkerView: NSView {
+        var item: SidebarItem?
+
+        // Purely a tag; clicks belong to the row.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    /// The sidebar item whose row contains the event's location, if any.
+    @MainActor
+    static func item(at event: NSEvent) -> SidebarItem? {
+        guard let window = event.window else { return nil }
+        return item(in: window, at: event.locationInWindow)
+    }
+
+    @MainActor
+    static func item(in window: NSWindow, at locationInWindow: NSPoint) -> SidebarItem? {
+        guard let contentView = window.contentView,
+              let frameView = contentView.superview else { return nil }
+        var view = frameView.hitTest(locationInWindow)
+        while let candidate = view, !(candidate is NSTableRowView) {
+            view = candidate.superview
+        }
+        guard let rowView = view else { return nil }
+        return marker(in: rowView)?.item
+    }
+
+    private static func marker(in view: NSView) -> MarkerView? {
+        if let marker = view as? MarkerView { return marker }
+        for subview in view.subviews {
+            if let marker = marker(in: subview) { return marker }
+        }
+        return nil
     }
 }
 

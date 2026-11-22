@@ -520,13 +520,22 @@ final class IRCAppState: ObservableObject {
 
     func closeActiveSelection() {
         guard let selection else { return }
-        switch selection {
+        close(selection)
+    }
+
+    /// Closes a sidebar item whether or not it is selected: disconnects a
+    /// server, leaves a channel, or closes a direct message. Shared by
+    /// Command-W and middle-clicking a sidebar row.
+    func close(_ item: SidebarItem) {
+        switch item {
         case .connectionCenter:
             return
         case .server(let id):
             guard let profile = profiles.first(where: { $0.id == id }) else { return }
             disconnect(profile)
-            self.selection = .connectionCenter
+            if selection == item {
+                selection = .connectionCenter
+            }
         case .channel(let id):
             guard let channel = channels.first(where: { $0.id == id }) else { return }
             leave(channel)

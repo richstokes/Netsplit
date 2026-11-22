@@ -132,6 +132,14 @@ struct ContentView: View {
                 .help("Forward (⌘])")
                 .accessibilityHint("Moves to the next conversation in navigation history")
             }
+            // The window title is hidden (see MainWindowReader), and it was
+            // the only flexible element between the two groups. Without a
+            // centered item the trailing buttons slide left next to Forward.
+            ToolbarItem(placement: .principal) {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityHidden(true)
+            }
             ToolbarItemGroup(placement: .primaryAction) {
                 if state.selectedProfile != nil {
                     Button { state.requestChannelListing() } label: {
@@ -626,6 +634,7 @@ private struct SidebarView: View {
                 Section {
                     ServerRow(profile: profile, state: state)
                         .tag(SidebarItem.server(profile.id))
+                        .background(IRCSidebarRowMarker(item: .server(profile.id)))
                         .contextMenu {
                             serverContextMenu(for: profile)
                         }
@@ -641,6 +650,7 @@ private struct SidebarView: View {
                                 .accessibilityLabel(channel.name)
                                 .accessibilityValue(channelAccessibilityValue(channel))
                                 .tag(SidebarItem.channel(channel.id))
+                                .background(IRCSidebarRowMarker(item: .channel(channel.id)))
                                 .simultaneousGesture(TapGesture().onEnded {
                                     state.selectFromSidebar(.channel(channel.id))
                                 })
@@ -684,6 +694,7 @@ private struct SidebarView: View {
                                 .font(.system(size: textMetrics.size(15), weight: message.hasUnread ? .semibold : .regular))
                                 .padding(.vertical, textMetrics.spacing(1.5))
                                 .tag(SidebarItem.directMessage(message.id))
+                                .background(IRCSidebarRowMarker(item: .directMessage(message.id)))
                                 .accessibilityValue(directMessageAccessibilityValue(message))
                                 .contextMenu {
                                     Button(state.isFavoriteDirectMessage(message) ? "Unfavorite" : "Favorite", systemImage: state.isFavoriteDirectMessage(message) ? "star.slash" : "star") {
@@ -1790,7 +1801,7 @@ private struct ConversationView: View {
         if window.firstResponder !== composer {
             window.makeFirstResponder(composer)
         }
-        NSApp.orderFrontCharacterPalette(composer)
+        composer.showEmojiPickerAtTrailingEdge()
     }
 
     private var composerFocusRequestID: UUID? {
@@ -2973,14 +2984,20 @@ private struct MessageRow: View {
     @ViewBuilder
     private var interactiveSenderText: some View {
         if let nickname = message.interactiveNickname {
-            senderText.contextMenu {
-                NicknameContextMenu(
-                    nickname: nickname,
-                    isIgnored: state.isIgnored(nickname, from: selection),
-                    state: state,
-                    selection: selection
-                )
-            }
+            senderText
+                .contentShape(Rectangle())
+                // Same gesture as the member list.
+                .onTapGesture(count: 2) {
+                    state.startDirectMessage(with: nickname, from: selection)
+                }
+                .contextMenu {
+                    NicknameContextMenu(
+                        nickname: nickname,
+                        isIgnored: state.isIgnored(nickname, from: selection),
+                        state: state,
+                        selection: selection
+                    )
+                }
         } else {
             senderText
         }

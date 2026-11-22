@@ -3428,6 +3428,67 @@ struct IRCModelsAndPolicyTests {
         #expect(state.selection == .server(profile.id))
     }
 
+    @Test("Closing an unselected sidebar item leaves the selection alone")
+    @MainActor
+    func closesUnselectedSidebarItem() throws {
+        let state = IRCAppState()
+        let profile = state.profiles[0]
+        state.startDirectMessage(with: "Alice", from: .server(profile.id))
+        state.startDirectMessage(with: "Bob", from: .server(profile.id))
+        let alice = try #require(state.directMessages.first { $0.name == "Alice" })
+        let bob = try #require(state.directMessages.first { $0.name == "Bob" })
+        #expect(state.selection == .directMessage(bob.id))
+
+        state.close(.directMessage(alice.id))
+
+        #expect(state.directMessages.map(\.name) == ["Bob"])
+        #expect(state.selection == .directMessage(bob.id))
+
+        state.close(.connectionCenter)
+        #expect(state.directMessages.map(\.name) == ["Bob"])
+    }
+
+    @Test("A point inside a sidebar row resolves to that row's item")
+    @MainActor
+    func resolvesSidebarRowUnderPointer() async throws {
+        let first = SidebarItem.channel(UUID())
+        let second = SidebarItem.directMessage(UUID())
+        let list = List {
+            Text("First").background(IRCSidebarRowMarker(item: first))
+            Text("Second").background(IRCSidebarRowMarker(item: second))
+        }
+        .listStyle(.sidebar)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 300),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: list)
+        defer { window.close() }
+
+        func markers(in view: NSView) -> [IRCSidebarRowMarker.MarkerView] {
+            (view as? IRCSidebarRowMarker.MarkerView).map { [$0] } ?? view.subviews.flatMap(markers)
+        }
+        var found: [IRCSidebarRowMarker.MarkerView] = []
+        for _ in 0..<40 where found.count < 2 {
+            window.contentView?.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(25))
+            found = markers(in: try #require(window.contentView))
+        }
+        #expect(found.count == 2)
+
+        for marker in found {
+            // Aim well to the right of the label, where only the row itself
+            // is under the pointer.
+            let center = marker.convert(NSPoint(x: marker.bounds.midX, y: marker.bounds.midY), to: nil)
+            let point = NSPoint(x: 200, y: center.y)
+            #expect(IRCSidebarRowMarker.item(in: window, at: point) == marker.item)
+        }
+        #expect(IRCSidebarRowMarker.item(in: window, at: NSPoint(x: 200, y: 4)) == nil)
+    }
+
     @Test("Favorited direct messages reopen when the server registers")
     @MainActor
     func reopensFavoritedDirectMessagesOnConnect() throws {

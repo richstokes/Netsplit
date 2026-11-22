@@ -71,6 +71,33 @@ final class IRCComposerNativeTextView: NSTextView {
         return window.contentView.flatMap(search)
     }
 
+    private var emojiPickerAnchorExpiry: Date?
+
+    /// Opens the system emoji picker next to the trailing edge of the message
+    /// field, where the emoji button sits, instead of at the insertion point
+    /// (which is at the far left for an empty draft).
+    func showEmojiPickerAtTrailingEdge() {
+        // The picker asks the first responder where the insertion point is
+        // shortly after it is ordered front, so the override below only needs
+        // to answer for a moment. Input methods use the same query for their
+        // candidate windows and must get the real caret back afterwards.
+        emojiPickerAnchorExpiry = Date().addingTimeInterval(1)
+        NSApp.orderFrontCharacterPalette(self)
+    }
+
+    override func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        let caretRect = super.firstRect(forCharacterRange: range, actualRange: actualRange)
+        guard let expiry = emojiPickerAnchorExpiry else { return caretRect }
+        guard expiry > Date(), !hasMarkedText(), let window else {
+            emojiPickerAnchorExpiry = nil
+            return caretRect
+        }
+        let field = enclosingScrollView ?? self
+        let frameInWindow = field.convert(field.bounds, to: nil)
+        let frameOnScreen = window.convertToScreen(frameInWindow)
+        return NSRect(x: frameOnScreen.maxX - 1, y: frameOnScreen.minY, width: 1, height: frameOnScreen.height)
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         onDidMoveToWindow?()
