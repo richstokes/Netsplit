@@ -23,6 +23,7 @@ struct ServerProfileEditor: View {
     @State private var hostname: String
     @State private var port: String
     @State private var useTLS: Bool
+    @State private var allowInvalidCertificates: Bool
     @State private var autoConnect: Bool
     @State private var nicknameOverride: String
     @State private var realNameOverride: String
@@ -57,6 +58,7 @@ struct ServerProfileEditor: View {
         _hostname = State(initialValue: profileToEdit?.hostname ?? "")
         _port = State(initialValue: String(profileToEdit?.port ?? 6697))
         _useTLS = State(initialValue: profileToEdit?.useTLS ?? true)
+        _allowInvalidCertificates = State(initialValue: profileToEdit?.allowInvalidCertificates ?? false)
         _autoConnect = State(initialValue: profileToEdit?.autoConnect ?? false)
         _nicknameOverride = State(
             initialValue: IRCIdentityValidation.nicknameLimitedToMaximumLength(
@@ -241,6 +243,12 @@ struct ServerProfileEditor: View {
                 ServerEditorHelpText("Enter an IRC port between 1 and 65535.", tint: .red, isError: true)
             }
             ServerEditorToggleRow("Use encrypted connection (TLS)", isOn: $useTLS)
+            if useTLS {
+                ServerEditorToggleRow("Accept invalid or self-signed certificates", isOn: $allowInvalidCertificates)
+                if allowInvalidCertificates {
+                    ServerEditorHelpText("The connection is still encrypted, but Netsplit will not verify this server's identity. Only use this for a server you run or trust, such as a bouncer with a self-signed certificate.", tint: .orange)
+                }
+            }
             ServerEditorToggleRow("Connect automatically at launch", isOn: $autoConnect)
         }
     }
@@ -415,9 +423,9 @@ struct ServerProfileEditor: View {
         )
         let result: IRCProfileSaveResult
         if let profileToEdit {
-            result = state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, credentials: changes, useSASL: useSASL, saslUsername: saslUsername, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
+            result = state.updateProfile(profileToEdit, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, allowInvalidCertificates: useTLS && allowInvalidCertificates, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, credentials: changes, useSASL: useSASL, saslUsername: saslUsername, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshKeyFilename: sshKeyFilename, resetSSHHostKey: resetSSHHostKey)
         } else {
-            result = state.addProfile(id: draftProfileID, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, credentials: changes, useSASL: useSASL, saslUsername: saslUsername, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshKeyFilename: sshKeyFilename)
+            result = state.addProfile(id: draftProfileID, name: displayName.isEmpty ? cleanHost : displayName, hostname: cleanHost, port: ircPort, useTLS: useTLS, allowInvalidCertificates: useTLS && allowInvalidCertificates, autoConnect: autoConnect, nicknameOverride: nicknameOverride, realNameOverride: realNameOverride, mentionNotificationsOverride: mentionNotificationsOverride, credentials: changes, useSASL: useSASL, saslUsername: saslUsername, useSSHTunnel: useSSHTunnel, sshHostname: sshHostname, sshPort: savedSSHPort, sshUsername: sshUsername, sshKeyFilename: sshKeyFilename)
         }
         credentialSnapshot.recordSavedChanges(result.savedCredentials)
         credentialSaveFailed = !result.succeeded
@@ -1281,7 +1289,8 @@ struct SettingsView: View {
         Form {
             Section("Links") {
                 Toggle("Warn before opening links", isOn: $state.warnBeforeOpeningLinks)
-                Text("Links open in your default browser. The warning can help protect you from deceptive or malicious content shared in chat.")
+                Toggle("Open links in the background", isOn: $state.opensLinksInBackground)
+                Text("Links open in your default browser. Opening in the background keeps Netsplit in front. The warning can help protect you from deceptive or malicious content shared in chat.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

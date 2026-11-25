@@ -1309,7 +1309,7 @@ private struct ServerProfileCard: View {
             VStack(alignment: .leading, spacing: textMetrics.spacing(7)) {
                 ServerProfileDetailRow(systemImage: profile.useTLS ? "lock.fill" : "exclamationmark.triangle") {
                     HStack(spacing: 6) {
-                        Text(profile.useTLS ? "TLS encrypted" : "Plain-text IRC")
+                        Text(profile.skipsCertificateVerification ? "TLS, certificate not verified" : profile.useTLS ? "TLS encrypted" : "Plain-text IRC")
                         Text(verbatim: "· Port \(profile.port)")
                     }
                 }
@@ -1717,7 +1717,7 @@ private struct ConversationView: View {
                         state.warnBeforeOpeningLinks = false
                     }
                     self.pendingURL = nil
-                    NSWorkspace.shared.open(pendingURL.url)
+                    openInBrowser(pendingURL.url)
                 }
             )
         }
@@ -1732,8 +1732,14 @@ private struct ConversationView: View {
         if state.warnBeforeOpeningLinks {
             pendingURL = PendingURL(url: url)
         } else {
-            NSWorkspace.shared.open(url)
+            openInBrowser(url)
         }
+    }
+
+    private func openInBrowser(_ url: URL) {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = !state.opensLinksInBackground
+        NSWorkspace.shared.open(url, configuration: configuration)
     }
 
     private var composerMaximumBytes: Int? {

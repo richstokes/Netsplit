@@ -21,6 +21,7 @@ struct SSHTunnelConfiguration: Sendable {
     var targetHostname: String
     var targetPort: Int
     var useTLS: Bool
+    var allowInvalidCertificates = false
 }
 
 enum SSHTunnelTLSPolicy {
@@ -32,9 +33,11 @@ enum SSHTunnelTLSPolicy {
         .secp521r1
     ]
 
-    nonisolated static func makeClientConfiguration() -> TLSConfiguration {
+    nonisolated static func makeClientConfiguration(
+        allowInvalidCertificates: Bool = false
+    ) -> TLSConfiguration {
         var configuration = TLSConfiguration.makeClientConfiguration()
-        configuration.certificateVerification = .fullVerification
+        configuration.certificateVerification = allowInvalidCertificates ? .none : .fullVerification
         configuration.curves = supportedCurves
         return configuration
     }
@@ -217,7 +220,9 @@ final class SSHTunnelConnection: IRCDCCSSHTransport {
                             }
                         )
                         if configuration.useTLS {
-                            let tls = SSHTunnelTLSPolicy.makeClientConfiguration()
+                            let tls = SSHTunnelTLSPolicy.makeClientConfiguration(
+                                allowInvalidCertificates: configuration.allowInvalidCertificates
+                            )
                             let context = try NIOSSLContext(configuration: tls)
                             let tlsHandler = try NIOSSLClientHandler(
                                 context: context,

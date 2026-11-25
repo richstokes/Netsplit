@@ -14,6 +14,15 @@ struct IRCTransportBoundaryTests {
         #expect(configuration.curves?.contains(.secp521r1) == true)
     }
 
+    @Test("SSH TLS verifies certificates unless the profile opts out")
+    func sshTLSCertificateVerification() {
+        #expect(SSHTunnelTLSPolicy.makeClientConfiguration().certificateVerification == .fullVerification)
+        #expect(
+            SSHTunnelTLSPolicy.makeClientConfiguration(allowInvalidCertificates: true)
+                .certificateVerification == .none
+        )
+    }
+
     @Test("Reassembles a line when both content and CRLF cross packet boundaries")
     func reassemblesFragmentedLine() {
         var buffer = IRCLineBuffer(maximumLineBytes: 510)

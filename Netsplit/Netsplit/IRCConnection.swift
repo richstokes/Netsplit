@@ -833,7 +833,8 @@ final class IRCConnection {
                     trustedHostKey: profile.sshTrustedHostKey,
                     targetHostname: profile.hostname,
                     targetPort: Int(profile.port),
-                    useTLS: profile.useTLS
+                    useTLS: profile.useTLS,
+                    allowInvalidCertificates: profile.skipsCertificateVerification
                 ),
                 onReady: { [weak self, weak tunnel] in
                     guard let self,
@@ -911,6 +912,15 @@ final class IRCConnection {
         let parameters: NWParameters
         if profile.useTLS {
             let tls = NWProtocolTLS.Options()
+            if profile.skipsCertificateVerification {
+                // Opt-in per server: accept whatever certificate is presented
+                // (self-signed, expired, wrong hostname). Still encrypted.
+                sec_protocol_options_set_verify_block(
+                    tls.securityProtocolOptions,
+                    { _, _, complete in complete(true) },
+                    .global(qos: .userInitiated)
+                )
+            }
             parameters = NWParameters(tls: tls, tcp: tcp)
         } else {
             parameters = NWParameters(tls: nil, tcp: tcp)

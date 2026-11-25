@@ -16,6 +16,28 @@ struct ServerProfileTests {
         ])
     }
 
+    @Test("Certificate validation stays on unless a TLS profile opts out")
+    func certificateValidationOptOut() throws {
+        let legacy = Data(#"{"name":"Old","hostname":"irc.example.org","port":6697,"useTLS":true}"#.utf8)
+        let decoded = try JSONDecoder().decode(ServerProfile.self, from: legacy)
+        #expect(decoded.allowInvalidCertificates == nil)
+        #expect(!decoded.skipsCertificateVerification)
+
+        let bouncer = ServerProfile(
+            name: "ZNC", hostname: "znc.example.org", port: 6697,
+            useTLS: true, allowInvalidCertificates: true
+        )
+        let roundTripped = try JSONDecoder().decode(
+            ServerProfile.self,
+            from: JSONEncoder().encode(bouncer)
+        )
+        #expect(roundTripped.skipsCertificateVerification)
+
+        var plain = bouncer
+        plain.useTLS = false
+        #expect(!plain.skipsCertificateVerification)
+    }
+
     @Test("Disconnecting the selected server chooses the next active server")
     func selectsNextServerAfterDisconnect() {
         let first = UUID()

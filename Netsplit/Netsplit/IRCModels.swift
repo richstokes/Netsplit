@@ -302,6 +302,11 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     var hostname: String
     var port: UInt16
     var useTLS: Bool
+    /// Skips TLS certificate validation for this server, for bouncers and
+    /// private servers that present a self-signed or otherwise untrusted
+    /// certificate. The connection is still encrypted, but the server's
+    /// identity is not verified.
+    var allowInvalidCertificates: Bool?
     var autoConnect: Bool = false
     var isBuiltIn: Bool = false
     var nicknameOverride: String?
@@ -335,6 +340,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         hostname: String,
         port: UInt16,
         useTLS: Bool,
+        allowInvalidCertificates: Bool? = nil,
         autoConnect: Bool = false,
         isBuiltIn: Bool = false,
         nicknameOverride: String? = nil,
@@ -360,6 +366,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         self.hostname = hostname
         self.port = port
         self.useTLS = useTLS
+        self.allowInvalidCertificates = allowInvalidCertificates
         self.autoConnect = autoConnect
         self.isBuiltIn = isBuiltIn
         self.nicknameOverride = nicknameOverride
@@ -382,7 +389,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, hostname, port, useTLS, autoConnect, isBuiltIn
+        case id, name, hostname, port, useTLS, allowInvalidCertificates, autoConnect, isBuiltIn
         case nicknameOverride, realNameOverride, mentionNotificationsOverride, isPresetModified, favoriteChannels, favoriteDirectMessages
         case ignoredNicknames, mutedConversationNames
         case useSASL, saslUsername
@@ -401,6 +408,7 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         hostname = try container.decode(String.self, forKey: .hostname)
         port = try container.decode(UInt16.self, forKey: .port)
         useTLS = try container.decode(Bool.self, forKey: .useTLS)
+        allowInvalidCertificates = try container.decodeIfPresent(Bool.self, forKey: .allowInvalidCertificates)
         autoConnect = try container.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? false
         isBuiltIn = try container.decodeIfPresent(Bool.self, forKey: .isBuiltIn) ?? false
         nicknameOverride = try container.decodeIfPresent(String.self, forKey: .nicknameOverride)
@@ -421,6 +429,11 @@ struct ServerProfile: Identifiable, Codable, Hashable {
         sshKeyFilename = try container.decodeIfPresent(String.self, forKey: .sshKeyFilename)
         sshTrustedHostKey = try container.decodeIfPresent(String.self, forKey: .sshTrustedHostKey)
         presetID = try container.decodeIfPresent(String.self, forKey: .presetID)
+    }
+
+    /// True only when TLS is on and the user opted out of certificate checks.
+    var skipsCertificateVerification: Bool {
+        useTLS && allowInvalidCertificates == true
     }
 
     static let recommended: [ServerProfile] = [

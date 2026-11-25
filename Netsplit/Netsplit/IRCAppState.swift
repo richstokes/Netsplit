@@ -55,6 +55,9 @@ final class IRCAppState: ObservableObject {
     @Published var warnBeforeOpeningLinks: Bool {
         didSet { defaults.set(warnBeforeOpeningLinks, forKey: "warnBeforeOpeningLinks") }
     }
+    @Published var opensLinksInBackground: Bool {
+        didSet { defaults.set(opensLinksInBackground, forKey: "opensLinksInBackground") }
+    }
     @Published var showsCTCPCommandsInUserMenu: Bool {
         didSet {
             defaults.set(
@@ -281,6 +284,7 @@ final class IRCAppState: ObservableObject {
         nicknameCompletionSuffix = defaults.string(forKey: "nicknameCompletionSuffix") ?? ":"
         reconnectAutomatically = defaults.object(forKey: "reconnectAutomatically") as? Bool ?? true
         warnBeforeOpeningLinks = defaults.object(forKey: "warnBeforeOpeningLinks") as? Bool ?? true
+        opensLinksInBackground = defaults.bool(forKey: "opensLinksInBackground")
         showsCTCPCommandsInUserMenu = defaults.object(forKey: "showsCTCPCommandsInUserMenu") as? Bool ?? false
         receivesDCCFiles = IRCDCCPreferences.receivesFiles(in: defaults)
         automaticallySavesDCCFiles = IRCDCCPreferences.automaticallySavesFiles(in: defaults)
@@ -1340,9 +1344,10 @@ final class IRCAppState: ObservableObject {
     }
 
     @discardableResult
-    func addProfile(id: UUID = UUID(), name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, realNameOverride: String, mentionNotificationsOverride: Bool?, credentials: IRCProfileCredentialChanges, useSASL: Bool, saslUsername: String, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshKeyFilename: String?) -> IRCProfileSaveResult {
+    func addProfile(id: UUID = UUID(), name: String, hostname: String, port: UInt16, useTLS: Bool, allowInvalidCertificates: Bool = false, autoConnect: Bool, nicknameOverride: String, realNameOverride: String, mentionNotificationsOverride: Bool?, credentials: IRCProfileCredentialChanges, useSASL: Bool, saslUsername: String, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshKeyFilename: String?) -> IRCProfileSaveResult {
         var profile = ServerProfile(name: name, hostname: hostname, port: port, useTLS: useTLS, autoConnect: autoConnect)
         profile.id = id
+        profile.allowInvalidCertificates = useTLS && allowInvalidCertificates ? true : nil
         let cleanNickname = nicknameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
         profile.nicknameOverride = cleanNickname.isEmpty ? nil : cleanNickname
         let cleanRealName = realNameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1378,13 +1383,18 @@ final class IRCAppState: ObservableObject {
     }
 
     @discardableResult
-    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, autoConnect: Bool, nicknameOverride: String, realNameOverride: String, mentionNotificationsOverride: Bool?, credentials: IRCProfileCredentialChanges, useSASL: Bool, saslUsername: String, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshKeyFilename: String?, resetSSHHostKey: Bool) -> IRCProfileSaveResult {
+    func updateProfile(_ profile: ServerProfile, name: String, hostname: String, port: UInt16, useTLS: Bool, allowInvalidCertificates: Bool? = nil, autoConnect: Bool, nicknameOverride: String, realNameOverride: String, mentionNotificationsOverride: Bool?, credentials: IRCProfileCredentialChanges, useSASL: Bool, saslUsername: String, useSSHTunnel: Bool, sshHostname: String, sshPort: UInt16, sshUsername: String, sshKeyFilename: String?, resetSSHHostKey: Bool) -> IRCProfileSaveResult {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return IRCProfileSaveResult(succeeded: false) }
         var updated = profile
         updated.name = name
         updated.hostname = hostname
         updated.port = port
         updated.useTLS = useTLS
+        // nil keeps the saved choice for callers that do not edit it.
+        if let allowInvalidCertificates {
+            updated.allowInvalidCertificates = allowInvalidCertificates ? true : nil
+        }
+        if !useTLS { updated.allowInvalidCertificates = nil }
         updated.autoConnect = autoConnect
         let cleanNickname = nicknameOverride.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.nicknameOverride = cleanNickname.isEmpty ? nil : cleanNickname
